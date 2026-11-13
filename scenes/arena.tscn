@@ -1,0 +1,93 @@
+[gd_scene format=3 uid="uid://c6f2a7e8b91a0"]
+
+[ext_resource type="Script" path="res://scenes/arena.gd" id="1_arena"]
+[ext_resource type="Script" path="res://visual/grid_renderer.gd" id="2_renderer"]
+[ext_resource type="Environment" path="res://visual/arena_environment.tres" id="3_env"]
+[ext_resource type="Script" path="res://src/Gameplay/SwarmSimulation.cs" id="4_sim"]
+[ext_resource type="Script" path="res://src/Gameplay/PlayerCore.cs" id="5_core"]
+[ext_resource type="Script" path="res://src/Visual/SwarmMultiMeshRenderer.cs" id="6_render"]
+
+[node name="Arena" type="Node2D"]
+script = ExtResource("1_arena")
+
+[node name="BackgroundColor" type="ColorRect" parent="."]
+z_index = -100
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -400.0
+offset_top = -400.0
+offset_right = 4000.0
+offset_bottom = 3000.0
+mouse_filter = 2
+color = Color(0.008, 0.004, 0.015, 1)
+
+[node name="GridRenderer" type="Node2D" parent="."]
+script = ExtResource("2_renderer")
+
+[node name="SwarmSimulation" type="Node2D" parent="."]
+script = ExtResource("4_sim")
+
+[node name="PlayerCore" type="CharacterBody2D" parent="SwarmSimulation"]
+position = Vector2(960, 540)
+script = ExtResource("5_core")
+
+[node name="SwarmRenderer" type="Node2D" parent="SwarmSimulation"]
+script = ExtResource("6_render")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = ExtResource("3_env")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Margin" type="MarginContainer" parent="HUD"]
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 85.0
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 20
+theme_override_constants/margin_right = 24
+
+[node name="VBox" type="VBoxContainer" parent="HUD/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="Title" type="Label" parent="HUD/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(2.2, 1.8, 0.6, 1)
+theme_override_font_sizes/font_size = 18
+text = "GEOMETRY SWARM // C# ARCH ECS BOIDS PROTOTYPE"
+
+[node name="Guide" type="Label" parent="HUD/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.75, 0.65, 0.95, 0.85)
+theme_override_font_sizes/font_size = 13
+text = "WASD: Terbang Kapal Induk Hexagon  |  Mouse: Hadap Kursor & Wake  |  [1]: Tambah +100 Drone Swarm  |  [2]: Perbesar Sarang Lebah Core  |  Klik/Spasi: Shockwave"
+
+[node name="RightMargin" type="MarginContainer" parent="HUD"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -280.0
+offset_bottom = 85.0
+grow_horizontal = 0
+theme_override_constants/margin_top = 20
+theme_override_constants/margin_right = 24
+
+[node name="VBox" type="VBoxContainer" parent="HUD/RightMargin"]
+layout_mode = 2
+theme_override_constants/separation = 2
+
+[node name="FpsLabel" type="Label" parent="HUD/RightMargin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 2.5, 1.2, 1)
+theme_override_font_sizes/font_size = 18
+horizontal_alignment = 2
+text = "FPS: 60"
+
+[node name="SwarmLabel" type="Label" parent="HUD/RightMargin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.4, 2.0, 2.6, 0.9)
+theme_override_font_sizes/font_size = 14
+horizontal_alignment = 2
+text = "SWARM: 400"
