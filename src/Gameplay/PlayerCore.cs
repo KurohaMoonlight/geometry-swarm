@@ -10,12 +10,19 @@ namespace GeometrySwarm.Gameplay;
 /// - Ukuran HexRadius diperkecil menjadi 16.0 px (diameter ~28 px) sehingga mudah masuk ke dalam
 ///   terowongan yang digali oleh laser Mining Droid (terutama pada 15+ Miner / lebar >= 2 blok).
 /// - Menggunakan Zero-Lag Circle-to-Grid Voxel Collision terhadap sel 13 px Asteroid.
+/// - Mendukung Sacrificial Plasma Boost [SPACE] dengan batas kecepatan atas (BoostMaxSpeed).
 /// </summary>
 public partial class PlayerCore : CharacterBody2D
 {
     [Export] public float Acceleration { get; set; } = 2200.0f;
     [Export] public float Friction { get; set; } = 0.91f;
     [Export] public float MaxSpeed { get; set; } = 420.0f;
+    [Export] public float BoostMaxSpeed { get; set; } = 1050.0f;
+
+    public bool IsBoosting { get; set; } = false;
+    public Vector2 BoostThrustVector { get; set; } = Vector2.Zero;
+    public bool IsBraking { get; set; } = false;
+    public Vector2 BrakeThrustVector { get; set; } = Vector2.Zero;
 
     // Ukuran Hexagon diperkecil dari 24 px ke 16 px agar lincah bermanuver di dalam terowongan
     public const float HexRadius = 16.0f;
@@ -248,72 +255,98 @@ public partial class PlayerCore : CharacterBody2D
         {
             float dt = (float)delta;
 
-        // Pembaruan Animasi Fabrikasi Swarm (Hologram 3D Nanite Print)
-        if (_fabricationBursts.Count > 0)
-        {
-            for (int i = _fabricationBursts.Count - 1; i >= 0; i--)
+            // Pembaruan Animasi Fabrikasi Swarm (Hologram 3D Nanite Print)
+            if (_fabricationBursts.Count > 0)
             {
-                var fb = _fabricationBursts[i];
-                fb.Timer -= dt;
-                if (fb.Timer <= 0.0f)
+                for (int i = _fabricationBursts.Count - 1; i >= 0; i--)
                 {
-                    _fabricationBursts.RemoveAt(i);
+                    var fb = _fabricationBursts[i];
+                    fb.Timer -= dt;
+                    if (fb.Timer <= 0.0f)
+                    {
+                        _fabricationBursts.RemoveAt(i);
+                    }
+                    else
+                    {
+                        _fabricationBursts[i] = fb;
+                    }
+                }
+                QueueRedraw();
+            }
+
+            // Pembaruan Animasi Pembelahan Sel (Mitosis)
+            if (IsMitosisActive)
+            {
+                MitosisTimer += dt;
+                MitosisProgress = Mathf.Clamp(MitosisTimer / MitosisDuration, 0.0f, 1.0f);
+                QueueRedraw();
+
+                if (MitosisTimer >= MitosisDuration)
+                {
+                    CompleteCurrentMitosis();
+                }
+            }
+
+            Vector2 inputDir = Vector2.Zero;
+            if (Input.IsActionPressed("ui_right") || Input.IsKeyPressed(Key.D)) inputDir.X += 1.0f;
+            if (Input.IsActionPressed("ui_left") || Input.IsKeyPressed(Key.A)) inputDir.X -= 1.0f;
+            if (Input.IsActionPressed("ui_down") || Input.IsKeyPressed(Key.S)) inputDir.Y += 1.0f;
+            if (Input.IsActionPressed("ui_up") || Input.IsKeyPressed(Key.W)) inputDir.Y -= 1.0f;
+
+            if (inputDir.LengthSquared() > 0.01f)
+            {
+                inputDir = inputDir.Normalized();
+                Velocity += inputDir * (Acceleration * dt);
+            }
+
+            // Dorongan Plasma Boost dari Dart [SPACE]
+            if (IsBoosting && BoostThrustVector.LengthSquared() > 0.01f)
+            {
+                Velocity += BoostThrustVector * dt;
+            }
+
+            // Pengereman Retro-Rocket aktif dari Dart di depan arah gerak
+            if (IsBraking && BrakeThrustVector.LengthSquared() > 0.01f)
+            {
+                Velocity += BrakeThrustVector * dt;
+                Velocity *= MathF.Pow(0.85f, dt * 60.0f);
+            }
+
+            Velocity *= MathF.Pow(Friction, dt * 60.0f);
+
+            float activeMaxSpeed = IsBoosting ? BoostMaxSpeed : MaxSpeed;
+            float speedSq = Velocity.LengthSquared();
+            if (speedSq > activeMaxSpeed * activeMaxSpeed)
+            {
+                if (IsBoosting)
+                {
+                    Velocity = Velocity.Normalized() * activeMaxSpeed;
                 }
                 else
                 {
-                    _fabricationBursts[i] = fb;
+                    // Peredaman aerodinamis halus kembali ke MaxSpeed setelah lepas tombol Space
+                    float curSpeed = MathF.Sqrt(speedSq);
+                    float dampedSpeed = Mathf.Lerp(curSpeed, MaxSpeed, MathF.Min(1.0f, 8.5f * dt));
+                    Velocity = (Velocity / curSpeed) * dampedSpeed;
                 }
             }
-            QueueRedraw();
-        }
 
-        // Pembaruan Animasi Pembelahan Sel (Mitosis)
-        if (IsMitosisActive)
-        {
-            MitosisTimer += dt;
-            MitosisProgress = Mathf.Clamp(MitosisTimer / MitosisDuration, 0.0f, 1.0f);
-            QueueRedraw();
+            GlobalPosition += Velocity * dt;
 
-            if (MitosisTimer >= MitosisDuration)
+            ResolveAsteroidVoxelCollisions();
+
+            Vector2 mousePos = GetGlobalMousePosition();
+            Vector2 toMouse = mousePos - GlobalPosition;
+            if (toMouse.LengthSquared() > 10.0f)
             {
-                CompleteCurrentMitosis();
+                Rotation = Mathf.LerpAngle(Rotation, toMouse.Angle() + Mathf.Pi * 0.5f, 14.0f * dt);
             }
         }
-
-        Vector2 inputDir = Vector2.Zero;
-        if (Input.IsActionPressed("ui_right") || Input.IsKeyPressed(Key.D)) inputDir.X += 1.0f;
-        if (Input.IsActionPressed("ui_left") || Input.IsKeyPressed(Key.A)) inputDir.X -= 1.0f;
-        if (Input.IsActionPressed("ui_down") || Input.IsKeyPressed(Key.S)) inputDir.Y += 1.0f;
-        if (Input.IsActionPressed("ui_up") || Input.IsKeyPressed(Key.W)) inputDir.Y -= 1.0f;
-
-        if (inputDir.LengthSquared() > 0.01f)
+        catch (Exception ex)
         {
-            inputDir = inputDir.Normalized();
-            Velocity += inputDir * (Acceleration * dt);
-        }
-
-        Velocity *= MathF.Pow(Friction, dt * 60.0f);
-        if (Velocity.LengthSquared() > MaxSpeed * MaxSpeed)
-        {
-            Velocity = Velocity.Normalized() * MaxSpeed;
-        }
-
-        GlobalPosition += Velocity * dt;
-
-        ResolveAsteroidVoxelCollisions();
-
-        Vector2 mousePos = GetGlobalMousePosition();
-        Vector2 toMouse = mousePos - GlobalPosition;
-        if (toMouse.LengthSquared() > 10.0f)
-        {
-            Rotation = Mathf.LerpAngle(Rotation, toMouse.Angle() + Mathf.Pi * 0.5f, 14.0f * dt);
+            GD.PrintErr($"[PlayerCore._PhysicsProcess] {ex}");
         }
     }
-    catch (Exception ex)
-    {
-        GD.PrintErr($"[PlayerCore._PhysicsProcess] {ex}");
-    }
-}
 
     private void ResolveAsteroidVoxelCollisions()
     {
@@ -367,148 +400,134 @@ public partial class PlayerCore : CharacterBody2D
                 DrawCircle(offset, 2.6f, CenterPulseColor);
             }
 
-        // 2. Gambar Animasi Mitosis Dinamis (Proses Biologis-Geometris Pembelahan Sel)
-        if (IsMitosisActive)
-        {
-            float t = MitosisProgress;
-            Vector2 p0 = _mitosisParentOffset;
-            Vector2 p1 = _mitosisTargetOffset;
-
-            // FASE 1: Interfase & Duplikasi Nukleus (0.00 - 0.22)
-            // Sel induk berdenyut kuat dan inti sel anak mulai lahir di pusatnya
-            if (t < 0.22f)
+            // 2. Gambar Animasi Mitosis Dinamis (Proses Biologis-Geometris Pembelahan Sel)
+            if (IsMitosisActive)
             {
-                float p = t / 0.22f;
-                float pulse = 1.0f + 0.28f * MathF.Sin(MitosisTimer * 22.0f);
-                DrawCircle(p0, HexRadius * 1.32f * pulse, new Color(2.5f, 1.9f, 0.4f, 0.38f));
+                float t = MitosisProgress;
+                Vector2 p0 = _mitosisParentOffset;
+                Vector2 p1 = _mitosisTargetOffset;
 
-                float childNucRadius = Mathf.Lerp(1.2f, 5.0f, p);
-                Vector2 microJitter = new Vector2(GD.Randf() - 0.5f, GD.Randf() - 0.5f) * 2.0f;
-                DrawCircle(p0 + microJitter, childNucRadius, new Color(3.6f, 3.2f, 1.4f, 0.95f));
-                DrawCircle(p0, 2.8f, CenterPulseColor);
-            }
-            // FASE 2: Anafase & Peregangan Membran Sitokinesis (0.22 - 0.82)
-            // Sel anak bergerak ke posisi target, membran saling meregang dan menyempit di tengah (waist)
-            else if (t < 0.82f)
-            {
-                float p = (t - 0.22f) / 0.60f;
-                float pEased = Mathf.SmoothStep(0.0f, 1.0f, p);
-                Vector2 childPos = p0.Lerp(p1, pEased);
-
-                // Sel induk tetap bersinar aktif
-                DrawCircle(p0, HexRadius * 1.20f, new Color(2.3f, 1.7f, 0.4f, 0.30f));
-
-                // Hitung jembatan membran sitokinesis (Cytokinetic Bridge with pinched waist)
-                Vector2 diff = childPos - p0;
-                Vector2 dir = diff.LengthSquared() > 0.01f ? diff.Normalized() : Vector2.Right;
-                Vector2 normal = new Vector2(-dir.Y, dir.X);
-                Vector2 mid = (p0 + childPos) * 0.5f;
-
-                float parentWaist = HexRadius * 0.92f;
-                float childWaist = HexRadius * Mathf.Lerp(0.48f, 0.88f, pEased);
-                float midWaist = Mathf.Lerp(HexRadius * 0.72f, 2.4f, pEased);
-
-                Vector2 ptParentL = p0 + normal * parentWaist;
-                Vector2 ptParentR = p0 - normal * parentWaist;
-                Vector2 ptMidL = mid + normal * midWaist;
-                Vector2 ptMidR = mid - normal * midWaist;
-                Vector2 ptChildL = childPos + normal * childWaist;
-                Vector2 ptChildR = childPos - normal * childWaist;
-
-                var leftStrand = new Vector2[] { ptParentL, ptMidL, ptChildL };
-                var rightStrand = new Vector2[] { ptParentR, ptMidR, ptChildR };
-                Color strandColor = new Color(2.9f, 2.3f, 0.75f, 0.90f);
-                Color auraStrandColor = new Color(1.3f, 0.9f, 0.25f, 0.50f);
-
-                DrawPolyline(leftStrand, auraStrandColor, 3.4f);
-                DrawPolyline(leftStrand, strandColor, 1.7f);
-                DrawPolyline(rightStrand, auraStrandColor, 3.4f);
-                DrawPolyline(rightStrand, strandColor, 1.7f);
-
-                // Busur plasma listrik di poros tengah sel yang sedang membelah
-                Vector2 arcJitter = normal * (MathF.Sin(MitosisTimer * 38.0f) * 2.8f);
-                DrawLine(p0, mid + arcJitter, new Color(3.8f, 3.2f, 1.6f, 0.98f), 2.0f);
-                DrawLine(mid + arcJitter, childPos, new Color(3.8f, 3.2f, 1.6f, 0.98f), 2.0f);
-
-                // Membran sel anak yang sedang mekar
-                float childRadius = Mathf.Lerp(HexRadius * 0.48f, HexRadius * 0.95f, pEased);
-                DrawCircle(childPos, childRadius, new Color(1.8f, 1.4f, 0.35f, 0.40f));
-                DrawArc(childPos, childRadius, 0.0f, Mathf.Tau, 16, strandColor, 1.9f);
-                DrawCircle(childPos, 3.4f, CenterPulseColor);
-            }
-            // FASE 3: Telofase, Putusnya Jembatan & Kristalisasi Hexagon (0.82 - 1.00)
-            // Membran putus dengan gelombang kejut cincin energi emas dan memantul (overshoot bounce)
-            else
-            {
-                float q = (t - 0.82f) / 0.18f;
-
-                // Gelombang kejut cincin energi melingkar saat membran terpisah sempurna
-                float ringRad = HexRadius * (0.85f + q * 1.9f);
-                float ringAlpha = MathF.Max(0.0f, 1.0f - q);
-                DrawArc(p1, ringRad, 0.0f, Mathf.Tau, 24, new Color(3.7f, 3.1f, 1.4f, ringAlpha), 2.4f);
-
-                // Efek pantulan elastis hexagon (Spring overshoot snap)
-                float bounce = 1.0f + 0.25f * (1.0f - q) * MathF.Sin(q * Mathf.Pi * 3.5f);
-                Vector2[] snapHex = BuildHexPoints(p1, HexRadius * bounce);
-
-                Color snapLine = new Color(3.4f, 2.7f, 0.95f, 1.0f);
-                Color snapAura = new Color(2.2f, 1.6f, 0.45f, 0.75f);
-                DrawPolyline(snapHex, snapAura, 3.8f);
-                DrawPolyline(snapHex, snapLine, 2.2f);
-                DrawCircle(p1, 4.0f * bounce, CenterPulseColor);
-
-                // Percikan partikel mikro energi keluar
-                for (int s = 0; s < 6; s++)
+                // FASE 1: Interfase & Duplikasi Nukleus (0.00 - 0.22)
+                if (t < 0.22f)
                 {
-                    float spkAngle = (float)s / 6.0f * Mathf.Tau + q * 2.0f;
-                    Vector2 spkDir = new Vector2(MathF.Cos(spkAngle), MathF.Sin(spkAngle));
-                    Vector2 spkPos = p1 + spkDir * (HexRadius * (0.95f + q * 1.3f));
-                    DrawCircle(spkPos, 1.8f * (1.0f - q), CenterPulseColor);
+                    float p = t / 0.22f;
+                    float pulse = 1.0f + 0.28f * MathF.Sin(MitosisTimer * 22.0f);
+                    DrawCircle(p0, HexRadius * 1.32f * pulse, new Color(2.5f, 1.9f, 0.4f, 0.38f));
+
+                    float childNucRadius = Mathf.Lerp(1.2f, 5.0f, p);
+                    Vector2 microJitter = new Vector2(GD.Randf() - 0.5f, GD.Randf() - 0.5f) * 2.0f;
+                    DrawCircle(p0 + microJitter, childNucRadius, new Color(3.6f, 3.2f, 1.4f, 0.95f));
+                    DrawCircle(p0, 2.8f, CenterPulseColor);
+                }
+                // FASE 2: Anafase & Peregangan Membran Sitokinesis (0.22 - 0.82)
+                else if (t < 0.82f)
+                {
+                    float p = (t - 0.22f) / 0.60f;
+                    float pEased = Mathf.SmoothStep(0.0f, 1.0f, p);
+                    Vector2 childPos = p0.Lerp(p1, pEased);
+
+                    DrawCircle(p0, HexRadius * 1.20f, new Color(2.3f, 1.7f, 0.4f, 0.30f));
+
+                    Vector2 diff = childPos - p0;
+                    Vector2 dir = diff.LengthSquared() > 0.01f ? diff.Normalized() : Vector2.Right;
+                    Vector2 normal = new Vector2(-dir.Y, dir.X);
+                    Vector2 mid = (p0 + childPos) * 0.5f;
+
+                    float parentWaist = HexRadius * 0.92f;
+                    float childWaist = HexRadius * Mathf.Lerp(0.48f, 0.88f, pEased);
+                    float midWaist = Mathf.Lerp(HexRadius * 0.72f, 2.4f, pEased);
+
+                    Vector2 ptParentL = p0 + normal * parentWaist;
+                    Vector2 ptParentR = p0 - normal * parentWaist;
+                    Vector2 ptMidL = mid + normal * midWaist;
+                    Vector2 ptMidR = mid - normal * midWaist;
+                    Vector2 ptChildL = childPos + normal * childWaist;
+                    Vector2 ptChildR = childPos - normal * childWaist;
+
+                    var leftStrand = new Vector2[] { ptParentL, ptMidL, ptChildL };
+                    var rightStrand = new Vector2[] { ptParentR, ptMidR, ptChildR };
+                    Color strandColor = new Color(2.9f, 2.3f, 0.75f, 0.90f);
+                    Color auraStrandColor = new Color(1.3f, 0.9f, 0.25f, 0.50f);
+
+                    DrawPolyline(leftStrand, auraStrandColor, 3.4f);
+                    DrawPolyline(leftStrand, strandColor, 1.7f);
+                    DrawPolyline(rightStrand, auraStrandColor, 3.4f);
+                    DrawPolyline(rightStrand, strandColor, 1.7f);
+
+                    Vector2 arcJitter = normal * (MathF.Sin(MitosisTimer * 38.0f) * 2.8f);
+                    DrawLine(p0, mid + arcJitter, new Color(3.8f, 3.2f, 1.6f, 0.98f), 2.0f);
+                    DrawLine(mid + arcJitter, childPos, new Color(3.8f, 3.2f, 1.6f, 0.98f), 2.0f);
+
+                    float childRadius = Mathf.Lerp(HexRadius * 0.48f, HexRadius * 0.95f, pEased);
+                    DrawCircle(childPos, childRadius, new Color(1.8f, 1.4f, 0.35f, 0.40f));
+                    DrawArc(childPos, childRadius, 0.0f, Mathf.Tau, 16, strandColor, 1.9f);
+                    DrawCircle(childPos, 3.4f, CenterPulseColor);
+                }
+                // FASE 3: Telofase, Putusnya Jembatan & Kristalisasi Hexagon (0.82 - 1.00)
+                else
+                {
+                    float q = (t - 0.82f) / 0.18f;
+
+                    float ringRad = HexRadius * (0.85f + q * 1.9f);
+                    float ringAlpha = MathF.Max(0.0f, 1.0f - q);
+                    DrawArc(p1, ringRad, 0.0f, Mathf.Tau, 24, new Color(3.7f, 3.1f, 1.4f, ringAlpha), 2.4f);
+
+                    float bounce = 1.0f + 0.25f * (1.0f - q) * MathF.Sin(q * Mathf.Pi * 3.5f);
+                    Vector2[] snapHex = BuildHexPoints(p1, HexRadius * bounce);
+
+                    Color snapLine = new Color(3.4f, 2.7f, 0.95f, 1.0f);
+                    Color snapAura = new Color(2.2f, 1.6f, 0.45f, 0.75f);
+                    DrawPolyline(snapHex, snapAura, 3.8f);
+                    DrawPolyline(snapHex, snapLine, 2.2f);
+                    DrawCircle(p1, 4.0f * bounce, CenterPulseColor);
+
+                    for (int s = 0; s < 6; s++)
+                    {
+                        float spkAngle = (float)s / 6.0f * Mathf.Tau + q * 2.0f;
+                        Vector2 spkDir = new Vector2(MathF.Cos(spkAngle), MathF.Sin(spkAngle));
+                        Vector2 spkPos = p1 + spkDir * (HexRadius * (0.95f + q * 1.3f));
+                        DrawCircle(spkPos, 1.8f * (1.0f - q), CenterPulseColor);
+                    }
                 }
             }
-        }
 
-        // 3. Gambar Animasi Fabrikasi Nanite 3D Hologram & Ejection Flash (Konsep 1 & 2)
-        for (int i = 0; i < _fabricationBursts.Count; i++)
-        {
-            var fb = _fabricationBursts[i];
-            float t = fb.Timer / fb.MaxDuration; // 1.0 -> 0.0
-            float sinT = MathF.Sin(t * Mathf.Pi);
-            Vector2 p = fb.LocalPos;
-
-            // A. Berkas Laser Nanite Konvergen dari 6 Sudut Hexagon ke Pusat Sel
-            Vector2[] corners = BuildHexPoints(p, HexRadius);
-            Color beamCol = fb.ThemeColor * 1.8f;
-            beamCol.A = sinT * 0.85f;
-            for (int c = 0; c < 6; c++)
+            // 3. Gambar Animasi Fabrikasi Nanite 3D Hologram & Ejection Flash (Konsep 1 & 2)
+            for (int i = 0; i < _fabricationBursts.Count; i++)
             {
-                DrawLine(corners[c], p, beamCol, 1.6f);
+                var fb = _fabricationBursts[i];
+                float t = fb.Timer / fb.MaxDuration; // 1.0 -> 0.0
+                float sinT = MathF.Sin(t * Mathf.Pi);
+                Vector2 p = fb.LocalPos;
+
+                Vector2[] corners = BuildHexPoints(p, HexRadius);
+                Color beamCol = fb.ThemeColor * 1.8f;
+                beamCol.A = sinT * 0.85f;
+                for (int c = 0; c < 6; c++)
+                {
+                    DrawLine(corners[c], p, beamCol, 1.6f);
+                }
+
+                float ringRad = HexRadius * (0.25f + (1.0f - t) * 1.35f);
+                Color ringCol = fb.ThemeColor * 2.2f;
+                ringCol.A = t * 0.90f;
+                DrawArc(p, ringRad, 0.0f, Mathf.Tau, 20, ringCol, 2.0f);
+
+                float glyphAngle = (1.0f - t) * Mathf.Tau * 2.2f;
+                float glyphScale = sinT * (HexRadius * 0.72f);
+                Color holoCol = fb.ThemeColor * 2.5f;
+                holoCol.A = sinT;
+
+                DrawHolographicGlyph(p, fb.Role, glyphScale, glyphAngle, holoCol);
+
+                float flashRadius = Mathf.Lerp(6.5f, 2.8f, 1.0f - t);
+                DrawCircle(p, flashRadius, fb.ThemeColor * (1.5f + sinT * 1.5f));
             }
-
-            // B. Gelombang Cincin Kejut Fabrikasi (Aperture Shockwave)
-            float ringRad = HexRadius * (0.25f + (1.0f - t) * 1.35f);
-            Color ringCol = fb.ThemeColor * 2.2f;
-            ringCol.A = t * 0.90f;
-            DrawArc(p, ringRad, 0.0f, Mathf.Tau, 20, ringCol, 2.0f);
-
-            // C. Proyeksi Hologram Kawat (3D Wireframe Glyph) Berputar di atas Sel
-            float glyphAngle = (1.0f - t) * Mathf.Tau * 2.2f;
-            float glyphScale = sinT * (HexRadius * 0.72f);
-            Color holoCol = fb.ThemeColor * 2.5f;
-            holoCol.A = sinT;
-
-            DrawHolographicGlyph(p, fb.Role, glyphScale, glyphAngle, holoCol);
-
-            // D. Aperture Flash Terang di Lubang Palka Pusat Hexagon
-            float flashRadius = Mathf.Lerp(6.5f, 2.8f, 1.0f - t);
-            DrawCircle(p, flashRadius, fb.ThemeColor * (1.5f + sinT * 1.5f));
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[PlayerCore._Draw] {ex}");
         }
     }
-    catch (Exception ex)
-    {
-        GD.PrintErr($"[PlayerCore._Draw] {ex}");
-    }
-}
 
     private void DrawHolographicGlyph(Vector2 center, SwarmRole role, float size, float angle, Color color)
     {

@@ -8,8 +8,8 @@ const GigaDrillVFXClass = preload("res://visual/giga_drill_vfx.gd")
 ## Arena Controller (Dioptimalkan untuk 60+ FPS Stabil)
 ## - Grid belakang di-snap ke koordinat dunia (kelipatan cell_size) sehingga TIDAK ikut bergeser
 ##   saat kapal bergerak.
-## - Gerakan kapal hanya memberikan getaran mikro sangat kecil tepat di bawah kapal (atau diam saat pelan).
-## - GridRenderer HANYA digambar ulang (queue_redraw) ketika ada perubahan nyata pada titik aktif.
+## - Di belakang grid terdapat 3 lapis partikel bintang parallax yang sangat ringan.
+## - Mendukung efek riak & gelombang kejut grid saat Sacrificial Dart Boost [SPACE] aktif.
 
 @onready var grid_renderer: GridRendererClass = $GridRenderer
 @onready var world_env: WorldEnvironment = $WorldEnvironment
@@ -49,6 +49,8 @@ func _ready() -> void:
 			swarm_sim.connect("GigaDrillDetonated", Callable(self, "_on_giga_drill_detonated"))
 		if swarm_sim.has_signal("GigaDrillNoseBreached"):
 			swarm_sim.connect("GigaDrillNoseBreached", Callable(self, "_on_giga_drill_nose_breached"))
+		if swarm_sim.has_signal("BoostDartSacrificed"):
+			swarm_sim.connect("BoostDartSacrificed", Callable(self, "_on_boost_dart_sacrificed"))
 
 	_update_grid_size()
 	grid_renderer.bind_physics(grid_physics)
@@ -78,6 +80,11 @@ func _on_giga_drill_nose_breached(breach_pos: Vector2, aim_dir: Vector2, count: 
 		grid_physics.apply_radial_impulse(breach_pos, 2100.0, 280.0)
 	trigger_shake(11.0)
 
+func _on_boost_dart_sacrificed(nozzle_pos: Vector2, _aim_dir: Vector2, power_ratio: float) -> void:
+	if grid_physics:
+		grid_physics.apply_radial_impulse(nozzle_pos, 580.0 + 480.0 * power_ratio, 155.0)
+	trigger_shake(1.6 + 2.6 * power_ratio)
+
 func _process(delta: float) -> void:
 	if screen_shake_intensity > 0.05:
 		var offset: Vector2 = Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * screen_shake_intensity
@@ -88,19 +95,29 @@ func _process(delta: float) -> void:
 
 	var grid_dirty: bool = false
 
-	# 0. Sinkronisasi jendela grid dengan kelipatan cell_size (Grid tetap DIAM di ruang dunia!)
+	# 0. Sinkronisasi jendela grid & posisi kamera untuk parallax bintang
 	if player_core:
 		if grid_physics.sync_window_to_center(player_core.global_position, half_grid_size):
 			grid_dirty = true
+		if grid_renderer.update_view(player_core.global_position, delta):
+			grid_dirty = true
 
-	# 1. Gerakan Kapal Induk: Grid belakang tidak ikut bergeser; hanya bergetar sangat tipis tepat di bawah Core
+	# 1. Gerakan Kapal Induk: Grid belakang bergetar tipis tepat di bawah Core
 	if player_core and "velocity" in player_core:
 		var p_vel: Vector2 = player_core.velocity
 		if p_vel.length_squared() > 9000.0:
 			grid_physics.apply_wake_impulse(player_core.global_position, p_vel * 0.12, player_wake_radius)
 			
-	# 2. Efek Robekan Ruang-Waktu & Semburan Rocket Exhaust dari Super Giga Drill
+	# 2. Efek Riak Plasma Boost [SPACE] & Super Giga Drill [RMB]
 	if swarm_sim:
+		var is_boosting: bool = swarm_sim.get("IsBoostActive") == true
+		if is_boosting:
+			var nozzle_pos: Vector2 = swarm_sim.get("BoostNozzlePosition")
+			var b_aim_dir: Vector2 = swarm_sim.get("BoostAimDirection")
+			var b_power: float = float(swarm_sim.get("BoostPowerRatio"))
+			var b_pulse: float = float(swarm_sim.get("BoostPulseTime"))
+			grid_physics.apply_boost_jet_impulse(nozzle_pos, b_aim_dir, b_power, b_pulse, delta)
+
 		var is_charging: bool = swarm_sim.get("IsChargingDrill") == true
 		var is_active: bool = swarm_sim.get("IsGigaDrillActive") == true
 		
@@ -125,7 +142,7 @@ func _process(delta: float) -> void:
 				delta
 			)
 			
-	# 3. Step fisika hanya jika ada titik aktif, dan hanya queue_redraw jika berubah!
+	# 3. Step fisika hanya jika ada titik aktif, dan queue_redraw jika ada perubahan grid atau parallax bintang
 	if grid_physics.step(delta) or grid_dirty:
 		grid_renderer.queue_redraw()
 	
@@ -142,22 +159,27 @@ func _process(delta: float) -> void:
 			var launched: int = swarm_sim.LaunchedCount
 			var returning: int = swarm_sim.ReturningCount
 			var cores: int = swarm_sim.CoreCellCount
+			var darts: int = int(swarm_sim.get("DartNeedleCount"))
 			var guardians: int = swarm_sim.GuardianCount
 			var scanners: int = swarm_sim.ScannerCount
 			var miners: int = swarm_sim.MiningCount
 			var enemies: int = swarm_sim.EnemyCount
 			var charge_ratio: float = swarm_sim.DrillChargeRatio
 			var is_charging: bool = swarm_sim.IsChargingDrill
+			var is_boosting: bool = swarm_sim.get("IsBoostActive") == true
 			
-			var charge_text: String = ""
+			var status_text: String = ""
 			if is_charging:
-				charge_text = " ★ [ GIGA DRILL: %d%% ]" % int(charge_ratio * 100.0)
+				status_text = " ★ [ GIGA DRILL: %d%% ]" % int(charge_ratio * 100.0)
 			elif swarm_sim.IsGigaDrillActive:
-				charge_text = " ★ [ GIGA DRILL LAUNCHED! ]"
+				status_text = " ★ [ GIGA DRILL LAUNCHED! ]"
+			elif is_boosting:
+				var b_pct: int = int(float(swarm_sim.get("BoostPowerRatio")) * 100.0)
+				status_text = " ⚡ [ PLASMA BOOST: %d%% ]" % b_pct
 				
 			var enemy_text: String = (" | ENEMY: %d" % enemies) if enemies > 0 else ""
-			swarm_label.text = "SWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d%s ]\nSCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d" % [
-				total, charge_text, orbiting, launched, returning, enemy_text, scanners, miners, guardians, cores
+			swarm_label.text = "SWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d%s ]\nDARTS: %d | SCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d" % [
+				total, status_text, orbiting, launched, returning, enemy_text, darts, scanners, miners, guardians, cores
 			]
 
 func _unhandled_input(event: InputEvent) -> void:

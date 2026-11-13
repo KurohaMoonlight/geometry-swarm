@@ -3,8 +3,8 @@ extends RefCounted
 
 ## GridPhysics - Dioptimalkan dengan Active Bounds, Dirty Sleep, & World-Space Cell Snapping
 ## - Saat tidak ada gangguan aktif, simulasi otomatis masuk mode tidur (is_sleeping = true) -> 0 ms CPU.
-## - Saat ada riakan kecil atau Giga Drill, simulasi HANYA menghitung titik di dalam kotak area aktif
-##   (active_bounds), bukan seluruh ribuan titik grid di layar.
+## - Saat ada riakan kecil, Sacrificial Dart Boost, atau Giga Drill, simulasi HANYA menghitung titik
+##   di dalam kotak area aktif (active_bounds), bukan seluruh ribuan titik grid di layar.
 ## - Pergeseran kamera menggunakan pencocokan kelipatan cell_size (snap) sehingga grid latar belakang
 ##   tetap diam di ruang angkasa saat kapal bergerak dan hanya bergeser mikro jika benar-benar disentuh.
 
@@ -217,7 +217,6 @@ func apply_wake_impulse(world_pos: Vector2, move_velocity: Vector2, radius: floa
 				var falloff: float = 1.0 - (dist / radius)
 				var smooth_f: float = falloff * falloff
 				var outward: Vector2 = diff / maxf(dist, 0.01)
-				# Dorongan mikro sangat halus (hanya bergetar sedikit di bawah kapal)
 				var force: Vector2 = (move_dir * 0.4 + outward * 0.6) * (speed * 0.045 * smooth_f)
 				velocities[idx] += force
 
@@ -241,6 +240,66 @@ func apply_radial_impulse(world_pos: Vector2, strength: float, radius: float) ->
 				var falloff: float = 1.0 - (dist / radius)
 				var smooth_f: float = falloff * falloff * (3.0 - 2.0 * falloff)
 				velocities[idx] += dir * (strength * smooth_f)
+
+## Efek riak dan semburan plasma jet pada grid background saat Sacrificial Dart Boost [SPACE] aktif
+func apply_boost_jet_impulse(
+	nozzle_pos: Vector2,
+	aim_dir: Vector2,
+	power_ratio: float,
+	pulse_time: float,
+	delta: float
+) -> void:
+	if total_points == 0 or power_ratio <= 0.01:
+		return
+		
+	var dt: float = minf(delta, 0.033)
+	var dir: Vector2 = aim_dir.normalized() if aim_dir.length_squared() > 0.001 else Vector2.RIGHT
+	var tangent: Vector2 = Vector2(-dir.y, dir.x)
+	
+	var exhaust_len: float = lerpf(140.0, 295.0, power_ratio)
+	var plume_max_r: float = lerpf(56.0, 118.0, power_ratio)
+	var center_pos: Vector2 = nozzle_pos - dir * (exhaust_len * 0.40)
+	var bounds: Rect2i = _get_grid_bounds(center_pos, exhaust_len * 0.65 + plume_max_r)
+	_mark_active_bounds(bounds)
+	
+	for r in range(bounds.position.y, bounds.end.y):
+		var row_offset: int = r * cols
+		for c in range(bounds.position.x, bounds.end.x):
+			var idx: int = row_offset + c
+			var p: Vector2 = base_positions[idx]
+			var rel: Vector2 = p - nozzle_pos
+			var axial: float = rel.dot(dir)
+			var lateral: float = rel.dot(tangent)
+			var abs_lat: float = absf(lateral)
+			
+			# 1. Gelombang kejut kompresi depan/samping kapal saat melesat (Bow Ripple)
+			if axial >= -15.0 and axial <= 80.0:
+				var bow_r: float = 72.0
+				if abs_lat < bow_r:
+					var lat_f: float = 1.0 - (abs_lat / bow_r)
+					var ax_f: float = 1.0 - clampf(absf(axial - 28.0) / 52.0, 0.0, 1.0)
+					var side_sign: float = 1.0 if lateral >= 0.0 else -1.0
+					var bow_push: Vector2 = (tangent * (side_sign * 560.0) + dir * 250.0) * (lat_f * ax_f * power_ratio)
+					velocities[idx] += bow_push * dt
+					rift_heat[idx] = clampf(rift_heat[idx] + lat_f * ax_f * power_ratio * dt * 8.5, 0.0, 1.4)
+			
+			# 2. Semburan Plasma Beam Pendorong di belakang kapal (-aim_dir)
+			if axial < 12.0 and axial >= -exhaust_len:
+				var back_dist: float = maxf(0.0, -axial)
+				var back_ratio: float = clampf(back_dist / exhaust_len, 0.0, 1.0)
+				var plume_half_w: float = lerpf(28.0, plume_max_r, back_ratio)
+				
+				if abs_lat < plume_half_w:
+					var lat_f: float = 1.0 - (abs_lat / plume_half_w)
+					var axial_f: float = 1.0 - back_ratio
+					var intensity: float = lat_f * lat_f * axial_f * power_ratio
+					
+					var ripple_wave: float = 1.0 + 0.48 * sin(back_dist * 0.13 - pulse_time * 1.5)
+					var side_spread: float = (lateral / maxf(1.0, plume_half_w)) * 0.52
+					var jet_dir: Vector2 = (-dir + tangent * side_spread).normalized()
+					
+					velocities[idx] += jet_dir * (1750.0 * intensity * ripple_wave * dt)
+					rift_heat[idx] = clampf(rift_heat[idx] + intensity * ripple_wave * dt * 17.5, 0.0, 1.85)
 
 func apply_giga_drill_spacetime_and_exhaust(
 	tip_pos: Vector2,
@@ -339,7 +398,6 @@ func sync_window_to_center(world_center: Vector2, half_grid_size: Vector2) -> bo
 	)
 	
 	var delta_snap: Vector2 = snapped_origin - origin
-	# Hanya geser jika kamera sudah berpindah minimal 2 sel penuh
 	if absf(delta_snap.x) < cell_size * 2.0 and absf(delta_snap.y) < cell_size * 2.0:
 		return false
 		

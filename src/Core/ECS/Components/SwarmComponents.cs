@@ -9,8 +9,10 @@ public enum SwarmState : byte
 	Returning = 2,
 	Mining = 3,
 	ChargingDrill = 4, // Sedang ditarik ke pusaran pembentukan Super Giga Drill
-	DrillExhaust = 5,  // Drone bagian belakang Giga Drill yang terbakar menjadi exhaust roket lalu mati
-	Dead = 6           // Unit yang telah mati/dikorbankan (dapat digunakan kembali oleh pool)
+	DrillExhaust = 5,  // Drone bagian belakang Giga Drill / Boost yang terbakar menjadi exhaust roket lalu mati
+	Dead = 6,          // Unit yang telah mati/dikorbankan (dapat digunakan kembali oleh pool)
+	BoostThruster = 7, // Dart Needle yang berkumpul di belakang Core (busur 3/4 lingkaran) sebagai pendorong plasma
+	BoostBrake = 8     // Dart Needle yang berkumpul di depan arah gerak Core untuk pengereman retro-rocket
 }
 
 public enum SwarmRole : byte
@@ -58,7 +60,7 @@ public struct SwarmUnitComponent
 	public int AssignedSector;          // Sektor pertahanan (0..11) yang dialokasikan Core
 	public float PersonalAngleOffset;   // Offset sudut acak agar barisan tameng organik & tidak kaku
 	public float PersonalRadialOffset;  // Offset radius acak di sekitar ShieldRadius (120px)
-	public int FormationIndex;          // Indeks urutan formasi pada Super Giga Drill (0 = Tip, N-1 = Exhaust)
+	public int FormationIndex;          // Indeks urutan formasi pada Super Giga Drill / Boost Nozzle
 	public float ExhaustTriggerTime;    // Waktu (detik) saat drone bagian belakang meledak jadi exhaust roket
 
 	public SwarmUnitComponent(SwarmRole role, int ownerId, float orbitDist, float orbitSpd)

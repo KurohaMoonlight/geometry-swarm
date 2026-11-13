@@ -3,7 +3,9 @@ extends Node2D
 
 const GridPhysicsClass = preload("res://core/physics/grid_physics.gd")
 
-## GridRenderer - Ultra-Fast Hybrid Renderer (Static Full-Line Batch + Active Patch Segments)
+## GridRenderer - Ultra-Fast Hybrid Renderer + 3-Layer Parallax Starfield
+## - Menggambar partikel titik bintang (3 lapis kedalaman parallax) tepat di belakang garis grid
+##   menggunakan deterministic spatial cell hashing dalam 1 draw call batch (draw_multiline_colors).
 ## - Saat grid tenang (atau di luar kotak aktif), seluruh baris & kolom digambar sebagai
 ##   1 garis lurus utuh per baris/kolom (~90 garis total, bukan 10.000+ segmen pendek!).
 ## - Perhitungan jarak & warna per-segmen HANYA dijalankan pada sel di dalam active_bounds.
@@ -17,7 +19,18 @@ const GridPhysicsClass = preload("res://core/physics/grid_physics.gd")
 @export var line_width: float = 1.0
 @export var antialiased: bool = false
 
+@export_group("Parallax Starfield")
+@export var enable_starfield: bool = true
+@export var star_tile_size: float = 240.0
+
 var physics: GridPhysicsClass = null
+
+var camera_pos: Vector2 = Vector2.ZERO
+var star_time: float = 0.0
+var _twinkle_accum: float = 0.0
+
+var star_points: PackedVector2Array = []
+var star_colors: PackedColorArray = []
 
 var static_points: PackedVector2Array = []
 var active_points: PackedVector2Array = []
@@ -39,7 +52,100 @@ func bind_physics(p_physics: GridPhysicsClass) -> void:
 	physics = p_physics
 	queue_redraw()
 
+## Memperbarui posisi kamera untuk efek parallax bintang & kerlipan halus (sangat ringan)
+func update_view(p_cam_pos: Vector2, delta: float) -> bool:
+	star_time += delta
+	_twinkle_accum += delta
+	var moved: bool = p_cam_pos.distance_squared_to(camera_pos) > 0.15
+	if moved:
+		camera_pos = p_cam_pos
+		return true
+	if _twinkle_accum >= 0.05:
+		_twinkle_accum = 0.0
+		return true
+	return false
+
+func _hash2d(cx: int, cy: int, seed_offset: int) -> int:
+	var h: int = (cx * 374761393) + (cy * 668265263) + (seed_offset * 1442695041)
+	h = (h ^ (h >> 13)) * 1274126177
+	return abs(h ^ (h >> 16))
+
+## Menggambar 3 lapisan partikel bintang parallax di belakang grid dalam 1 draw call batch
+func _draw_parallax_starfield() -> void:
+	if not enable_starfield:
+		return
+		
+	star_points.clear()
+	star_colors.clear()
+	
+	var view_half: Vector2 = Vector2(1280.0, 800.0)
+	var tile: float = maxf(120.0, star_tile_size)
+	
+	# 3 Lapis Kedalaman Parallax:
+	# - Layer 0 (Jauh): drift = 0.82 (tampak bergerak 18% kecepatan kamera), titik kecil redup
+	# - Layer 1 (Sedang): drift = 0.56 (tampak bergerak 44% kecepatan kamera), titik sedang
+	# - Layer 2 (Dekat): drift = 0.28 (tampak bergerak 72% kecepatan kamera), bintang terang berkilau
+	var layer_drifts: Array[float] = [0.82, 0.56, 0.28]
+	var layer_counts: Array[int] = [2, 1, 1]
+	var layer_sizes: Array[float] = [1.5, 2.2, 2.8]
+	var layer_alphas: Array[float] = [0.38, 0.62, 0.88]
+	
+	var palette: Array[Color] = [
+		Color(0.75, 0.85, 1.35, 1.0), # Putih Kebiruan (Astrophysical Blue-White)
+		Color(0.95, 0.72, 1.45, 1.0), # Ungu Nebula Lembut
+		Color(1.35, 1.20, 0.85, 1.0), # Emas Bintang Hangat
+		Color(0.55, 1.25, 1.45, 1.0)  # Sian Bintang Jauh
+	]
+	
+	for layer in range(3):
+		var drift: float = layer_drifts[layer]
+		var parallax_offset: Vector2 = camera_pos * drift
+		var rel_center: Vector2 = camera_pos - parallax_offset
+		
+		var min_cx: int = int(floor((rel_center.x - view_half.x) / tile)) - 1
+		var max_cx: int = int(ceil((rel_center.x + view_half.x) / tile)) + 1
+		var min_cy: int = int(floor((rel_center.y - view_half.y) / tile)) - 1
+		var max_cy: int = int(ceil((rel_center.y + view_half.y) / tile)) + 1
+		
+		var stars_per_cell: int = layer_counts[layer]
+		var base_size: float = layer_sizes[layer]
+		var base_alpha: float = layer_alphas[layer]
+		
+		for cy in range(min_cy, max_cy + 1):
+			for cx in range(min_cx, max_cx + 1):
+				for s in range(stars_per_cell):
+					var h: int = _hash2d(cx, cy, layer * 97 + s * 31)
+					# Untuk layer terdekat (layer 2), hanya munculkan di ~55% sel agar tidak terlalu ramai
+					if layer == 2 and (h % 100) > 55:
+						continue
+						
+					var fx: float = float(h & 1023) / 1024.0
+					var fy: float = float((h >> 10) & 1023) / 1024.0
+					var world_p: Vector2 = Vector2((cx + fx) * tile, (cy + fy) * tile) + parallax_offset
+					
+					var phase: float = float((h >> 20) & 255) * 0.0245
+					var twinkle: float = 0.72 + 0.28 * sin(star_time * (1.8 + layer * 0.9) + phase)
+					var col: Color = palette[h & 3]
+					col.a = base_alpha * twinkle
+					
+					var half_w: float = base_size * 0.5
+					star_points.append(world_p - Vector2(half_w, 0.0))
+					star_points.append(world_p + Vector2(half_w, 0.0))
+					star_colors.append(col)
+					
+					# Garis vertikal silang tipis (+) untuk bintang di layer dekat/sedang agar tampak seperti titik bintang tajam
+					if layer >= 1:
+						star_points.append(world_p - Vector2(0.0, half_w))
+						star_points.append(world_p + Vector2(0.0, half_w))
+						star_colors.append(col)
+						
+	if star_colors.size() > 0:
+		draw_multiline_colors(star_points, star_colors, 1.6, false)
+
 func _draw() -> void:
+	# 0. Gambar partikel bintang parallax terlebih dahulu agar berada DI BELAKANG garis grid!
+	_draw_parallax_starfield()
+	
 	if not physics or physics.total_points == 0:
 		return
 		

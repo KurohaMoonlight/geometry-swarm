@@ -337,7 +337,11 @@ public sealed class BoidSystem
                 return;
             }
 
-            if (MathF.Abs(swarm.SpinRate) > 0.01f && swarm.State != SwarmState.ChargingDrill && swarm.State != SwarmState.DrillExhaust)
+            if (MathF.Abs(swarm.SpinRate) > 0.01f
+                && swarm.State != SwarmState.ChargingDrill
+                && swarm.State != SwarmState.DrillExhaust
+                && swarm.State != SwarmState.BoostThruster
+                && swarm.State != SwarmState.BoostBrake)
             {
                 swarm.SpinAngle += swarm.SpinRate * dt;
                 if (swarm.SpinAngle > Mathf.Tau) swarm.SpinAngle -= Mathf.Tau;
@@ -465,6 +469,11 @@ public sealed class BoidSystem
                     orbitCount++;
                     break;
 
+                case SwarmState.BoostThruster:
+                case SwarmState.BoostBrake:
+                    orbitCount++;
+                    return;
+
                 case SwarmState.Launched:
                     launchCount++;
                     swarm.LifeTime += dt;
@@ -533,7 +542,13 @@ public sealed class BoidSystem
             // PROTOKOL KEMBALI OTOMATIS SWARM NYANGKUT (QUANTUM PHASE RECALL)
             // =========================================================================
             bool isPhaseRecalling = false;
-            if (swarm.OwnerId == 0 && swarm.State != SwarmState.Dead && swarm.State != SwarmState.Launched && swarm.State != SwarmState.ChargingDrill && swarm.State != SwarmState.DrillExhaust)
+            if (swarm.OwnerId == 0
+                && swarm.State != SwarmState.Dead
+                && swarm.State != SwarmState.Launched
+                && swarm.State != SwarmState.ChargingDrill
+                && swarm.State != SwarmState.DrillExhaust
+                && swarm.State != SwarmState.BoostThruster
+                && swarm.State != SwarmState.BoostBrake)
             {
                 Vector2 diffCore = anchorPos - pos.Value;
                 float distCore = diffCore.Length();
