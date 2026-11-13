@@ -6,7 +6,10 @@ namespace GeometrySwarm.Gameplay;
 
 /// <summary>
 /// Kapal Induk Pemain (The Hive Core) berbentuk gugusan Hexagon sarang lebah (Honeycomb).
-/// Menggunakan koordinat aksial heksagonal diskrit agar sel selalu mengunci presisi.
+/// Menggunakan koordinat aksial heksagonal diskrit agar sel selalu mengunci presisi,
+/// serta menggunakan Zero-Lag Circle-to-Grid Voxel Collision terhadap sel 13 px Asteroid
+/// sehingga kapal dapat masuk ke dalam terowongan yang sudah dilubangi (Empty) dan
+/// meluncur mulus di sepanjang dinding batu (Rock/Resource).
 /// </summary>
 public partial class PlayerCore : CharacterBody2D
 {
@@ -19,7 +22,7 @@ public partial class PlayerCore : CharacterBody2D
 
     // Set koordinat aksial (q, r) yang sudah terisi
     private readonly HashSet<Vector2I> _occupiedAxials = new();
-    // Offset piksel relatif terhadap pusat kapal untuk penggambaran
+    // Offset piksel relatif terhadap pusat kapal untuk penggambaran & kolisi sel
     private readonly List<Vector2> _hexCellOffsets = new();
 
     // 6 arah tetangga dalam koordinat aksial heksagonal (Pointy-topped)
@@ -51,8 +54,12 @@ public partial class PlayerCore : CharacterBody2D
         _occupiedAxials.Add(Vector2I.Zero);
         _hexCellOffsets.Add(Vector2.Zero);
 
-        // Pasang Collision Shape fisik untuk interaksi dengan Asteroid
-        _circleShape = new CircleShape2D { Radius = HexRadius * 1.15f };
+        // Nonaktifkan mask terhadap Rigidbody2D Asteroid (Layer 2) karena kolisi terowongan
+        // kini ditangani secara presisi oleh Zero-Lag Voxel Collision (Circle-to-Grid 13 px)
+        CollisionLayer = 1;
+        CollisionMask = 1;
+
+        _circleShape = new CircleShape2D { Radius = HexRadius * 0.95f };
         _collisionShape = new CollisionShape2D { Shape = _circleShape };
         AddChild(_collisionShape);
     }
@@ -95,7 +102,6 @@ public partial class PlayerCore : CharacterBody2D
             float y = 1.5f * HexRadius * chosen.Y;
             _hexCellOffsets.Add(new Vector2(x, y));
 
-            // Sesuaikan radius perisai/hitbox fisik Core
             if (_circleShape != null)
             {
                 float maxDist = HexRadius;
@@ -135,19 +141,14 @@ public partial class PlayerCore : CharacterBody2D
             Velocity = Velocity.Normalized() * MaxSpeed;
         }
 
-        MoveAndSlide();
+        // Gerakkan posisi kapal induk
+        GlobalPosition += Velocity * dt;
 
-        // 2. Berikan impuls dorongan fisik jika menabrak Asteroid bebas melayang
-        int slideCount = GetSlideCollisionCount();
-        for (int i = 0; i < slideCount; i++)
-        {
-            var collision = GetSlideCollision(i);
-            if (collision.GetCollider() is Asteroid asteroid)
-            {
-                Vector2 pushDir = -collision.GetNormal();
-                asteroid.ApplyHitImpulse(collision.GetPosition(), pushDir * Velocity.Length() * 0.35f, 2.0f);
-            }
-        }
+        // 2. Kolisi Fisika Terowongan (Zero-Lag Voxel Collision / Circle-to-Grid 13 px)
+        // Mengecek sel 13 px di sekitar tepian setiap Hexagon Core:
+        // - Bebas masuk ke sel Empty (terowongan galian).
+        // - Tertahan dan meluncur (slide) mulus jika menyentuh sel Rock atau Resource.
+        ResolveAsteroidVoxelCollisions();
 
         // 3. Arahkan Hadap Kapal ke Posisi Kursor Mouse
         Vector2 mousePos = GetGlobalMousePosition();
@@ -158,6 +159,42 @@ public partial class PlayerCore : CharacterBody2D
         }
 
         QueueRedraw();
+    }
+
+    private void ResolveAsteroidVoxelCollisions()
+    {
+        var asteroids = Asteroid.ActiveAsteroids;
+        if (asteroids.Count == 0) return;
+
+        Vector2 shipPos = GlobalPosition;
+        Vector2 shipVel = Velocity;
+        float hexColRadius = HexRadius * 0.88f;
+
+        for (int a = 0; a < asteroids.Count; a++)
+        {
+            var ast = asteroids[a];
+            if (!GodotObject.IsInstanceValid(ast)) continue;
+
+            // Cek cepat apakah asteroid cukup dekat dengan gugusan Core
+            float clusterRadius = (_circleShape?.Radius ?? HexRadius) + ast.OuterBoundRadius;
+            Vector2 toAst = shipPos - ast.GlobalPosition;
+            if (MathF.Abs(toAst.X) > clusterRadius || MathF.Abs(toAst.Y) > clusterRadius) continue;
+
+            // Periksa setiap sel hexagon pada gugusan kapal terhadap grid 13 px asteroid
+            for (int c = 0; c < _hexCellOffsets.Count; c++)
+            {
+                Vector2 rotatedOffset = _hexCellOffsets[c].Rotated(Rotation);
+                Vector2 cellWorldPos = shipPos + rotatedOffset;
+
+                if (ast.ResolveCircleVoxelCollision(ref cellWorldPos, ref shipVel, hexColRadius, impulseWeight: 0.45f))
+                {
+                    shipPos = cellWorldPos - rotatedOffset;
+                }
+            }
+        }
+
+        GlobalPosition = shipPos;
+        Velocity = shipVel;
     }
 
     public override void _Draw()

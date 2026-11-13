@@ -16,6 +16,9 @@ namespace GeometrySwarm.Core.ECS.Systems;
 /// 3. Defender "bodoh" & organik yang hanya mengikuti gaya pegas sederhana (radial + sudut orbit ~120px)
 ///    serta saling menjaga jarak (separation via SpatialHashGrid) dengan kecepatan lebih lambat dari swarm,
 ///    sehingga membentuk barisan tameng rapat namun organik dengan celah alami.
+/// 4. Kolisi Fisika Terowongan (Zero-Lag Voxel Collision): setiap unit swarm mengecek sel 13 px
+///    di sekitar tepiannya sehingga bebas terbang masuk ke sel Empty (terowongan galian) dan
+///    otomatis tertahan serta meluncur (slide) di sepanjang dinding batu (Rock/Resource).
 /// </summary>
 public sealed class BoidSystem
 {
@@ -74,6 +77,9 @@ public sealed class BoidSystem
     public float ReturnThrust { get; set; } = 2400.0f;
     public float ReturnMaxSpeed { get; set; } = 750.0f;
 
+    // Radius kolisi fisik sebuah unit swarm terhadap sel voxel 13 px
+    private const float DroneVoxelRadius = 5.0f;
+
     // Counter status kawanan real-time
     public int OrbitingCount { get; private set; }
     public int LaunchedCount { get; private set; }
@@ -105,7 +111,7 @@ public sealed class BoidSystem
         _sectorRebalanceTimer += dt;
 
         float decayOrbit = MathF.Pow(Damping, dt * 60.0f);
-        float decayGuardian = MathF.Pow(0.89f, dt * 60.0f); // Redaman inersia Defender yang berat & lambat
+        float decayGuardian = MathF.Pow(0.89f, dt * 60.0f);
         float decayBullet = MathF.Pow(0.992f, dt * 60.0f);
         float decayReturn = MathF.Pow(0.95f, dt * 60.0f);
 
@@ -126,8 +132,6 @@ public sealed class BoidSystem
         _defenderSpatialGrid.Clear();
         _activeDefenderCount = 0;
 
-        // Grid spasial lokal dinamis berpusat di posisi Core (anchorPos)
-        // Memastikan koordinat tidak pernah overflow/clamp saat pemain menjelajahi map 12.000 x 12.000
         Vector2 gridOrigin = anchorPos - new Vector2(GridWidth * CellSize * 0.5f, GridHeight * CellSize * 0.5f);
         var activeAsteroids = Asteroid.ActiveAsteroids;
 
@@ -140,7 +144,6 @@ public sealed class BoidSystem
             int cy = Math.Clamp((int)(local.Y * InvCellSize), 1, GridHeight - 2);
             int cellIdx = cy * GridWidth + cx;
 
-            // Musuh (OwnerId > 0) dimasukkan ke sel Spatial Grid untuk dipindai Core
             if (swarm.OwnerId > 0)
             {
                 _enemyCellGrid[cellIdx]++;
@@ -160,7 +163,6 @@ public sealed class BoidSystem
                         _defenderSpatialGrid.Insert(defIdx, pos.Value);
                     }
 
-                    // Hitung posisi aktual Defender berada di sektor mana saat ini
                     Vector2 rel = pos.Value - anchorPos;
                     int actualSector = AngleToSector(rel.Angle());
                     _sectorDefenderCounts[actualSector]++;
@@ -175,8 +177,6 @@ public sealed class BoidSystem
             }
         });
 
-        // Jika belum ada unit musuh aktif di arena, gunakan posisi kursor di sekitar Core
-        // sebagai simulasi sinyal ancaman pada sel Spatial Grid agar alokasi sektor tetap bisa diuji kapan saja.
         if (enemyCount == 0)
         {
             Vector2 toCursor = cursorThreatPos - anchorPos;
@@ -189,8 +189,7 @@ public sealed class BoidSystem
 
                 Vector2 localCursor = samplePos - gridOrigin;
                 int ccx = Math.Clamp((int)(localCursor.X * InvCellSize), 2, GridWidth - 3);
-                int ccy = Math.Clamp((int)(localCursor.Y * InvCellSize), 2, GridHeight - 3);
-                // Sebarkan ancaman virtual ke sel-sel Spatial Grid di sekitar kursor
+                int ccy = Math.Clamp((int)(localCursor.Y * InvCellSize), 2, GridWidth - 3);
                 _enemyCellGrid[ccy * GridWidth + ccx] += 25;
                 _enemyCellGrid[ccy * GridWidth + (ccx - 1)] += 10;
                 _enemyCellGrid[ccy * GridWidth + (ccx + 1)] += 10;
@@ -201,7 +200,6 @@ public sealed class BoidSystem
 
         // =========================================================================
         // 2. CORE MEMINDAI SEL SPATIAL GRID DI RADIUS SEKITAR MARKAS (12 SEKTOR PIZZA)
-        //    Skor Ancaman Sektor = Jumlah Musuh di Sektor - Jumlah Defender di Sektor
         // =========================================================================
         int centerCx = GridWidth / 2;
         int centerCy = GridHeight / 2;
@@ -235,7 +233,6 @@ public sealed class BoidSystem
             }
         }
 
-        // Hitung Skor Ancaman per Sektor (Jumlah Musuh - Jumlah Defender)
         for (int s = 0; s < SectorCount; s++)
         {
             _sectorThreatScores[s] = _sectorEnemyCounts[s] - _sectorDefenderCounts[s];
@@ -243,14 +240,12 @@ public sealed class BoidSystem
 
         // =========================================================================
         // 3. ALOKASI SUDUT ORBIT DINAMIS OLEH CORE
-        //    Menggeser sebagian Defender dari sektor aman menuju sektor dengan skor ancaman tinggi
         // =========================================================================
         if (_activeDefenderCount > 0 && _sectorRebalanceTimer >= 0.02f)
         {
             _sectorRebalanceTimer = 0.0f;
             ComputeSectorTargetQuotas(_activeDefenderCount, totalScannedEnemies);
 
-            // Geser alokasi Defender dari sektor yang surplus (aman) ke sektor yang defisit (ancaman tinggi)
             _world.Query(in _boidQuery, (ref SwarmUnitComponent swarm) =>
             {
                 if (swarm.State != SwarmState.Orbiting || swarm.Role != SwarmRole.Guardian || swarm.OwnerId != 0)
@@ -259,7 +254,6 @@ public sealed class BoidSystem
                 int curSec = Math.Clamp(swarm.AssignedSector, 0, SectorCount - 1);
                 if (_sectorAssignedCounts[curSec] > _sectorTargetQuotas[curSec])
                 {
-                    // Cari sektor dengan defisit terbesar (membutuhkan Defender paling mendesak)
                     int bestSector = -1;
                     int maxDeficit = 0;
                     float highestThreat = -99999.0f;
@@ -283,7 +277,6 @@ public sealed class BoidSystem
                     }
                 }
 
-                // Core memberikan sudut orbit target sesuai sektor + sedikit osilasi organik
                 float sectorCenterAngle = SectorToCenterAngle(swarm.AssignedSector);
                 float dumbWander = MathF.Sin(_organicWaveTime * 1.4f + swarm.OrbitAngle) * 0.14f;
                 swarm.ShieldTargetAngle = sectorCenterAngle + swarm.PersonalAngleOffset + dumbWander;
@@ -291,7 +284,7 @@ public sealed class BoidSystem
         }
 
         // =========================================================================
-        // 4. PROSES GERAK UNIT BERDASARKAN STATE MACHINE & GAYA PEGAS SEDERHANA
+        // 4. PROSES GERAK UNIT BERDASARKAN STATE MACHINE & KOLISI VOXEL 13 PX
         // =========================================================================
         _world.Query(in _boidQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
@@ -299,7 +292,6 @@ public sealed class BoidSystem
 
             // -----------------------------------------------------------------
             // LOGIKA SWARM / AMUNISI MUSUH (OwnerId > 0)
-            // Menyerang ke arah Core, dapat ditahan Defender atau lolos lewat celah!
             // -----------------------------------------------------------------
             if (swarm.OwnerId > 0)
             {
@@ -310,7 +302,6 @@ public sealed class BoidSystem
                 float distToCore = toCore.Length();
                 Vector2 dirToCore = distToCore > 0.001f ? toCore / distToCore : Vector2.Right;
 
-                // Kecepatan proyektil musuh menuju Core
                 vel.Value += dirToCore * (620.0f * dt);
                 vel.Value *= decayBullet;
                 if (vel.Value.LengthSquared() > 420.0f * 420.0f)
@@ -320,16 +311,13 @@ public sealed class BoidSystem
 
                 swarm.SpinAngle = vel.Value.Angle() + Mathf.Pi * 0.5f;
 
-                // Cek tumbukan dengan Defender menggunakan SpatialHashGrid
                 int hits = _defenderSpatialGrid.QueryNeighbors(pos.Value, 16.0f, _neighborBuffer);
                 if (hits > 0)
                 {
-                    // Tertahan oleh barisan tameng Defender!
                     swarm.State = SwarmState.Dead;
                     return;
                 }
 
-                // Jika lolos melewati celah Defender (musuh hoki) dan mencapai Core atau habis waktu
                 if (distToCore < 28.0f || swarm.LifeTime >= swarm.MaxLifeTime)
                 {
                     swarm.State = SwarmState.Dead;
@@ -338,48 +326,20 @@ public sealed class BoidSystem
 
                 pos.Value += vel.Value * dt;
 
-            // =========================================================================
-            // PEMBATAS FISIK ASTEROID RAKSASA: SWARM TIDAK BISA MENEMBUS BATU
-            // =========================================================================
-            for (int a = 0; a < activeAsteroids.Count; a++)
-            {
-                var ast = activeAsteroids[a];
-                if (!GodotObject.IsInstanceValid(ast)) continue;
-
-                float r = ast.Radius + 6.0f;
-                Vector2 diff = pos.Value - ast.GlobalPosition;
-
-                // Cek AABB cepat untuk eliminasi 95% asteroid jauh tanpa hitung akar
-                if (MathF.Abs(diff.X) > r || MathF.Abs(diff.Y) > r) continue;
-
-                float distSq = diff.LengthSquared();
-                if (distSq < r * r)
+                // Kolisi Circle-to-Grid terhadap sel 13 px Asteroid (bebas lewat jika sel Empty)
+                for (int a = 0; a < activeAsteroids.Count; a++)
                 {
-                    float dist = MathF.Sqrt(distSq);
-                    Vector2 normal = dist > 0.001f ? diff / dist : Vector2.Right;
+                    var ast = activeAsteroids[a];
+                    if (!GodotObject.IsInstanceValid(ast)) continue;
 
-                    // Tolak paksa posisi drone ke luar permukaan asteroid
-                    pos.Value = ast.GlobalPosition + normal * r;
-
-                    // Batalkan komponen kecepatan yang mengarah ke dalam batu (slide di permukaan)
-                    float inwardVel = vel.Value.Dot(normal);
-                    if (inwardVel < 0.0f)
+                    if (ast.ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, impulseWeight: 0.0f))
                     {
-                        vel.Value -= normal * inwardVel;
+                        break;
                     }
-
-                    if (swarm.State == SwarmState.Launched)
-                    {
-                        swarm.State = SwarmState.Returning;
-                        swarm.LifeTime = 0.0f;
-                    }
-                    break;
                 }
-            }
                 return;
             }
 
-            // Perbarui putaran spin visual mandiri (Shuriken berputar, Bor berputar)
             if (MathF.Abs(swarm.SpinRate) > 0.01f && swarm.State != SwarmState.ChargingDrill && swarm.State != SwarmState.DrillExhaust)
             {
                 swarm.SpinAngle += swarm.SpinRate * dt;
@@ -397,44 +357,29 @@ public sealed class BoidSystem
 
                     if (swarm.Role == SwarmRole.Guardian)
                     {
-                        // -----------------------------------------------------------------
-                        // DEFENDER (GUARDIAN): Bodoh, Lambat, & Organik
-                        // Unit tidak tahu soal musuh. Hanya mengikuti:
-                        // (a) Gaya pegas radial ke radius perisai (~120px dari Core)
-                        // (b) Gaya pegas sudut menuju ShieldTargetAngle dari Core
-                        // (c) Gaya Separation (jaga jarak antar Defender) via SpatialHashGrid
-                        // Tidak ada tambahan kecepatan instan anchorVelocity agar Defender
-                        // tertinggal secara alami di belakang swarm saat Core berpindah!
-                        // -----------------------------------------------------------------
                         Vector2 fromCore = pos.Value - anchorPos;
                         float distFromCore = fromCore.Length();
                         Vector2 radialOut = distFromCore > 0.001f ? fromCore / distFromCore : Vector2.Right;
                         Vector2 tangent = new Vector2(-radialOut.Y, radialOut.X);
 
-                        // Radius perisai organik (~120px +- offset personal & napas lambat)
                         float breathing = MathF.Sin(_organicWaveTime * 1.8f + swarm.OrbitAngle) * 6.5f;
                         float targetRadius = ShieldRadius + swarm.PersonalRadialOffset + breathing;
 
-                        // (a) Gaya Pegas Radial menuju targetRadius (120px)
                         float radialError = targetRadius - distFromCore;
                         Vector2 force = radialOut * (radialError * ShieldRadialSpring);
 
-                        // (b) Gaya Pegas Sudut Orbit (mendorong sepanjang garis singgung menuju sudut sektor)
                         float currentAngle = fromCore.Angle();
                         float angleError = Mathf.AngleDifference(currentAngle, swarm.ShieldTargetAngle);
                         float clampedAngleErr = Mathf.Clamp(angleError, -2.0f, 2.0f);
                         force += tangent * (clampedAngleErr * ShieldRadius * ShieldAngularSpring);
 
-                        // Ikuti pergerakan kapal induk Core agar tidak tertinggal jauh
                         force += anchorVelocity * 1.55f;
 
-                        // Jika terlalu jauh dari Core (misal Core berakselerasi kencang), tarik kembali ke radius perisai
                         if (distFromCore > ShieldRadius * 1.35f)
                         {
                             force -= radialOut * ((distFromCore - ShieldRadius) * (ShieldRadialSpring * 1.15f));
                         }
 
-                        // (c) Gaya Separation antar-Defender agar membentuk kerumunan tameng rapat tapi bercelah alami
                         int nearCount = _defenderSpatialGrid.QueryNeighbors(pos.Value, DefenderSeparationRadius, _neighborBuffer);
                         Vector2 sepForce = Vector2.Zero;
                         for (int n = 0; n < nearCount; n++)
@@ -451,22 +396,17 @@ public sealed class BoidSystem
                         }
                         force += sepForce;
 
-                        // Integrasi kecepatan dengan redaman responsif
                         vel.Value = (vel.Value + force * dt) * decayGuardian;
                         if (vel.Value.LengthSquared() > MaxGuardianSpeed * MaxGuardianSpeed)
                         {
                             vel.Value = vel.Value.Normalized() * MaxGuardianSpeed;
                         }
 
-                        // Orientasi kurung perisai ]] berputar organik (sedikit goyang/wobble bodoh)
                         float desiredFaceAngle = currentAngle + Mathf.Pi * 0.5f + MathF.Sin(_organicWaveTime * 2.5f + swarm.OrbitAngle) * 0.12f;
                         swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredFaceAngle, MathF.Min(1.0f, 7.5f * dt));
                     }
                     else
                     {
-                        // ----------------------------------------------------
-                        // ATTACKER: Awan Boids Lincah (Sampai Lebih Dulu dari Defender)
-                        // ----------------------------------------------------
                         Vector2 toCore = anchorPos - pos.Value;
                         float distToCore = toCore.Length();
                         Vector2 dirToCore = distToCore > 0.001f ? toCore / distToCore : Vector2.Right;
@@ -534,7 +474,6 @@ public sealed class BoidSystem
                     }
                     else if (swarm.Role == SwarmRole.DrillDrone)
                     {
-                        // Jika bukan bagian dari Giga Drill aktif, terbang normal
                         vel.Value += swarm.TargetDirection * (BulletThrust * 1.5f * dt);
                     }
                     else
@@ -557,11 +496,10 @@ public sealed class BoidSystem
                     break;
 
                 // ==========================================
-                // 4. STATE DRILL EXHAUST (Semburan Roket Belakang Giga Drill -> Mati)
+                // 4. STATE DRILL EXHAUST
                 // ==========================================
                 case SwarmState.DrillExhaust:
                     launchCount++;
-                    // Integrasi posisi & kematian exhaust ditangani di SwarmSimulation
                     return;
 
                 // ==========================================
@@ -597,36 +535,20 @@ public sealed class BoidSystem
             pos.Value += vel.Value * dt;
 
             // =========================================================================
-            // PEMBATAS FISIK ASTEROID RAKSASA: SWARM TIDAK BISA MENEMBUS BATU
+            // KOLISI FISIKA TEROWONGAN (ZERO-LAG VOXEL COLLISION 13 PX):
+            // - Mengecek sel 13 px di sekitar tepian drone.
+            // - Jika sel Empty (sudah dilubangi/ruang angkasa), drone bergerak bebas masuk terowongan.
+            // - Jika menyentuh sel Rock atau Resource, drone tertahan dan meluncur (slide) di sepanjang dinding batu.
             // =========================================================================
             for (int a = 0; a < activeAsteroids.Count; a++)
             {
                 var ast = activeAsteroids[a];
                 if (!GodotObject.IsInstanceValid(ast)) continue;
 
-                float r = ast.Radius + 6.0f;
-                Vector2 diff = pos.Value - ast.GlobalPosition;
-
-                // Cek AABB cepat untuk eliminasi 95% asteroid jauh tanpa hitung akar
-                if (MathF.Abs(diff.X) > r || MathF.Abs(diff.Y) > r) continue;
-
-                float distSq = diff.LengthSquared();
-                if (distSq < r * r)
+                float impulseWeight = (swarm.State == SwarmState.Launched) ? 0.08f : 0.0f;
+                if (ast.ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, impulseWeight))
                 {
-                    float dist = MathF.Sqrt(distSq);
-                    Vector2 normal = dist > 0.001f ? diff / dist : Vector2.Right;
-
-                    // Tolak paksa posisi drone ke luar permukaan asteroid
-                    pos.Value = ast.GlobalPosition + normal * r;
-
-                    // Batalkan komponen kecepatan yang mengarah ke dalam batu (slide di permukaan)
-                    float inwardVel = vel.Value.Dot(normal);
-                    if (inwardVel < 0.0f)
-                    {
-                        vel.Value -= normal * inwardVel;
-                    }
-
-                    if (swarm.State == SwarmState.Launched)
+                    if (swarm.State == SwarmState.Launched && swarm.Role != SwarmRole.DrillDrone)
                     {
                         swarm.State = SwarmState.Returning;
                         swarm.LifeTime = 0.0f;
@@ -649,7 +571,6 @@ public sealed class BoidSystem
 
         for (int s = 0; s < SectorCount; s++)
         {
-            // Bobot dasar kecil agar sektor aman tetap punya sedikit penjaga patroli longgar
             float w = (totalEnemies > 0) ? 0.22f : 1.0f;
 
             if (totalEnemies > 0)
@@ -657,7 +578,6 @@ public sealed class BoidSystem
                 int prevSec = (s + SectorCount - 1) % SectorCount;
                 int nextSec = (s + 1) % SectorCount;
 
-                // Skor ancaman langsung di sektor ini + rembesan ancaman dari sektor sebelah (flank)
                 float directEnemy = _sectorEnemyCounts[s];
                 float positiveThreat = MathF.Max(0.0f, _sectorThreatScores[s]);
                 float neighborEnemy = (_sectorEnemyCounts[prevSec] + _sectorEnemyCounts[nextSec]) * 0.35f;
@@ -677,7 +597,6 @@ public sealed class BoidSystem
             allocated += q;
         }
 
-        // Bagikan sisa pembulatan ke sektor dengan skor ancaman tertinggi
         int remainder = totalDefenders - allocated;
         while (remainder > 0)
         {
@@ -699,7 +618,6 @@ public sealed class BoidSystem
 
     private static int AngleToSector(float angleRad)
     {
-        // Normalisasi sudut [-Pi, Pi] ke [0, Tau)
         float norm = angleRad + Mathf.Pi;
         if (norm < 0.0f) norm += Mathf.Tau;
         if (norm >= Mathf.Tau) norm -= Mathf.Tau;
