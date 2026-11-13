@@ -42,11 +42,19 @@ public partial class PlayerCore : CharacterBody2D
 
     public int CoreCellCount => _hexCellOffsets.Count;
 
+    private CollisionShape2D? _collisionShape;
+    private CircleShape2D? _circleShape;
+
     public override void _Ready()
     {
         // Mulai dengan 1 Core Hexagon di pusat (0, 0)
         _occupiedAxials.Add(Vector2I.Zero);
         _hexCellOffsets.Add(Vector2.Zero);
+
+        // Pasang Collision Shape fisik untuk interaksi dengan Asteroid
+        _circleShape = new CircleShape2D { Radius = HexRadius * 1.15f };
+        _collisionShape = new CollisionShape2D { Shape = _circleShape };
+        AddChild(_collisionShape);
     }
 
     /// <summary>
@@ -86,6 +94,18 @@ public partial class PlayerCore : CharacterBody2D
             float x = MathF.Sqrt(3.0f) * HexRadius * (chosen.X + chosen.Y * 0.5f);
             float y = 1.5f * HexRadius * chosen.Y;
             _hexCellOffsets.Add(new Vector2(x, y));
+
+            // Sesuaikan radius perisai/hitbox fisik Core
+            if (_circleShape != null)
+            {
+                float maxDist = HexRadius;
+                foreach (var offset in _hexCellOffsets)
+                {
+                    maxDist = MathF.Max(maxDist, offset.Length() + HexRadius);
+                }
+                _circleShape.Radius = maxDist;
+            }
+
             QueueRedraw();
         }
     }
@@ -117,7 +137,19 @@ public partial class PlayerCore : CharacterBody2D
 
         MoveAndSlide();
 
-        // 2. Arahkan Hadap Kapal ke Posisi Kursor Mouse
+        // 2. Berikan impuls dorongan fisik jika menabrak Asteroid bebas melayang
+        int slideCount = GetSlideCollisionCount();
+        for (int i = 0; i < slideCount; i++)
+        {
+            var collision = GetSlideCollision(i);
+            if (collision.GetCollider() is Asteroid asteroid)
+            {
+                Vector2 pushDir = -collision.GetNormal();
+                asteroid.ApplyHitImpulse(collision.GetPosition(), pushDir * Velocity.Length() * 0.35f, 2.0f);
+            }
+        }
+
+        // 3. Arahkan Hadap Kapal ke Posisi Kursor Mouse
         Vector2 mousePos = GetGlobalMousePosition();
         Vector2 toMouse = mousePos - GlobalPosition;
         if (toMouse.LengthSquared() > 10.0f)

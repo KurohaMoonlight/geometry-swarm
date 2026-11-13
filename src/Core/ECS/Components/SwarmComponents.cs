@@ -7,7 +7,10 @@ public enum SwarmState : byte
     Orbiting = 0,
     Launched = 1,
     Returning = 2,
-    Mining = 3
+    Mining = 3,
+    ChargingDrill = 4, // Sedang ditarik ke pusaran pembentukan Super Giga Drill
+    DrillExhaust = 5,  // Drone bagian belakang Giga Drill yang terbakar menjadi exhaust roket lalu mati
+    Dead = 6           // Unit yang telah mati/dikorbankan (dapat digunakan kembali oleh pool)
 }
 
 public enum SwarmRole : byte
@@ -17,7 +20,8 @@ public enum SwarmRole : byte
     DrillDrone = 2,
     CrescentBoomerang = 3,
     MiningDroid = 4,
-    Guardian = 5
+    Guardian = 5,
+    ScannerDrone = 6
 }
 
 public struct PositionComponent
@@ -40,18 +44,22 @@ public struct SwarmUnitComponent
 {
     public SwarmRole Role;
     public SwarmState State;
-    public int OwnerId;             // 0 = Player, 1+ = Enemy Hives
-    public float OrbitDistance;     // Jarak orbit ideal dari Core
-    public float OrbitAngle;        // Sudut orbit saat ini
-    public float OrbitSpeed;        // Kecepatan angular putaran
-    public float Energy;            // HP / Durability
-    public float LifeTime;          // Timer durasi terbang
-    public float MaxLifeTime;       // Batas waktu sebelum otomatis kembali
-    public Vector2 TargetDirection; // Vektor arah tembakan peluru
-    public float SpinAngle;         // Rotasi visual mandiri
-    public float SpinRate;          // Kecepatan rotasi (misal putaran Shuriken/Bor)
-    public float ShieldTargetAngle; // Sudut target pertahanan pada ring terluar
-    public int FormationIndex;      // Indeks urutan formasi (misal slot pada Super Giga Drill)
+    public int OwnerId;                 // 0 = Player, 1+ = Enemy Hives / Proyektil Musuh
+    public float OrbitDistance;         // Jarak orbit ideal dari Core (dengan variasi organik per unit)
+    public float OrbitAngle;            // Fase osilasi / sudut orbit organik unit
+    public float OrbitSpeed;            // Kecepatan angular putaran / osilasi
+    public float Energy;                // HP / Durability
+    public float LifeTime;              // Timer durasi terbang / terbakar
+    public float MaxLifeTime;           // Batas waktu sebelum kembali atau mati (exhaust)
+    public Vector2 TargetDirection;     // Vektor arah tembakan peluru / semburan exhaust
+    public float SpinAngle;             // Rotasi visual mandiri
+    public float SpinRate;              // Kecepatan rotasi (misal putaran Shuriken/Bor)
+    public float ShieldTargetAngle;     // Sudut orbit target yang diberikan Core ke Defender
+    public int AssignedSector;          // Sektor pertahanan (0..11) yang dialokasikan Core
+    public float PersonalAngleOffset;   // Offset sudut acak agar barisan tameng organik & tidak kaku
+    public float PersonalRadialOffset;  // Offset radius acak di sekitar ShieldRadius (120px)
+    public int FormationIndex;          // Indeks urutan formasi pada Super Giga Drill (0 = Tip, N-1 = Exhaust)
+    public float ExhaustTriggerTime;    // Waktu (detik) saat drone bagian belakang meledak jadi exhaust roket
 
     public SwarmUnitComponent(SwarmRole role, int ownerId, float orbitDist, float orbitSpd)
     {
@@ -66,7 +74,15 @@ public struct SwarmUnitComponent
         MaxLifeTime = 1.3f;
         TargetDirection = Vector2.Right;
         SpinAngle = GD.Randf() * Mathf.Tau;
-        
+
+        int initialSector = (int)(GD.Randf() * 12.0f) % 12;
+        AssignedSector = initialSector;
+        PersonalAngleOffset = (GD.Randf() - 0.5f) * (Mathf.Tau / 12.0f) * 0.85f;
+        PersonalRadialOffset = (GD.Randf() - 0.5f) * 22.0f;
+        ShieldTargetAngle = (initialSector + 0.5f) * (Mathf.Tau / 12.0f) - Mathf.Pi + PersonalAngleOffset;
+        FormationIndex = 0;
+        ExhaustTriggerTime = -1.0f;
+
         // Spin rate bervariasi sesuai tipe peran
         SpinRate = role switch
         {

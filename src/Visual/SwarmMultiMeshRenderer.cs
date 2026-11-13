@@ -9,7 +9,7 @@ namespace GeometrySwarm.Visual;
 /// </summary>
 public partial class SwarmMultiMeshRenderer : Node2D
 {
-    private const int RoleCount = 6;
+    private const int RoleCount = 7;
     private const int MaxInstancesPerRole = 16384;
 
     private readonly MultiMeshInstance2D[] _meshInstances = new MultiMeshInstance2D[RoleCount];
@@ -83,6 +83,7 @@ public partial class SwarmMultiMeshRenderer : Node2D
             3 => CreateCrescentMesh(),       // Crescent Boomerang
             4 => CreateMagnetMesh(),         // Mining Droid
             5 => CreateGuardianMesh(),       // Guardian (Kurung Tebal Ganda ]] )
+            6 => CreateScannerMesh(),        // Scanner Drone (Sensor Diamond Radar)
             _ => CreateDartNeedleMesh()
         };
     }
@@ -235,6 +236,34 @@ public partial class SwarmMultiMeshRenderer : Node2D
             8, 9, 14,  8, 14, 15,  // Bar atas
             15, 9, 10, 15, 10, 13, // Batang vertikal kanan
             12, 13, 10, 12, 10, 11 // Bar bawah
+        };
+
+        return BuildArrayMesh(vertices, indices);
+    }
+
+    /// <summary>
+    /// Membuat siluet Scanner Drone berbentuk Diamond Sensor Inti dengan sayap antena radar
+    /// </summary>
+    private static ArrayMesh CreateScannerMesh()
+    {
+        var vertices = new Vector2[]
+        {
+            new(0.0f, -6.0f),   // 0: tip atas sensor
+            new(3.2f, -0.5f),   // 1: sudut kanan diamond
+            new(0.0f, 4.0f),    // 2: sudut bawah diamond
+            new(-3.2f, -0.5f),  // 3: sudut kiri diamond
+            new(0.0f, -0.8f),   // 4: pusat lensa reaktor
+            new(-6.0f, 2.5f),   // 5: sayap radar kiri
+            new(6.0f, 2.5f),    // 6: sayap radar kanan
+            new(0.0f, 6.2f)     // 7: antena pemancar bawah
+        };
+
+        var indices = new int[]
+        {
+            // Diamond inti sensor
+            4, 0, 1,   4, 1, 2,   4, 2, 3,   4, 3, 0,
+            // Sayap penangkap pulsa sonar
+            3, 2, 5,   1, 6, 2,   2, 7, 5,   2, 6, 7
         };
 
         return BuildArrayMesh(vertices, indices);
