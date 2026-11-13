@@ -6,6 +6,7 @@ namespace GeometrySwarm.Gameplay;
 
 /// <summary>
 /// Kapal Induk Pemain (The Hive Core) berbentuk gugusan Hexagon sarang lebah (Honeycomb).
+/// Menggunakan koordinat aksial heksagonal diskrit agar sel selalu mengunci presisi.
 /// </summary>
 public partial class PlayerCore : CharacterBody2D
 {
@@ -14,10 +15,23 @@ public partial class PlayerCore : CharacterBody2D
     [Export] public float MaxSpeed { get; set; } = 420.0f;
 
     // Radius satu sel hexagon
-    private const float HexRadius = 24.0f;
+    public const float HexRadius = 24.0f;
 
-    // Daftar sel hexagon yang menyatu membentuk sarang lebah
+    // Set koordinat aksial (q, r) yang sudah terisi
+    private readonly HashSet<Vector2I> _occupiedAxials = new();
+    // Offset piksel relatif terhadap pusat kapal untuk penggambaran
     private readonly List<Vector2> _hexCellOffsets = new();
+
+    // 6 arah tetangga dalam koordinat aksial heksagonal (Pointy-topped)
+    private static readonly Vector2I[] HexDirections = new Vector2I[]
+    {
+        new(1, 0),   // Timur (Kanan)
+        new(1, -1),  // Timur Laut (Kanan Atas)
+        new(0, -1),  // Barat Laut (Kiri Atas)
+        new(-1, 0),  // Barat (Kiri)
+        new(-1, 1),  // Barat Daya (Kiri Bawah)
+        new(0, 1),   // Tenggara (Kanan Bawah)
+    };
 
     // Warna neon Honeycomb Core
     private static readonly Color CoreLineColor = new(2.2f, 1.8f, 0.6f, 1.0f);     // Emas Terang HDR
@@ -26,19 +40,54 @@ public partial class PlayerCore : CharacterBody2D
 
     private float _pulseTimer = 0.0f;
 
+    public int CoreCellCount => _hexCellOffsets.Count;
+
     public override void _Ready()
     {
-        // Mulai dengan 1 Core Hexagon utama di tengah
+        // Mulai dengan 1 Core Hexagon di pusat (0, 0)
+        _occupiedAxials.Add(Vector2I.Zero);
         _hexCellOffsets.Add(Vector2.Zero);
     }
 
     /// <summary>
-    /// Menambah sel hexagon baru ke gugusan sarang lebah
+    /// Menambah sel hexagon baru yang mengunci sempurna pada slot kisi sarang lebah terdekat
     /// </summary>
-    public void AddHexCell(Vector2 offset)
+    public void AddNextHoneycombCell()
     {
-        _hexCellOffsets.Add(offset);
-        QueueRedraw();
+        List<Vector2I> candidates = new();
+
+        foreach (var cell in _occupiedAxials)
+        {
+            foreach (var dir in HexDirections)
+            {
+                var neighbor = cell + dir;
+                if (!_occupiedAxials.Contains(neighbor) && !candidates.Contains(neighbor))
+                {
+                    candidates.Add(neighbor);
+                }
+            }
+        }
+
+        // Urutkan kandidat konsentris dari lapisan dalam ke luar secara spiral rapi
+        candidates.Sort((a, b) =>
+        {
+            int distA = Math.Max(Math.Abs(a.X), Math.Max(Math.Abs(a.Y), Math.Abs(a.X + a.Y)));
+            int distB = Math.Max(Math.Abs(b.X), Math.Max(Math.Abs(b.Y), Math.Abs(b.X + b.Y)));
+            if (distA != distB) return distA.CompareTo(distB);
+            return MathF.Atan2(a.Y, a.X).CompareTo(MathF.Atan2(b.Y, b.X));
+        });
+
+        if (candidates.Count > 0)
+        {
+            var chosen = candidates[0];
+            _occupiedAxials.Add(chosen);
+
+            // Konversi koordinat aksial heksagonal (q, r) ke piksel presisi
+            float x = MathF.Sqrt(3.0f) * HexRadius * (chosen.X + chosen.Y * 0.5f);
+            float y = 1.5f * HexRadius * chosen.Y;
+            _hexCellOffsets.Add(new Vector2(x, y));
+            QueueRedraw();
+        }
     }
 
     public override void _PhysicsProcess(double delta)
@@ -89,12 +138,12 @@ public partial class PlayerCore : CharacterBody2D
             Vector2[] points = GetHexPoints(offset, HexRadius);
 
             // Lapisan aura luar
-            DrawPolyline(points, CoreAuraColor, 4.0f, true);
+            DrawPolyline(points, CoreAuraColor, 3.5f, true);
             // Lapisan garis neon inti
-            DrawPolyline(points, CoreLineColor, 1.8f, true);
+            DrawPolyline(points, CoreLineColor, 1.6f, true);
 
             // Inti reaktor di tengah tiap sel
-            DrawCircle(offset, 4.0f * pulse, CenterPulseColor);
+            DrawCircle(offset, 3.5f * pulse, CenterPulseColor);
         }
     }
 
@@ -110,4 +159,3 @@ public partial class PlayerCore : CharacterBody2D
         return pts;
     }
 }
-

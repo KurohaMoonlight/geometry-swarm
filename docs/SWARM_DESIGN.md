@@ -58,13 +58,16 @@ Pemain menggunakan swarm penyerang sebagai proyektil langsung. Masing-masing mem
   * Memiliki radius *hitbox* melingkar yang luas; memotong kerumunan swarm musuh secara serentak.
   * Sangat efektif untuk menangkal serbuan kawanan musuh yang bergerombol padat (*anti-swarm*).
 
-### **C. Heavy Lance (Penghancur Armor / Shockwave Breaker)**
-* **Bentuk Geometri**: Belah ketupat ganda bertumpuk dengan inti padat (*heavy diamond spike*).
-* **Warna Neon**: Merah Scarlet / Crimson Flare (`#FF2400`).
+### **C. Drill Drone (Bor Spiral / Super Giga Drill Break)**
+* **Bentuk Geometri**: Mata bor bertingkat spiral (*stepped spiral drill cone*).
+* **Warna Neon**: Merah Scarlet / Crimson Flare dengan percikan oranye (`#FF2400` & `#FF7700`).
 * **Sifat & Mekanik**:
-  * Akselerasi lebih lambat, namun memiliki massa kinetik sangat besar.
-  * **Grid Shockwave**: Saat menabrak target atau meledak, menghasilkan **gelombang kejut radial kuat** pada grid arena yang mementalkan musuh di sekitarnya.
-  * Spesialis pembobol Guardian lawan atau penghancur Core musuh.
+  * **Kinetic Spiral**: Melesat sambil berputar bor kencang, memiliki daya penetrasi tinggi menembus barisan pertahanan musuh.
+  * **SUPER GIGA DRILL BREAK (Charge Mode)**:
+    * Saat pemain menahan tombol **Klik Kanan**, seluruh unit Drill Drone di kawanan akan ditarik paksa menuju moncong depan kapal induk.
+    * Seluruh drone bor menyatu (*merge*) dan berputar dalam pusaran vortex berenergi raksasa.
+    * Semakin banyak unit Drill Drone yang dimiliki, semakin raksasa ukuran mata bor yang tercipta!
+    * **Saat Dilepaskan**: Mata bor raksasa **Super Giga Drill Break** meluncur kencang dengan kecepatan ekstrem ($1.750\text{ px/s}$), memicu gelombang kejut dahsyat pada grid arena, membabat habis semua rintangan di jalurnya sebelum terpecah kembali dan terbang pulang ke Core.
 
 ### **D. Crescent Boomerang (Flanker / Otomatis Kembali)**
 * **Bentuk Geometri**: Lengkungan bulan sabit tajam (*arc wing blade*).
