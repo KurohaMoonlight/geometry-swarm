@@ -10,16 +10,15 @@ using static GeometrySwarm.Gameplay.Asteroid;
 namespace GeometrySwarm.Gameplay;
 
 /// <summary>
-/// Driver utama simulasi kawanan Arch ECS.
-/// - Menghubungkan seluruh varian Attacker (Dart, Shuriken, Bor, Boomerang).
-/// - Mengatur Defender (Guardian) organik di sekitar Core (~120px) dengan 12 Sektor Pertahanan Spatial Grid.
-/// - Mengatur Mekanik Laser Penambangan (Raymarching & Erosion 13 px):
-///   * Sinar laser menembakkan ray dari titik fokus miner menuju arah kursor dan berhenti tepat di blok solid 13 px pertama.
-///   * Menyalurkan panas bertahap (oranye panas -> kuning pijar) hingga blok 13 px hancur dalam sepersekian detik
-///     (batu menjadi partikel debu / kristal menjadi pecahan materi yang diserap Core) dan berstatus Empty.
-///   * Di frame berikutnya, sinar otomatis masuk 1 langkah lebih dalam ke blok di belakangnya, membentuk terowongan!
-///   * Tampilan laser ramping & tajam (3–5 px, clean & industrial), mulai dari berkas tipis terfokus saat ditembakkan,
-///     dengan kepadatan, frekuensi gelombang, dan kecepatan kikis yang meningkat seiring jumlah Mining Droid.
+/// Driver utama simulasi kawanan Arch ECS, Laser Multi-Blok Dinamis, & GUI Pabrik Interaktif (Hive Foundry).
+/// - Skala Lebar Laser:
+///   * 1 - 14 Mining Droid : Lebar 3-5 px (1 blok 13 px)
+///   * 15 - 29 Mining Droid: Lebar 16-20 px (>1 blok, mengikis 2 blok 26 px sekaligus!)
+///   * 30 - 44 Mining Droid: Lebar 28-33 px (>2 blok, mengikis 3 blok 39 px sekaligus!)
+///   * 45+ Mining Droid    : Lebar 40-48 px (>3 blok, mengikis 4+ blok 52 px sekaligus!)
+/// - GUI Pabrik Interaktif (Hive Foundry):
+///   * Menampilkan stok 5 Resource (Ferrite, Quartz, Carbide, Vortexum, Aether).
+///   * 8 Tombol Rakit yang bisa diklik langsung dengan mouse beserta tombol [AUTO] per unit.
 /// </summary>
 public partial class SwarmSimulation : Node2D
 {
@@ -41,8 +40,25 @@ public partial class SwarmSimulation : Node2D
         public float MaxLife;
         public float Size;
         public bool IsCrystalMatter;
-        public SwarmRole ResourceRole;
-        public bool IsEnergyMatter;
+        public ResourceType MatterType;
+    }
+
+    private sealed class FactoryRecipe
+    {
+        public string Name = "";
+        public string Glyph = "";
+        public string Description = "";
+        public string HotkeyLabel = "";
+        public SwarmRole Role;
+        public bool IsCoreExpansion;
+        public int OutputCount;
+        public int[] Costs = new int[5]; // [Ferrite, Quartz, Carbide, Vortexum, Aether]
+        public Color ThemeColor;
+        public Button? CraftButton;
+        public Button? AutoButton;
+        public Label? CostLabel;
+        public ProgressBar? ProgressBar;
+        public bool AutoCraftEnabled;
     }
 
     [Export] public int InitialSwarmCount { get; set; } = 15;
@@ -54,16 +70,14 @@ public partial class SwarmSimulation : Node2D
     private PlayerCore _playerCore = null!;
     private SwarmMultiMeshRenderer _renderer = null!;
 
-    // Warna neon dasar per peran
-    private static readonly Color DartColor = new(2.2f, 2.4f, 0.4f, 1.0f);     // Kuning/Lime Terang
-    private static readonly Color ShurikenColor = new(2.6f, 0.4f, 2.0f, 1.0f); // Magenta Elektrik
-    private static readonly Color DrillColor = new(3.0f, 0.8f, 0.3f, 1.0f);    // Oranye/Crimson Bor
-    private static readonly Color CrescentColor = new(0.4f, 2.8f, 1.2f, 1.0f); // Hijau Zamrud
-    private static readonly Color GuardianColor = new(0.3f, 2.2f, 2.8f, 1.0f); // Cyan Perisai ]]
-    private static readonly Color ScannerColor = new(2.5f, 0.5f, 3.6f, 1.0f);  // Violet Radar Sensor
-    private static readonly Color MiningColor = new(3.4f, 1.6f, 0.3f, 1.0f);   // Oranye Magnet Harvester
+    private static readonly Color DartColor = new(2.2f, 2.4f, 0.4f, 1.0f);
+    private static readonly Color ShurikenColor = new(2.6f, 0.4f, 2.0f, 1.0f);
+    private static readonly Color DrillColor = new(3.0f, 0.8f, 0.3f, 1.0f);
+    private static readonly Color CrescentColor = new(0.4f, 2.8f, 1.2f, 1.0f);
+    private static readonly Color GuardianColor = new(0.3f, 2.2f, 2.8f, 1.0f);
+    private static readonly Color ScannerColor = new(2.5f, 0.5f, 3.6f, 1.0f);
+    private static readonly Color MiningColor = new(3.4f, 1.6f, 0.3f, 1.0f);
 
-    // Status hitungan unit real-time
     public int EntityCount => _entityCount;
     public int OrbitingCount => _boidSystem.OrbitingCount;
     public int LaunchedCount => _boidSystem.LaunchedCount;
@@ -79,7 +93,6 @@ public partial class SwarmSimulation : Node2D
     public bool IsChargingDrill => _isChargingDrill;
     public bool IsGigaDrillActive => _isGigaDrillActive;
 
-    // Telemetri Giga Drill untuk efek riak robekan ruang-waktu & exhaust roket pada GridPhysics (arena.gd)
     public Vector2 GigaDrillTipPosition { get; private set; } = Vector2.Zero;
     public Vector2 GigaDrillBasePosition { get; private set; } = Vector2.Zero;
     public Vector2 GigaDrillDirection { get; private set; } = Vector2.Right;
@@ -94,27 +107,40 @@ public partial class SwarmSimulation : Node2D
 
     private int _entityCount = 0;
 
-    // Timer laju tembakan kontinu (LMB stream fire)
     private float _fireCooldown = 0.0f;
     private const float StreamFireInterval = 0.035f;
 
     // =========================================================================
-    // PARAMETER LASER PENAMBANGAN (RAYMARCHING 13 PX, CLEAN & INDUSTRIAL 3-5 PX)
+    // PARAMETER LASER PENAMBANGAN MULTI-BLOK (SKALA 15+ MINER -> LEBAR > 1 BLOK)
     // =========================================================================
     private bool _isMiningLaserActive = false;
-    private float _laserFocusWarmup = 0.0f;            // Transisi dari berkas tipis terfokus saat tombol ditekan (0..1)
-    private float _laserPulseTimer = 0.0f;             // Fase frekuensi gelombang laser dinamis
+    private float _laserPrimingTimer = 0.0f;
+    private const float LaserPrimingDuration = 0.28f; // Priming time singkat (280 ms) sebelum menembak
+    private float _laserFocusWarmup = 0.0f;
+    private float _laserPulseTimer = 0.0f;
+    private int _currentLaserBlockSpan = 1;
+    private float _currentVisualBeamWidth = 4.0f;
     private Vector2 _laserConvergencePoint = Vector2.Zero;
     private Vector2 _laserImpactPoint = Vector2.Zero;
     private Vector2 _laserAimDir = Vector2.Right;
-    private bool _laserHasVoxelHit = false;
-    private Vector2 _laserHitVoxelWorldCenter = Vector2.Zero;
     private float _laserHitAsteroidRotation = 0.0f;
-    private float _laserHitVoxelHeat = 0.0f;
-    private VoxelType _laserHitVoxelType = VoxelType.Empty;
+    private readonly List<(Vector2 worldCenter, float heat, VoxelType type)> _laserActiveHitBoxes = new();
     private readonly List<Vector2> _activeMinerPositions = new();
     private readonly List<MiningDebrisParticle> _miningDebris = new();
-    private int _harvestedEnergyShards = 0;
+
+    // =========================================================================
+    // INVENTORI 5 RESOURCE & GUI PABRIK INTERAKTIF (HIVE FOUNDRY)
+    // =========================================================================
+    private readonly int[] _resourceStock = new int[5] { 80, 60, 50, 40, 30 };
+    private readonly Label[] _resourceLabels = new Label[5];
+    private Label? _laserTierInfoLabel;
+    private PanelContainer? _foundryMainPanel;
+    private VBoxContainer? _foundryRecipesBox;
+    private Button? _toggleFoundryButton;
+    private Tween? _foundrySlideTween;
+    private bool _isFoundryExpanded = true;
+    private float _autoCraftTimer = 0.0f;
+    private readonly List<FactoryRecipe> _recipes = new();
 
     // Parameter Super Giga Drill Break
     private bool _isChargingDrill = false;
@@ -143,88 +169,589 @@ public partial class SwarmSimulation : Node2D
 
     public override void _Ready()
     {
-        // 1. Inisialisasi Arch ECS
         _world = World.Create();
         _boidSystem = new BoidSystem(_world);
         _allSwarmQuery = new QueryDescription().WithAll<PositionComponent, VelocityComponent, SwarmUnitComponent, VisualComponent>();
 
-        // 2. Ambil referensi node
         _playerCore = GetNode<PlayerCore>("PlayerCore");
         _renderer = GetNode<SwarmMultiMeshRenderer>("SwarmRenderer");
 
-        // 3. Spawn kawanan starter awal (5 Scanner Swarm + 10 Mining Droid)
+        InitializeRecipes();
+        CallDeferred(MethodName.BuildInteractiveFoundryGui);
         SpawnStartingSwarm();
     }
 
-    /// <summary>
-    /// Memunculkan komposisi awal permainan: 5 Scanner Swarm + 10 Mining Droid
-    /// </summary>
     public void SpawnStartingSwarm()
     {
         AddSpecificSwarm(SwarmRole.ScannerDrone, 5);
         AddSpecificSwarm(SwarmRole.MiningDroid, 10);
     }
 
-    public void SpawnBalancedSwarm(int totalCount)
+    private void InitializeRecipes()
     {
-        Vector2 corePos = _playerCore.GlobalPosition;
+        _recipes.Clear();
 
-        for (int i = 0; i < totalCount; i++)
+        // 1. Dart Needle (+10): 10 Ferrite
+        _recipes.Add(new FactoryRecipe
         {
-            float initialAngle = GD.Randf() * Mathf.Tau;
+            Name = "Dart Needle (+10)",
+            Glyph = "▲",
+            Description = "Swarm penusuk cepat & lincah jarak jauh",
+            HotkeyLabel = "[1]",
+            Role = SwarmRole.DartNeedle,
+            OutputCount = 10,
+            Costs = new[] { 10, 0, 0, 0, 0 },
+            ThemeColor = new Color(0.95f, 1.0f, 0.35f)
+        });
 
-            SwarmRole role;
-            Color color;
-            float scale = 0.52f;
-            float orbitDist = 38.0f + GD.Randf() * 75.0f;
-            int mod = i % 25;
+        // 2. Mining Droid (+2): 10 Ferrite, 8 Quartz, 2 Aether
+        _recipes.Add(new FactoryRecipe
+        {
+            Name = "Mining Droid (+2)",
+            Glyph = "⛏",
+            Description = "Gali batu asteroid & perlebar laser kapal",
+            HotkeyLabel = "[2]",
+            Role = SwarmRole.MiningDroid,
+            OutputCount = 2,
+            Costs = new[] { 10, 8, 0, 0, 2 },
+            ThemeColor = new Color(1.0f, 0.68f, 0.22f)
+        });
 
-            if (mod < 9)
-            {
-                role = SwarmRole.DartNeedle;
-                color = DartColor;
-                scale = 0.52f;
-            }
-            else if (mod < 13)
-            {
-                role = SwarmRole.GigaShuriken;
-                color = ShurikenColor;
-                scale = 0.56f;
-            }
-            else if (mod < 19)
-            {
-                role = SwarmRole.DrillDrone;
-                color = DrillColor;
-                scale = 0.58f;
-                DrillDroneCount++;
-            }
-            else if (mod < 22)
-            {
-                role = SwarmRole.CrescentBoomerang;
-                color = CrescentColor;
-                scale = 0.54f;
-            }
-            else
-            {
-                role = SwarmRole.Guardian;
-                color = GuardianColor;
-                scale = 0.72f;
-                orbitDist = 88.0f + (GD.Randf() - 0.5f) * 16.0f;
-                GuardianCount++;
-            }
+        // 3. Scanner Drone (+2): 6 Ferrite, 12 Quartz, 2 Aether
+        _recipes.Add(new FactoryRecipe
+        {
+            Name = "Scanner Drone (+2)",
+            Glyph = "◈",
+            Description = "Pindai deposit mineral tersembunyi",
+            HotkeyLabel = "[3]",
+            Role = SwarmRole.ScannerDrone,
+            OutputCount = 2,
+            Costs = new[] { 6, 12, 0, 0, 2 },
+            ThemeColor = new Color(0.85f, 0.50f, 1.0f)
+        });
 
-            float orbitSpeed = (GD.Randf() > 0.45f ? 1.0f : -1.0f) * (0.8f + GD.Randf() * 0.7f);
-            Vector2 spawnPos = corePos + new Vector2(MathF.Cos(initialAngle), MathF.Sin(initialAngle)) * orbitDist;
+        // 4. Guardian Shield (+5): 12 Ferrite, 12 Quartz, 8 Carbide
+        _recipes.Add(new FactoryRecipe
+        {
+            Name = "Guardian Shield (+5)",
+            Glyph = "⛨",
+            Description = "Perisai putar tangguh penahan musuh",
+            HotkeyLabel = "[4]",
+            Role = SwarmRole.Guardian,
+            OutputCount = 5,
+            Costs = new[] { 12, 12, 8, 0, 0 },
+            ThemeColor = new Color(0.25f, 0.92f, 1.0f)
+        });
 
-            _world.Create(
-                new PositionComponent(spawnPos),
-                new VelocityComponent(Vector2.Zero),
-                new SwarmUnitComponent(role, 0, orbitDist, orbitSpeed),
-                new VisualComponent(color, scale)
-            );
+        // 5. Drill Drone / Lance (+5): 12 Ferrite, 18 Carbide, 4 Aether
+        _recipes.Add(new FactoryRecipe
+        {
+            Name = "Drill Drone (+5)",
+            Glyph = "▼",
+            Description = "Penembus batu & tombak peluncur",
+            HotkeyLabel = "[5]",
+            Role = SwarmRole.DrillDrone,
+            OutputCount = 5,
+            Costs = new[] { 12, 0, 18, 0, 4 },
+            ThemeColor = new Color(1.0f, 0.38f, 0.25f)
+        });
 
-            _entityCount++;
+        // 6. Giga Shuriken (+5): 10 Ferrite, 14 Carbide, 10 Vortexum
+        _recipes.Add(new FactoryRecipe
+        {
+            Name = "Giga Shuriken (+5)",
+            Glyph = "✹",
+            Description = "Cakram putar pemotong rintangan",
+            HotkeyLabel = "[6]",
+            Role = SwarmRole.GigaShuriken,
+            OutputCount = 5,
+            Costs = new[] { 10, 0, 14, 10, 0 },
+            ThemeColor = new Color(1.0f, 0.32f, 0.85f)
+        });
+
+        // 7. Crescent Boomerang (+5): 8 Quartz, 16 Vortexum, 4 Aether
+        _recipes.Add(new FactoryRecipe
+        {
+            Name = "Boomerang (+5)",
+            Glyph = "☽",
+            Description = "Sapu melengkung area luas dan kembali",
+            HotkeyLabel = "[7]",
+            Role = SwarmRole.CrescentBoomerang,
+            OutputCount = 5,
+            Costs = new[] { 0, 8, 0, 16, 4 },
+            ThemeColor = new Color(0.32f, 1.0f, 0.65f)
+        });
+
+        // 8. Expand Hive Core (+1 Hex): 35 Ferrite, 25 Quartz, 25 Carbide, 20 Aether
+        _recipes.Add(new FactoryRecipe
+        {
+            Name = "Expand Hive Core (+1 Hex)",
+            Glyph = "⬡",
+            Description = "Membelah sel core secara mitosis",
+            HotkeyLabel = "[8]",
+            IsCoreExpansion = true,
+            OutputCount = 1,
+            Costs = new[] { 35, 25, 25, 0, 20 },
+            ThemeColor = new Color(1.0f, 0.88f, 0.35f)
+        });
+    }
+
+    private const float FoundryPanelWidth = 380.0f;
+    private const float FoundryOpenX = 16.0f;
+    private const float FoundryClosedX = -410.0f;
+    private const float FoundryOpenBtnX = 276.0f;
+    private const float FoundryClosedBtnX = 0.0f;
+
+    /// <summary>
+    /// Membangun GUI Pabrik (Hive Foundry) bergaya Cyber-Glassmorphic dengan animasi sliding halus
+    /// dan kartu unit ramah pengguna.
+    /// </summary>
+    private void BuildInteractiveFoundryGui()
+    {
+        CanvasLayer? hudLayer = GetParent()?.GetNodeOrNull<CanvasLayer>("HUD");
+        if (hudLayer == null) return;
+
+        // Gaya Panel Kaca Transparan Cyber-Glassmorphic
+        var panelStyle = new StyleBoxFlat
+        {
+            BgColor = new Color(0.04f, 0.045f, 0.08f, 0.92f),
+            BorderColor = new Color(0.25f, 0.65f, 1.0f, 0.65f),
+            BorderWidthLeft = 2,
+            BorderWidthTop = 2,
+            BorderWidthRight = 2,
+            BorderWidthBottom = 2,
+            CornerRadiusTopLeft = 10,
+            CornerRadiusTopRight = 10,
+            CornerRadiusBottomLeft = 10,
+            CornerRadiusBottomRight = 10,
+            ContentMarginLeft = 12,
+            ContentMarginRight = 12,
+            ContentMarginTop = 10,
+            ContentMarginBottom = 10
+        };
+
+        _foundryMainPanel = new PanelContainer
+        {
+            Name = "HiveFoundryPanel",
+            Position = new Vector2(FoundryOpenX, 72),
+            CustomMinimumSize = new Vector2(FoundryPanelWidth, 0),
+            MouseFilter = Control.MouseFilterEnum.Stop
+        };
+        _foundryMainPanel.AddThemeStyleboxOverride("panel", panelStyle);
+        hudLayer.AddChild(_foundryMainPanel);
+
+        var rootVBox = new VBoxContainer();
+        rootVBox.AddThemeConstantOverride("separation", 6);
+        _foundryMainPanel.AddChild(rootVBox);
+
+        // 1. Header Pabrik
+        var headerHBox = new HBoxContainer();
+        headerHBox.AddThemeConstantOverride("separation", 8);
+        rootVBox.AddChild(headerHBox);
+
+        var titleLbl = new Label
+        {
+            Text = "⚙ HIVE FOUNDRY // PABRIK",
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
+        };
+        titleLbl.AddThemeColorOverride("font_color", new Color(1.0f, 0.88f, 0.35f));
+        titleLbl.AddThemeFontSizeOverride("font_size", 14);
+        headerHBox.AddChild(titleLbl);
+
+        // Tombol Lipat/Buka (Slide Handle) yang Selalu Terlihat & Bisa Diklik
+        var tabStyle = new StyleBoxFlat
+        {
+            BgColor = new Color(0.06f, 0.09f, 0.16f, 0.95f),
+            BorderColor = new Color(0.35f, 0.85f, 1.0f, 0.85f),
+            BorderWidthLeft = 2,
+            BorderWidthTop = 2,
+            BorderWidthRight = 2,
+            BorderWidthBottom = 2,
+            CornerRadiusTopLeft = 0,
+            CornerRadiusBottomLeft = 0,
+            CornerRadiusTopRight = 8,
+            CornerRadiusBottomRight = 8,
+            ContentMarginLeft = 8,
+            ContentMarginRight = 10,
+            ContentMarginTop = 4,
+            ContentMarginBottom = 4
+        };
+
+        _toggleFoundryButton = new Button
+        {
+            Text = "◀ TUTUP [TAB]",
+            Position = new Vector2(FoundryOpenBtnX, 72),
+            CustomMinimumSize = new Vector2(110, 28),
+            MouseFilter = Control.MouseFilterEnum.Stop,
+            FocusMode = Control.FocusModeEnum.None
+        };
+        _toggleFoundryButton.AddThemeStyleboxOverride("normal", tabStyle);
+        _toggleFoundryButton.AddThemeStyleboxOverride("hover", tabStyle);
+        _toggleFoundryButton.AddThemeStyleboxOverride("pressed", tabStyle);
+        _toggleFoundryButton.AddThemeColorOverride("font_color", new Color(0.4f, 2.2f, 2.6f));
+        _toggleFoundryButton.AddThemeFontSizeOverride("font_size", 11);
+        _toggleFoundryButton.Pressed += ToggleFoundryPanel;
+        hudLayer.AddChild(_toggleFoundryButton);
+
+        // 2. Bar Inventori 5 Resource Real-Time (Capsule Pill Cards)
+        var resHBox = new HBoxContainer();
+        resHBox.AddThemeConstantOverride("separation", 6);
+        rootVBox.AddChild(resHBox);
+
+        string[] resSymbols = { "◆ Fe", "◆ Qz", "◆ Cb", "◆ Vx", "⚡ Ae" };
+        Color[] resUiColors =
+        {
+            new(0.95f, 1.0f, 0.35f),  // Ferrite (Amber)
+            new(0.25f, 0.92f, 1.0f),  // Quartz (Cyan)
+            new(1.0f, 0.42f, 0.25f),  // Carbide (Crimson)
+            new(0.3f, 1.0f, 0.6f),    // Vortexum (Emerald)
+            new(1.0f, 0.92f, 0.45f)   // Aether (Astral Gold)
+        };
+
+        for (int r = 0; r < 5; r++)
+        {
+            var pillPanel = new PanelContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+            var pillStyle = new StyleBoxFlat
+            {
+                BgColor = new Color(0.08f, 0.10f, 0.16f, 0.85f),
+                BorderColor = resUiColors[r] * 0.4f,
+                BorderWidthLeft = 1,
+                BorderWidthTop = 1,
+                BorderWidthRight = 1,
+                BorderWidthBottom = 1,
+                CornerRadiusTopLeft = 4,
+                CornerRadiusTopRight = 4,
+                CornerRadiusBottomLeft = 4,
+                CornerRadiusBottomRight = 4,
+                ContentMarginLeft = 4,
+                ContentMarginRight = 4,
+                ContentMarginTop = 2,
+                ContentMarginBottom = 2
+            };
+            pillPanel.AddThemeStyleboxOverride("panel", pillStyle);
+            resHBox.AddChild(pillPanel);
+
+            var lbl = new Label
+            {
+                Text = $"{resSymbols[r]}: {_resourceStock[r]}",
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            lbl.AddThemeColorOverride("font_color", resUiColors[r]);
+            lbl.AddThemeFontSizeOverride("font_size", 11);
+            pillPanel.AddChild(lbl);
+            _resourceLabels[r] = lbl;
         }
+
+        // Info Lebar Laser Saat Ini
+        _laserTierInfoLabel = new Label
+        {
+            Text = "⚡ LASER: Tier 1 (1 Blok / 13px) • 10/15 Miner"
+        };
+        _laserTierInfoLabel.AddThemeColorOverride("font_color", new Color(1.0f, 0.76f, 0.35f));
+        _laserTierInfoLabel.AddThemeFontSizeOverride("font_size", 11);
+        rootVBox.AddChild(_laserTierInfoLabel);
+
+        // 3. Scroll Container untuk Daftar Kartu Unit (Modern Card List)
+        var scrollContainer = new ScrollContainer
+        {
+            CustomMinimumSize = new Vector2(FoundryPanelWidth - 24, 430),
+            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+            VerticalScrollMode = ScrollContainer.ScrollMode.Auto
+        };
+        rootVBox.AddChild(scrollContainer);
+
+        _foundryRecipesBox = new VBoxContainer();
+        _foundryRecipesBox.AddThemeConstantOverride("separation", 6);
+        _foundryRecipesBox.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        scrollContainer.AddChild(_foundryRecipesBox);
+
+        for (int i = 0; i < _recipes.Count; i++)
+        {
+            int recipeIndex = i;
+            var rec = _recipes[i];
+
+            var cardPanel = new PanelContainer();
+            cardPanel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+            var cardStyle = new StyleBoxFlat
+            {
+                BgColor = new Color(0.05f, 0.06f, 0.11f, 0.88f),
+                BorderColor = rec.ThemeColor * 0.5f,
+                BorderWidthLeft = 3,
+                BorderWidthTop = 1,
+                BorderWidthRight = 1,
+                BorderWidthBottom = 1,
+                CornerRadiusTopLeft = 6,
+                CornerRadiusTopRight = 6,
+                CornerRadiusBottomLeft = 6,
+                CornerRadiusBottomRight = 6,
+                ContentMarginLeft = 8,
+                ContentMarginRight = 8,
+                ContentMarginTop = 5,
+                ContentMarginBottom = 5
+            };
+            cardPanel.AddThemeStyleboxOverride("panel", cardStyle);
+            _foundryRecipesBox.AddChild(cardPanel);
+
+            var cardVBox = new VBoxContainer();
+            cardVBox.AddThemeConstantOverride("separation", 3);
+            cardPanel.AddChild(cardVBox);
+
+            // Baris 1: Glyph + Hotkey + Nama Unit + Tombol Auto-Craft
+            var topHBox = new HBoxContainer();
+            topHBox.AddThemeConstantOverride("separation", 6);
+            cardVBox.AddChild(topHBox);
+
+            var titleLabel = new Label
+            {
+                Text = $"{rec.HotkeyLabel} {rec.Glyph} {rec.Name}",
+                SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
+            };
+            titleLabel.AddThemeColorOverride("font_color", rec.ThemeColor);
+            titleLabel.AddThemeFontSizeOverride("font_size", 12);
+            topHBox.AddChild(titleLabel);
+
+            var autoBtn = new Button
+            {
+                Text = "AUTO",
+                CustomMinimumSize = new Vector2(56, 20),
+                MouseFilter = Control.MouseFilterEnum.Stop,
+                FocusMode = Control.FocusModeEnum.None
+            };
+            autoBtn.AddThemeFontSizeOverride("font_size", 10);
+            autoBtn.Pressed += () => ToggleAutoCraft(recipeIndex);
+            topHBox.AddChild(autoBtn);
+            rec.AutoButton = autoBtn;
+
+            // Baris 2: Deskripsi Ramah & Informatif
+            var descLabel = new Label
+            {
+                Text = rec.Description
+            };
+            descLabel.AddThemeColorOverride("font_color", new Color(0.68f, 0.72f, 0.82f, 0.85f));
+            descLabel.AddThemeFontSizeOverride("font_size", 10);
+            cardVBox.AddChild(descLabel);
+
+            // Baris 3: Tag Biaya Bahan + Tombol Rakit
+            var botHBox = new HBoxContainer();
+            botHBox.AddThemeConstantOverride("separation", 6);
+            cardVBox.AddChild(botHBox);
+
+            var costLbl = new Label
+            {
+                SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
+            };
+            costLbl.AddThemeFontSizeOverride("font_size", 11);
+            botHBox.AddChild(costLbl);
+            rec.CostLabel = costLbl;
+
+            var craftBtn = new Button
+            {
+                Text = "RAKIT",
+                CustomMinimumSize = new Vector2(80, 24),
+                MouseFilter = Control.MouseFilterEnum.Stop,
+                FocusMode = Control.FocusModeEnum.None
+            };
+            craftBtn.AddThemeFontSizeOverride("font_size", 11);
+            craftBtn.Pressed += () => TryCraftRecipe(recipeIndex);
+            botHBox.AddChild(craftBtn);
+            rec.CraftButton = craftBtn;
+
+            // Khusus Core Expansion: Progress Bar Mitosis
+            if (rec.IsCoreExpansion)
+            {
+                var pbar = new ProgressBar
+                {
+                    CustomMinimumSize = new Vector2(0, 6),
+                    ShowPercentage = false,
+                    MinValue = 0,
+                    MaxValue = 100,
+                    Value = 0,
+                    Visible = false
+                };
+                cardVBox.AddChild(pbar);
+                rec.ProgressBar = pbar;
+            }
+        }
+
+        // 4. Tombol Uji Tambah Resource
+        var cheatBtn = new Button
+        {
+            Text = "+ Tambah Semua Bahan (+50) [Uji Coba]",
+            CustomMinimumSize = new Vector2(0, 26),
+            MouseFilter = Control.MouseFilterEnum.Stop,
+            FocusMode = Control.FocusModeEnum.None
+        };
+        cheatBtn.AddThemeFontSizeOverride("font_size", 10);
+        cheatBtn.Pressed += () =>
+        {
+            for (int r = 0; r < 5; r++) _resourceStock[r] += 50;
+            RefreshFoundryGui();
+        };
+        rootVBox.AddChild(cheatBtn);
+
+        RefreshFoundryGui();
+    }
+
+    private void ToggleFoundryPanel()
+    {
+        _isFoundryExpanded = !_isFoundryExpanded;
+
+        _foundrySlideTween?.Kill();
+        _foundrySlideTween = CreateTween().SetTrans(Tween.TransitionType.Cubic).SetEase(Tween.EaseType.Out).SetParallel(true);
+
+        float targetPanelX = _isFoundryExpanded ? FoundryOpenX : FoundryClosedX;
+        float targetBtnX = _isFoundryExpanded ? FoundryOpenBtnX : FoundryClosedBtnX;
+
+        if (_foundryMainPanel != null)
+        {
+            _foundrySlideTween.TweenProperty(_foundryMainPanel, "position:x", targetPanelX, 0.32f);
+        }
+
+        if (_toggleFoundryButton != null)
+        {
+            _toggleFoundryButton.Text = _isFoundryExpanded ? "◀ TUTUP [TAB]" : "⚙ PABRIK [TAB] ▶";
+            _foundrySlideTween.TweenProperty(_toggleFoundryButton, "position:x", targetBtnX, 0.32f);
+        }
+    }
+
+    private void ToggleAutoCraft(int recipeIndex)
+    {
+        if (recipeIndex < 0 || recipeIndex >= _recipes.Count) return;
+        var rec = _recipes[recipeIndex];
+        rec.AutoCraftEnabled = !rec.AutoCraftEnabled;
+        RefreshFoundryGui();
+    }
+
+    private bool CanAffordRecipe(FactoryRecipe rec)
+    {
+        for (int r = 0; r < 5; r++)
+        {
+            if (_resourceStock[r] < rec.Costs[r]) return false;
+        }
+        return true;
+    }
+
+    public bool TryCraftRecipe(int recipeIndex)
+    {
+        if (recipeIndex < 0 || recipeIndex >= _recipes.Count) return false;
+        var rec = _recipes[recipeIndex];
+        if (!CanAffordRecipe(rec)) return false;
+
+        for (int r = 0; r < 5; r++)
+        {
+            _resourceStock[r] -= rec.Costs[r];
+        }
+
+        if (rec.IsCoreExpansion)
+        {
+            _playerCore.AddNextHoneycombCell();
+        }
+        else
+        {
+            AddSpecificSwarm(rec.Role, rec.OutputCount);
+        }
+
+        RefreshFoundryGui();
+        return true;
+    }
+
+    private void RefreshFoundryGui()
+    {
+        string[] resSymbols = { "◆ Fe", "◆ Qz", "◆ Cb", "◆ Vx", "⚡ Ae" };
+        for (int r = 0; r < 5; r++)
+        {
+            if (_resourceLabels[r] != null)
+            {
+                _resourceLabels[r].Text = $"{resSymbols[r]}: {_resourceStock[r]}";
+            }
+        }
+
+        if (_laserTierInfoLabel != null)
+        {
+            int span = 1 + (MiningCount / 15);
+            int nextThreshold = (MiningCount / 15 + 1) * 15;
+            _laserTierInfoLabel.Text = $"⚡ LASER: Tier {span} (Lebar {span * 13}px) • {MiningCount}/{nextThreshold} Miner";
+        }
+
+        string[] shortNames = { "Fe", "Qz", "Cb", "Vx", "⚡Ae" };
+
+        for (int i = 0; i < _recipes.Count; i++)
+        {
+            var rec = _recipes[i];
+            bool affordable = CanAffordRecipe(rec);
+
+            // Perbarui label biaya bahan (menyorot merah jika bahan tidak cukup)
+            if (rec.CostLabel != null)
+            {
+                List<string> costParts = new();
+                for (int r = 0; r < 5; r++)
+                {
+                    if (rec.Costs[r] > 0)
+                    {
+                        if (_resourceStock[r] >= rec.Costs[r])
+                        {
+                            costParts.Add($"{rec.Costs[r]} {shortNames[r]}");
+                        }
+                        else
+                        {
+                            costParts.Add($"!({_resourceStock[r]}/{rec.Costs[r]} {shortNames[r]})");
+                        }
+                    }
+                }
+                rec.CostLabel.Text = string.Join("  ", costParts);
+                rec.CostLabel.AddThemeColorOverride("font_color", affordable ? new Color(0.85f, 0.92f, 1.0f) : new Color(1.0f, 0.42f, 0.42f));
+            }
+
+            // Perbarui Tombol Rakit & Mitosis
+            if (rec.CraftButton != null)
+            {
+                if (rec.IsCoreExpansion && _playerCore != null && _playerCore.IsMitosisActive)
+                {
+                    int pct = (int)(_playerCore.MitosisProgress * 100.0f);
+                    rec.CraftButton.Text = $"MEMBELAH {pct}% ({_playerCore.MitosisRemainingTime:F1}s)";
+                    rec.CraftButton.Disabled = true;
+                    rec.CraftButton.AddThemeColorOverride("font_color", new Color(1.0f, 0.88f, 0.35f));
+
+                    if (rec.ProgressBar != null)
+                    {
+                        rec.ProgressBar.Visible = true;
+                        rec.ProgressBar.Value = pct;
+                    }
+                }
+                else
+                {
+                    rec.CraftButton.Text = rec.IsCoreExpansion ? "BELAH CORE" : "RAKIT";
+                    rec.CraftButton.Disabled = !affordable;
+                    rec.CraftButton.AddThemeColorOverride("font_color", affordable ? rec.ThemeColor : new Color(0.55f, 0.50f, 0.55f));
+
+                    if (rec.ProgressBar != null)
+                    {
+                        rec.ProgressBar.Visible = false;
+                    }
+                }
+            }
+
+            // Perbarui Tombol Auto
+            if (rec.AutoButton != null)
+            {
+                rec.AutoButton.Text = rec.AutoCraftEnabled ? "AUTO: ON" : "AUTO: OFF";
+                rec.AutoButton.AddThemeColorOverride("font_color", rec.AutoCraftEnabled ? new Color(0.3f, 1.0f, 0.5f) : new Color(0.65f, 0.65f, 0.70f));
+            }
+        }
+    }
+
+    private bool IsMouseOverFoundryGui()
+    {
+        if (GetViewport().GuiGetHoveredControl() != null) return true;
+        if (_foundryMainPanel != null && _foundryMainPanel.Visible)
+        {
+            Rect2 rect = _foundryMainPanel.GetGlobalRect();
+            if (rect.HasPoint(GetViewport().GetMousePosition()))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void AddSpecificSwarm(SwarmRole role, int count)
@@ -250,22 +777,38 @@ public partial class SwarmSimulation : Node2D
             _ => 0.55f
         };
 
+        int bayCount = Math.Max(1, _playerCore.CoreCellCount);
         int remaining = count;
+        int spawnIdx = 0;
 
         _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
             if (remaining <= 0 || swarm.State != SwarmState.Dead) return;
 
-            float orbitDist = (role == SwarmRole.Guardian)
-                ? 88.0f + (GD.Randf() - 0.5f) * 16.0f
-                : 38.0f + GD.Randf() * 75.0f;
-            float orbitSpeed = (GD.Randf() > 0.45f ? 1.0f : -1.0f) * (0.8f + GD.Randf() * 0.7f);
-            float initialAngle = GD.Randf() * Mathf.Tau;
+            int cellIdx = spawnIdx % bayCount;
+            Vector2 bayLocal = _playerCore.GetCellOffset(cellIdx);
+            Vector2 bayWorld = corePos + bayLocal.Rotated(_playerCore.Rotation);
 
-            pos.Value = corePos + new Vector2(MathF.Cos(initialAngle), MathF.Sin(initialAngle)) * orbitDist;
-            vel.Value = Vector2.Zero;
+            // Pemicu Animasi Konsep 2 (Nanite 3D Holographic Print di Palka Sel)
+            _playerCore.TriggerSwarmFabrication(role, color, cellIdx);
+
+            float orbitDist = (role == SwarmRole.Guardian)
+                ? 78.0f + (GD.Randf() - 0.5f) * 16.0f
+                : 32.0f + GD.Randf() * 68.0f;
+            float orbitSpeed = (GD.Randf() > 0.45f ? 1.0f : -1.0f) * (0.8f + GD.Randf() * 0.7f);
+
+            // Arah lontaran radial keluar dari palka sel Core dengan sedikit fanning angle
+            float baseAngle = bayLocal.LengthSquared() > 0.01f
+                ? bayLocal.Angle() + _playerCore.Rotation
+                : (GD.Randf() * Mathf.Tau);
+            float ejectAngle = baseAngle + (GD.Randf() - 0.5f) * 0.85f;
+            Vector2 ejectDir = new Vector2(MathF.Cos(ejectAngle), MathF.Sin(ejectAngle));
+
+            // Konsep 1: Hive Bay Launch (Ejection Salvo dari mulut palka Core)
+            pos.Value = bayWorld + ejectDir * 6.0f;
+            vel.Value = _playerCore.Velocity * 0.5f + ejectDir * (380.0f + GD.Randf() * 140.0f);
             swarm = new SwarmUnitComponent(role, 0, orbitDist, orbitSpeed);
-            vis = new VisualComponent(color, targetScale);
+            vis = new VisualComponent(color * 2.5f, targetScale * 0.42f);
 
             if (role == SwarmRole.DrillDrone) DrillDroneCount++;
             if (role == SwarmRole.Guardian) GuardianCount++;
@@ -273,16 +816,31 @@ public partial class SwarmSimulation : Node2D
             if (role == SwarmRole.MiningDroid) MiningCount++;
             _entityCount++;
             remaining--;
+            spawnIdx++;
         });
 
         for (int i = 0; i < remaining; i++)
         {
+            int cellIdx = spawnIdx % bayCount;
+            Vector2 bayLocal = _playerCore.GetCellOffset(cellIdx);
+            Vector2 bayWorld = corePos + bayLocal.Rotated(_playerCore.Rotation);
+
+            // Pemicu Animasi Konsep 2 (Nanite 3D Holographic Print di Palka Sel)
+            _playerCore.TriggerSwarmFabrication(role, color, cellIdx);
+
             float orbitDist = (role == SwarmRole.Guardian)
-                ? 88.0f + (GD.Randf() - 0.5f) * 16.0f
-                : 38.0f + GD.Randf() * 75.0f;
+                ? 78.0f + (GD.Randf() - 0.5f) * 16.0f
+                : 32.0f + GD.Randf() * 68.0f;
             float orbitSpeed = (GD.Randf() > 0.45f ? 1.0f : -1.0f) * (0.8f + GD.Randf() * 0.7f);
-            float initialAngle = GD.Randf() * Mathf.Tau;
-            Vector2 spawnPos = corePos + new Vector2(MathF.Cos(initialAngle), MathF.Sin(initialAngle)) * orbitDist;
+
+            float baseAngle = bayLocal.LengthSquared() > 0.01f
+                ? bayLocal.Angle() + _playerCore.Rotation
+                : (GD.Randf() * Mathf.Tau);
+            float ejectAngle = baseAngle + (GD.Randf() - 0.5f) * 0.85f;
+            Vector2 ejectDir = new Vector2(MathF.Cos(ejectAngle), MathF.Sin(ejectAngle));
+
+            Vector2 spawnPos = bayWorld + ejectDir * 6.0f;
+            Vector2 spawnVel = _playerCore.Velocity * 0.5f + ejectDir * (380.0f + GD.Randf() * 140.0f);
 
             if (role == SwarmRole.DrillDrone) DrillDroneCount++;
             if (role == SwarmRole.Guardian) GuardianCount++;
@@ -291,13 +849,16 @@ public partial class SwarmSimulation : Node2D
 
             _world.Create(
                 new PositionComponent(spawnPos),
-                new VelocityComponent(Vector2.Zero),
+                new VelocityComponent(spawnVel),
                 new SwarmUnitComponent(role, 0, orbitDist, orbitSpeed),
-                new VisualComponent(color, targetScale)
+                new VisualComponent(color * 2.5f, targetScale * 0.42f)
             );
 
             _entityCount++;
+            spawnIdx++;
         }
+
+        RefreshFoundryGui();
     }
 
     public void SpawnEnemySectorAttack(Vector2 attackOriginDirPos, int enemyCount = 50)
@@ -356,18 +917,44 @@ public partial class SwarmSimulation : Node2D
 
     public override void _PhysicsProcess(double delta)
     {
-        float dt = (float)delta;
+        try
+        {
+            float dt = (float)delta;
         Vector2 corePos = _playerCore.GlobalPosition;
         Vector2 coreVel = _playerCore.Velocity;
         Vector2 mousePos = GetGlobalMousePosition();
 
-        // 0. Update visibilitas scanner ke seluruh asteroid di semesta
         Asteroid.CurrentScannerCount = ScannerCount;
 
-        // 1. Tembakan Beruntun & Laser Penambangan Raymarching 13 px (Tahan Klik Kiri)
+        // Proses Auto-Craft di Pabrik setiap 0.75 detik
+        _autoCraftTimer += dt;
+        if (_autoCraftTimer >= 0.75f)
+        {
+            _autoCraftTimer = 0.0f;
+            for (int i = 0; i < _recipes.Count; i++)
+            {
+                if (_recipes[i].AutoCraftEnabled)
+                {
+                    // Jangan auto-craft core baru jika core saat ini masih dalam proses pembelahan (mitosis)
+                    if (_recipes[i].IsCoreExpansion && _playerCore != null && _playerCore.IsMitosisActive)
+                    {
+                        continue;
+                    }
+                    TryCraftRecipe(i);
+                }
+            }
+        }
+
+        // Perbarui status dan progres bar mitosis di GUI Pabrik secara real-time
+        if (_playerCore != null && _playerCore.IsMitosisActive)
+        {
+            RefreshFoundryGui();
+        }
+
         if (_fireCooldown > 0.0f) _fireCooldown -= dt;
 
-        bool isLeftClick = Input.IsMouseButtonPressed(MouseButton.Left);
+        // Jangan menembak jika kursor sedang mengklik tombol pada GUI Pabrik!
+        bool isLeftClick = Input.IsMouseButtonPressed(MouseButton.Left) && !IsMouseOverFoundryGui();
         if (isLeftClick && !_isChargingDrill && !_isGigaDrillActive)
         {
             if (MiningCount > 0)
@@ -383,34 +970,24 @@ public partial class SwarmSimulation : Node2D
         }
         else
         {
+            _laserPrimingTimer = 0.0f;
             _laserFocusWarmup = MathF.Max(0.0f, _laserFocusWarmup - dt * 8.0f);
             if (_isMiningLaserActive)
             {
                 _isMiningLaserActive = false;
-                _laserHasVoxelHit = false;
+                _laserActiveHitBoxes.Clear();
                 QueueRedraw();
             }
         }
 
-        // 1b. Update partikel debu batu & pecahan materi kristal hasil kikisan blok 13 px
         UpdateMiningDebris(dt, corePos);
-
-        // 2. Mekanik Charge & Formasi Bertahap Super Giga Drill Break (Tahan Klik Kanan)
         HandleGigaDrillCharge(dt, corePos, coreVel, mousePos);
-
-        // 3. Update Penerbangan Super Giga Drill Break & Pelepasan Exhaust Roket Belakang
         UpdateActiveGigaDrill(dt);
-
-        // 4. Update Drone Exhaust Roket yang Sedang Terbakar & Mati
         UpdateExhaustDrones(dt);
-
-        // 5. Cek Terjangan Super Giga Drill vs Voxel Asteroid
         CheckAsteroidCollisions(dt);
 
-        // 6. Jalankan simulasi Boids Flocking, Pemindaian 12 Sektor Spatial Grid, & Kolisi Voxel Terowongan
         _boidSystem.Update(dt, corePos, coreVel, mousePos);
 
-        // 7. Update MultiMesh GPU buffer per peran (abaikan unit yang sudah Dead)
         _renderer.ResetCounters();
         _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
@@ -419,6 +996,11 @@ public partial class SwarmSimulation : Node2D
         });
         _renderer.FlushVisibleCounts();
     }
+    catch (Exception ex)
+    {
+        GD.PrintErr($"[SwarmSimulation._PhysicsProcess] {ex}");
+    }
+}
 
     private static void ComputeGigaDrillDimensions(int lanceCount, out float drillLength, out float drillBaseRadius, out float densityFactor)
     {
@@ -470,7 +1052,7 @@ public partial class SwarmSimulation : Node2D
             });
         }
 
-        Vector2 frontAnchor = corePos + aimDir * 70.0f;
+        Vector2 frontAnchor = corePos + aimDir * 56.0f;
         List<(float distSq, int tempId)> sortList = new();
         int tempCounter = 0;
 
@@ -556,7 +1138,7 @@ public partial class SwarmSimulation : Node2D
             int totalUnits = Math.Max(1, _activeDrillFormationCount);
             ComputeGigaDrillDimensions(totalUnits, out float drillLength, out float drillBaseRadius, out float densityFactor);
 
-            Vector2 tipPos = corePos + aimDir * (64.0f + chargeProgress * 38.0f);
+            Vector2 tipPos = corePos + aimDir * (52.0f + chargeProgress * 38.0f);
             Vector2 basePos = tipPos - aimDir * drillLength;
 
             GigaDrillTipPosition = tipPos;
@@ -837,7 +1419,7 @@ public partial class SwarmSimulation : Node2D
     private void LaunchSuperGigaDrill(Vector2 corePos, Vector2 aimDir, Vector2 targetPos, float chargeProgress)
     {
         _isGigaDrillActive = true;
-        _gigaDrillTipPos = corePos + aimDir * (64.0f + chargeProgress * 38.0f);
+        _gigaDrillTipPos = corePos + aimDir * (52.0f + chargeProgress * 38.0f);
         _gigaDrillAimDir = aimDir;
         _gigaDrillTargetPos = targetPos;
         _hasDefenderNoseBreached = false;
@@ -1179,10 +1761,6 @@ public partial class SwarmSimulation : Node2D
         });
     }
 
-    /// <summary>
-    /// Memeriksa terjangan Super Giga Drill Break terhadap Asteroid (melubangi sel-sel 13 px sepanjang jalurnya).
-    /// Catatan: Tumbukan peluru biasa (Launched) terhadap sel 13 px sudah ditangani langsung di BoidSystem.
-    /// </summary>
     private void CheckAsteroidCollisions(float _dt)
     {
         if (!_isGigaDrillActive) return;
@@ -1191,11 +1769,11 @@ public partial class SwarmSimulation : Node2D
         for (int i = 0; i < asteroids.Count; i++)
         {
             var ast = asteroids[i];
-            if (!GodotObject.IsInstanceValid(ast)) continue;
+            if (ast == null || !ast.IsActiveInTree) continue;
 
             float drillHitRadius = ast.OuterBoundRadius + GigaDrillRadius + 24.0f;
-            if (ast.GlobalPosition.DistanceSquaredTo(_gigaDrillTipPos) <= drillHitRadius * drillHitRadius
-                || ast.GlobalPosition.DistanceSquaredTo(GigaDrillBasePosition) <= drillHitRadius * drillHitRadius)
+            if (ast.CachedPosition.DistanceSquaredTo(_gigaDrillTipPos) <= drillHitRadius * drillHitRadius
+                || ast.CachedPosition.DistanceSquaredTo(GigaDrillBasePosition) <= drillHitRadius * drillHitRadius)
             {
                 ast.ApplyDrillBreach(_gigaDrillTipPos, _gigaDrillVel, 35000.0f, GigaDrillRadius * 0.9f);
             }
@@ -1203,17 +1781,9 @@ public partial class SwarmSimulation : Node2D
     }
 
     // =========================================================================
-    // A & C. LASER PENAMBANGAN RAYMARCHING 13 PX & VISUAL INDUSTRIAL DINAMIS
+    // LASER MULTI-BLOK DINAMIS (15+ MINER -> LEBAR > 1 BLOK, 30+ -> > 2 BLOK, DST)
     // =========================================================================
 
-    /// <summary>
-    /// 1. Menembakkan lintasan sinar (ray) dari titik fokus miner menuju arah kursor.
-    /// 2. Menelusuri sel-sel asteroid (Raymarching) dan berhenti tepat di blok solid 13 px pertama yang dihadang.
-    /// 3. Menyalurkan panas ke blok 13 px tersebut:
-    ///    - Dalam sepersekian detik, blok hancur (batu jadi debu / kristal jadi materi).
-    ///    - Blok berubah status menjadi Empty (Kosong).
-    /// 4. Di frame berikutnya sinar otomatis masuk 1 langkah lebih dalam ke blok di belakangnya (membentuk terowongan).
-    /// </summary>
     private void UpdateMiningLaser(float dt, Vector2 corePos, Vector2 mousePos)
     {
         _activeMinerPositions.Clear();
@@ -1231,110 +1801,146 @@ public partial class SwarmSimulation : Node2D
             if (_isMiningLaserActive)
             {
                 _isMiningLaserActive = false;
-                _laserHasVoxelHit = false;
+                _laserActiveHitBoxes.Clear();
                 QueueRedraw();
             }
             return;
         }
 
         _isMiningLaserActive = true;
+        _laserPrimingTimer += dt;
+        bool isPriming = _laserPrimingTimer < LaserPrimingDuration;
+        float primingProgress = Mathf.Clamp(_laserPrimingTimer / LaserPrimingDuration, 0.0f, 1.0f);
 
-        // Saat tombol tembak ditekan, sinar mulai dari berkas tipis terfokus lalu mencapai profil kerja (3-5 px)
-        _laserFocusWarmup = MathF.Min(1.0f, _laserFocusWarmup + dt * 5.5f);
+        if (isPriming)
+        {
+            _laserFocusWarmup = primingProgress * 0.42f;
+        }
+        else
+        {
+            _laserFocusWarmup = MathF.Min(1.0f, _laserFocusWarmup + dt * 6.0f);
+        }
 
-        // Frekuensi gelombang sinar meningkat secara dinamis seiring jumlah Mining Droid
         float freqMultiplier = 1.0f + minerCount * 0.14f;
         _laserPulseTimer += dt * freqMultiplier;
 
         Vector2 toMouse = mousePos - corePos;
         Vector2 aimDir = toMouse.LengthSquared() > 1.0f ? toMouse.Normalized() : Vector2.Right;
+        Vector2 tangent = new Vector2(-aimDir.Y, aimDir.X);
         _laserAimDir = aimDir;
 
-        // Titik fokus miner di depan kapal induk
-        _laserConvergencePoint = corePos + aimDir * 68.0f;
+        // Skala jumlah blok yang dikikis berdasarkan kelipatan 15 Mining Droid:
+        // 1..14 Miner = 1 blok (lebar 3.5 - 5 px)
+        // 15..29 Miner = 2 blok (lebar 16 - 20 px, lebih lebar dari 1 blok 13 px!)
+        // 30..44 Miner = 3 blok (lebar 28 - 33 px)
+        // 45..59 Miner = 4 blok (lebar 41 - 46 px)
+        // 60+ Miner    = 5 blok (lebar 53 - 58 px)
+        _currentLaserBlockSpan = Math.Clamp(1 + (minerCount / 15), 1, 5);
+        int remainderInTier = minerCount % 15;
+        float tierProgress = remainderInTier / 14.0f;
 
-        // Raymarching menelusuri seluruh asteroid untuk mencari blok solid 13 px terdekat yang dihadang sinar
+        float targetWidth = _currentLaserBlockSpan switch
+        {
+            1 => Mathf.Lerp(3.2f, 5.0f, tierProgress),
+            2 => Mathf.Lerp(15.5f, 19.5f, tierProgress),
+            3 => Mathf.Lerp(28.0f, 33.0f, tierProgress),
+            4 => Mathf.Lerp(40.5f, 46.0f, tierProgress),
+            _ => Mathf.Lerp(53.0f, 58.0f, tierProgress)
+        };
+        _currentVisualBeamWidth = isPriming ? 1.4f : Mathf.Lerp(1.5f, targetWidth, _laserFocusWarmup);
+
+        Vector2 rayBaseOrigin = corePos + aimDir * 14.0f;
         float maxRange = 2600.0f;
-        float closestDist = maxRange;
-        Vector2 finalHitPoint = _laserConvergencePoint + aimDir * maxRange;
-        Asteroid? hitAsteroid = null;
-        VoxelRayHit bestVoxelHit = default;
+
+        // Tembakkan sejumlah sub-ray sejajar melintasi lebar sinar agar seluruh blok 13 px
+        // yang tercakup dalam lebar laser ikut terkikis secara merata!
+        int subRayCount = (_currentLaserBlockSpan == 1) ? 1 : (_currentLaserBlockSpan * 2 - 1);
+        float totalLateralSpan = (_currentLaserBlockSpan - 1) * (Asteroid.VoxelSize * 0.92f);
+
+        _laserActiveHitBoxes.Clear();
+        float closestCenterDist = maxRange;
+        Vector2 centerHitPoint = rayBaseOrigin + aimDir * maxRange;
 
         var asteroids = Asteroid.ActiveAsteroids;
-        for (int i = 0; i < asteroids.Count; i++)
-        {
-            var ast = asteroids[i];
-            if (!GodotObject.IsInstanceValid(ast)) continue;
+        float erosionBlocksPerSec = 2.8f + minerCount * 0.95f;
+        float heatDeltaPerSubRay = (erosionBlocksPerSec * dt) / MathF.Max(1.0f, subRayCount * 0.42f);
 
-            if (ast.RaycastVoxel(_laserConvergencePoint, aimDir, closestDist, out VoxelRayHit vHit))
+        for (int r = 0; r < subRayCount; r++)
+        {
+            float lateralOffset = (subRayCount == 1)
+                ? 0.0f
+                : Mathf.Lerp(-totalLateralSpan * 0.5f, totalLateralSpan * 0.5f, (float)r / (subRayCount - 1));
+
+            Vector2 subOrigin = rayBaseOrigin + tangent * lateralOffset;
+            float subClosest = maxRange;
+            Asteroid? subHitAst = null;
+            VoxelRayHit subBestHit = default;
+
+            for (int i = 0; i < asteroids.Count; i++)
             {
-                if (vHit.Distance < closestDist)
+                var ast = asteroids[i];
+                if (ast == null || !ast.IsActiveInTree) continue;
+
+                if (ast.RaycastVoxel(subOrigin, aimDir, subClosest, out VoxelRayHit vHit))
                 {
-                    closestDist = vHit.Distance;
-                    finalHitPoint = vHit.WorldHitPoint;
-                    hitAsteroid = ast;
-                    bestVoxelHit = vHit;
+                    if (vHit.Distance < subClosest)
+                    {
+                        subClosest = vHit.Distance;
+                        subHitAst = ast;
+                        subBestHit = vHit;
+                    }
+                }
+            }
+
+            if (subHitAst != null && subBestHit.Hit)
+            {
+                if (subClosest < closestCenterDist)
+                {
+                    closestCenterDist = subClosest;
+                    centerHitPoint = subOrigin + aimDir * subClosest - tangent * lateralOffset;
+                    _laserHitAsteroidRotation = subHitAst.CachedRotation;
+                }
+
+                // Erosi batuan asteroid HANYA terjadi setelah tahap priming selesai!
+                if (!isPriming)
+                {
+                    bool destroyed = subHitAst.ApplyLaserHeatAtVoxel(
+                        subBestHit.GridX,
+                        subBestHit.GridY,
+                        heatDeltaPerSubRay,
+                        aimDir,
+                        out VoxelType brokenType,
+                        out Vector2 brokenWorldCenter,
+                        out float updatedHeat
+                    );
+
+                    _laserActiveHitBoxes.Add((subBestHit.WorldCellCenter, updatedHeat, subBestHit.Type));
+
+                    if (destroyed)
+                    {
+                        SpawnVoxelErosionDebris(brokenWorldCenter, -aimDir, brokenType);
+                    }
                 }
             }
         }
 
-        _laserImpactPoint = finalHitPoint;
-
-        if (hitAsteroid != null && bestVoxelHit.Hit)
-        {
-            _laserHasVoxelHit = true;
-            _laserHitVoxelWorldCenter = bestVoxelHit.WorldCellCenter;
-            _laserHitAsteroidRotation = hitAsteroid.GlobalRotation;
-            _laserHitVoxelType = bestVoxelHit.Type;
-
-            // Kecepatan mengikis kotak 13 px meningkat seiring jumlah Mining Droid (hancur dalam sepersekian detik)
-            // 1 miner: ~3.6 blok/dtk | 10 miner: ~12.5 blok/dtk (~0.08 dtk/blok) | 30 miner: ~32 blok/dtk (~0.03 dtk/blok)
-            float erosionBlocksPerSec = 2.6f + minerCount * 0.98f;
-            float heatDelta = erosionBlocksPerSec * dt;
-
-            bool destroyed = hitAsteroid.ApplyLaserHeatAtVoxel(
-                bestVoxelHit.GridX,
-                bestVoxelHit.GridY,
-                heatDelta,
-                aimDir,
-                out VoxelType brokenType,
-                out Vector2 brokenWorldCenter,
-                out float updatedHeat
-            );
-
-            _laserHitVoxelHeat = updatedHeat;
-
-            if (destroyed)
-            {
-                // Blok 13 px hancur! Batu menjadi debu / Kristal menjadi materi
-                SpawnVoxelErosionDebris(brokenWorldCenter, -aimDir, brokenType, hitAsteroid);
-            }
-        }
-        else
-        {
-            _laserHasVoxelHit = false;
-            _laserHitVoxelHeat = 0.0f;
-        }
+        float focusDist = MathF.Min(48.0f, MathF.Max(16.0f, closestCenterDist * 0.65f));
+        _laserConvergencePoint = corePos + aimDir * focusDist;
+        _laserImpactPoint = (_laserActiveHitBoxes.Count > 0) ? centerHitPoint : (_laserConvergencePoint + aimDir * maxRange);
 
         QueueRedraw();
     }
 
-    /// <summary>
-    /// Memunculkan efek fisik saat 1 blok 13 px hancur:
-    /// - Jika Rock (Batu): pecah menjadi kepulan partikel debu industrial.
-    /// - Jika Resource (Kristal): pecah menjadi butiran materi kristal bercahaya yang ditarik ke Core!
-    /// </summary>
-    private void SpawnVoxelErosionDebris(Vector2 worldCenter, Vector2 outNormal, VoxelType brokenType, Asteroid sourceAsteroid)
+    private void SpawnVoxelErosionDebris(Vector2 worldCenter, Vector2 outNormal, VoxelType brokenType)
     {
         if (brokenType == VoxelType.Rock)
         {
-            // Batu jadi debu: 5 partikel debu halus mengepul keluar dari terowongan
-            for (int i = 0; i < 5; i++)
+            for (int i = 0; i < 3; i++)
             {
                 float spread = (GD.Randf() - 0.5f) * 1.35f;
                 Vector2 dir = outNormal.Rotated(spread);
                 float speed = 45.0f + GD.Randf() * 95.0f;
-                float life = 0.22f + GD.Randf() * 0.20f;
+                float life = 0.20f + GD.Randf() * 0.18f;
 
                 _miningDebris.Add(new MiningDebrisParticle
                 {
@@ -1348,9 +1954,9 @@ public partial class SwarmSimulation : Node2D
                 });
             }
         }
-        else if (brokenType == VoxelType.Resource)
+        else if (Asteroid.TryGetResourceType(brokenType, out ResourceType resType))
         {
-            // Kristal jadi materi: pecahan kristal terlepas lalu meluncur menuju Core untuk menjadi unit baru
+            Color resCol = Asteroid.GetResourceColor(resType);
             for (int i = 0; i < 2; i++)
             {
                 float spread = (GD.Randf() - 0.5f) * 1.6f;
@@ -1361,13 +1967,12 @@ public partial class SwarmSimulation : Node2D
                 {
                     Position = worldCenter + new Vector2((GD.Randf() - 0.5f) * 5.0f, (GD.Randf() - 0.5f) * 5.0f),
                     Velocity = dir * speed,
-                    Color = sourceAsteroid.ResourceGlowColor,
-                    Life = 1.35f,
-                    MaxLife = 1.35f,
-                    Size = 3.2f,
+                    Color = resCol,
+                    Life = 1.45f,
+                    MaxLife = 1.45f,
+                    Size = 3.4f,
                     IsCrystalMatter = true,
-                    ResourceRole = sourceAsteroid.AsteroidType,
-                    IsEnergyMatter = sourceAsteroid.IsEnergyAsteroid
+                    MatterType = resType
                 });
             }
         }
@@ -1378,6 +1983,7 @@ public partial class SwarmSimulation : Node2D
         if (_miningDebris.Count == 0) return;
 
         bool redrawNeeded = !_isMiningLaserActive;
+        bool stockChanged = false;
 
         for (int i = _miningDebris.Count - 1; i >= 0; i--)
         {
@@ -1386,24 +1992,16 @@ public partial class SwarmSimulation : Node2D
 
             if (p.IsCrystalMatter)
             {
-                // Materi kristal ditarik secara magnetis menuju Hive Core
                 Vector2 toCore = corePos - p.Position;
                 float dist = toCore.Length();
-                if (dist <= 26.0f)
+                if (dist <= 22.0f)
                 {
-                    // Materi kristal tiba di Core -> olah menjadi unit Swarm baru atau sel Honeycomb Core!
-                    if (p.IsEnergyMatter)
+                    // Materi kristal masuk ke Silo Pabrik (Hive Foundry)!
+                    int rIdx = (int)p.MatterType;
+                    if (rIdx >= 0 && rIdx < _resourceStock.Length)
                     {
-                        _harvestedEnergyShards++;
-                        if (_harvestedEnergyShards >= 12)
-                        {
-                            _harvestedEnergyShards = 0;
-                            _playerCore.AddNextHoneycombCell();
-                        }
-                    }
-                    else
-                    {
-                        AddSpecificSwarm(p.ResourceRole, 1);
+                        _resourceStock[rIdx] += 2;
+                        stockChanged = true;
                     }
 
                     _miningDebris.RemoveAt(i);
@@ -1411,12 +2009,11 @@ public partial class SwarmSimulation : Node2D
                 }
 
                 Vector2 pullDir = toCore / MathF.Max(0.001f, dist);
-                p.Velocity = p.Velocity.Lerp(pullDir * 680.0f, MathF.Min(1.0f, dt * 6.5f));
+                p.Velocity = p.Velocity.Lerp(pullDir * 720.0f, MathF.Min(1.0f, dt * 6.8f));
                 p.Position += p.Velocity * dt;
             }
             else
             {
-                // Partikel debu batu melambat dan memudar di ruang hampa
                 p.Velocity *= MathF.Pow(0.88f, dt * 60.0f);
                 p.Position += p.Velocity * dt;
             }
@@ -1431,6 +2028,11 @@ public partial class SwarmSimulation : Node2D
             }
         }
 
+        if (stockChanged)
+        {
+            RefreshFoundryGui();
+        }
+
         if (redrawNeeded)
         {
             QueueRedraw();
@@ -1439,8 +2041,9 @@ public partial class SwarmSimulation : Node2D
 
     public override void _Draw()
     {
-        // 1. Gambar Partikel Debu Batu & Materi Kristal hasil pengikisan blok 13 px
-        for (int i = 0; i < _miningDebris.Count; i++)
+        try
+        {
+            for (int i = 0; i < _miningDebris.Count; i++)
         {
             var p = _miningDebris[i];
             float alpha = Mathf.Clamp(p.Life / p.MaxLife, 0.0f, 1.0f);
@@ -1460,118 +2063,146 @@ public partial class SwarmSimulation : Node2D
         if (!_isMiningLaserActive || _activeMinerPositions.Count == 0) return;
 
         int minerCount = _activeMinerPositions.Count;
-        // Faktor kepadatan logaritmik: meningkat halus tanpa membuat ukuran visual membengkak
-        float densityFactor = Mathf.Clamp((minerCount - 1) / 35.0f, 0.0f, 1.0f);
+        float densityFactor = Mathf.Clamp((minerCount - 1) / 45.0f, 0.0f, 1.0f);
         float highFreqWave = 0.5f + 0.5f * MathF.Sin(_laserPulseTimer * 28.0f);
 
-        // 2. Sinar Pengumpan (Feeder Rays) tipis & presisi dari tiap Mining Droid ke titik fokus
-        float feederWidth = Mathf.Lerp(0.85f, 1.25f, _laserFocusWarmup);
+        bool isPriming = _laserPrimingTimer < LaserPrimingDuration;
+        float primingProgress = Mathf.Clamp(_laserPrimingTimer / LaserPrimingDuration, 0.0f, 1.0f);
+
+        float feederWidth = Mathf.Lerp(0.85f, 1.35f, _laserFocusWarmup);
         Color feederColor = new Color(
             Mathf.Lerp(1.6f, 2.4f, densityFactor),
             Mathf.Lerp(1.1f, 1.85f, densityFactor),
             0.35f,
-            (0.38f + 0.25f * densityFactor) * _laserFocusWarmup
+            (0.38f + 0.25f * densityFactor) * (isPriming ? (0.35f + 0.65f * primingProgress) : _laserFocusWarmup)
         );
 
         for (int i = 0; i < minerCount; i++)
         {
-            DrawLine(_activeMinerPositions[i], _laserConvergencePoint, feederColor, feederWidth, true);
+            DrawLine(_activeMinerPositions[i], _laserConvergencePoint, feederColor, feederWidth, false);
         }
 
-        // 3. Titik Fokus Miner: Cincin lensa industrial ringkas (tidak lebay)
-        float focusRadius = Mathf.Lerp(1.8f, 3.2f + densityFactor * 1.1f, _laserFocusWarmup);
-        DrawCircle(_laserConvergencePoint, focusRadius * 1.45f, new Color(2.2f, 1.2f, 0.25f, 0.32f * _laserFocusWarmup));
-        DrawCircle(_laserConvergencePoint, focusRadius, new Color(3.2f, 2.6f, 1.1f, 0.95f * _laserFocusWarmup));
-
-        // 4. SINAR UTAMA RAMPING & TAJAM (CLEAN & INDUSTRIAL: LEBAR 3 - 5 PX)
-        // - Saat tombol tembak baru ditekan (_laserFocusWarmup: 0 -> 1), sinar mulai dari berkas tipis terfokus (~1.3 px).
-        // - Saat fokus penuh, lebar utama terkunci ketat di kisaran 3.0 - 5.0 px!
-        float targetBeamWidth = Mathf.Lerp(3.0f, 5.0f, MathF.Sqrt(densityFactor));
-        float mainBeamWidth = Mathf.Lerp(1.3f, targetBeamWidth, _laserFocusWarmup);
-        float coreBeamWidth = mainBeamWidth * Mathf.Lerp(0.38f, 0.56f, densityFactor);
-
-        // Lapisan selubung tipis (hanya +1.6 px di luar sinar utama agar tetap tajam & bersih)
-        Color sheathColor = new Color(
-            2.0f + densityFactor * 0.8f,
-            0.95f + densityFactor * 0.55f,
-            0.18f,
-            (0.24f + 0.16f * highFreqWave) * _laserFocusWarmup
-        );
-        DrawLine(_laserConvergencePoint, _laserImpactPoint, sheathColor, mainBeamWidth + 1.6f, true);
-
-        // Sinar Utama (3 - 5 px): Semakin banyak miner -> warna semakin padat & berintensitas tinggi
-        Color mainBeamColor = new Color(
-            Mathf.Lerp(2.4f, 3.4f, densityFactor),
-            Mathf.Lerp(1.25f, 2.45f, densityFactor) + highFreqWave * 0.25f,
-            Mathf.Lerp(0.25f, 0.85f, densityFactor),
-            (0.88f + 0.10f * densityFactor) * _laserFocusWarmup
-        );
-        DrawLine(_laserConvergencePoint, _laserImpactPoint, mainBeamColor, mainBeamWidth, true);
-
-        // Inti Sinar Terfokus (1.2 - 2.6 px): Putih-Kuning Pijar Berfrekuensi Tinggi
-        Color coreBeamColor = new Color(
-            Mathf.Lerp(3.2f, 4.4f, densityFactor),
-            Mathf.Lerp(2.6f, 4.1f, densityFactor),
-            Mathf.Lerp(1.2f, 2.6f, densityFactor),
-            0.96f * _laserFocusWarmup
-        );
-        DrawLine(_laserConvergencePoint, _laserImpactPoint, coreBeamColor, coreBeamWidth, true);
-
-        // Pulsa Frekuensi Tinggi Sepanjang Batang Sinar (menunjukkan kepadatan daya tanpa memperlebar sinar)
-        float beamLength = _laserConvergencePoint.DistanceTo(_laserImpactPoint);
-        if (beamLength > 20.0f)
+        if (isPriming)
         {
-            float wavelength = Mathf.Lerp(46.0f, 18.0f, densityFactor);
-            float phaseOffset = (_laserPulseTimer * (180.0f + minerCount * 14.0f)) % wavelength;
-            Color pulseNodeColor = new Color(4.5f, 4.0f, 2.0f, (0.45f + 0.40f * densityFactor) * _laserFocusWarmup);
+            // =========================================================================
+            // TAHAP PRIMING: PENGISIAN & PEMUSATAN ENERGI SEBELUM MENEMBAK
+            // =========================================================================
+            float primingPulse = 0.72f + 0.28f * MathF.Sin(_laserPrimingTimer * 44.0f);
+            float orbRadius = Mathf.Lerp(2.0f, 7.5f, primingProgress) * primingPulse;
 
-            for (float d = phaseOffset; d < beamLength - 8.0f; d += wavelength)
+            // Bola plasma energi memadat di titik fokus
+            DrawCircle(_laserConvergencePoint, orbRadius * 1.6f, new Color(2.6f, 1.35f, 0.22f, 0.35f * primingProgress));
+            DrawCircle(_laserConvergencePoint, orbRadius, new Color(4.4f, 3.8f, 1.4f, 0.95f * primingProgress));
+
+            // Percikan partikel mikro energi konvergen
+            for (int s = 0; s < 4; s++)
             {
-                Vector2 p0 = _laserConvergencePoint + _laserAimDir * d;
-                Vector2 p1 = _laserConvergencePoint + _laserAimDir * MathF.Min(beamLength, d + wavelength * 0.38f);
-                DrawLine(p0, p1, pulseNodeColor, coreBeamWidth * 1.15f, true);
+                float spkAngle = (float)s / 4.0f * Mathf.Tau + _laserPrimingTimer * 26.0f;
+                Vector2 spkPos = _laserConvergencePoint + new Vector2(MathF.Cos(spkAngle), MathF.Sin(spkAngle)) * (orbRadius * 1.35f);
+                DrawCircle(spkPos, 1.3f, new Color(4.8f, 4.0f, 1.6f, 0.85f * primingProgress));
             }
-        }
 
-        // 5. Efek Titik Tumbukan & Pemanasan Bertahap pada Kotak 13 px (Oranye Panas -> Kuning Pijar)
-        if (_laserHasVoxelHit)
-        {
-            float h = Mathf.Clamp(_laserHitVoxelHeat, 0.0f, 1.0f);
-            Color hotOrange = new Color(2.8f, 0.95f, 0.15f, 0.90f);         // Oranye Panas
-            Color yellowIncandescent = new Color(4.8f, 4.3f, 1.35f, 1.0f); // Kuning Pijar
-            Color impactColor = hotOrange.Lerp(yellowIncandescent, h);
-
-            // Gambar sorotan presisi tepat pada kotak 13 px yang sedang dipanaskan
-            DrawSetTransform(_laserHitVoxelWorldCenter, _laserHitAsteroidRotation, Vector2.One);
-            Rect2 targetBox = new Rect2(
-                new Vector2(-Asteroid.VoxelSize * 0.5f, -Asteroid.VoxelSize * 0.5f),
-                new Vector2(Asteroid.VoxelSize, Asteroid.VoxelSize)
-            );
-            DrawRect(targetBox, new Color(impactColor.R, impactColor.G, impactColor.B, 0.25f + h * 0.55f), true);
-            DrawRect(targetBox, impactColor, false, 1.5f);
-            DrawSetTransform(Vector2.Zero, 0.0f, Vector2.One);
-
-            // Titik las fokus kecil di permukaan kontak (radius 2.2 - 3.8 px, tidak menutupi kotak 13 px)
-            float spotRadius = 2.2f + h * 1.6f;
-            DrawCircle(_laserImpactPoint, spotRadius, impactColor);
-            DrawCircle(_laserImpactPoint, spotRadius * 0.48f, new Color(5.0f, 4.8f, 3.2f, 1.0f));
-
-            // Percikan las mikro industrial pendek (4 - 9 px)
-            int sparkCount = 2 + (h > 0.6f ? 2 : 0);
-            for (int s = 0; s < sparkCount; s++)
-            {
-                float spAngle = (-_laserAimDir).Angle() + (GD.Randf() - 0.5f) * 1.8f;
-                float spLen = 4.0f + GD.Randf() * 5.5f;
-                Vector2 spEnd = _laserImpactPoint + new Vector2(MathF.Cos(spAngle), MathF.Sin(spAngle)) * spLen;
-                DrawLine(_laserImpactPoint, spEnd, impactColor, 1.1f, true);
-            }
+            // Sinar pandu tipis (low-power targeting tracer) ke titik impak asteroid
+            Color tracerColor = new Color(3.4f, 2.2f, 0.6f, 0.30f + 0.50f * primingProgress);
+            DrawLine(_laserConvergencePoint, _laserImpactPoint, tracerColor, 1.3f, false);
+            DrawCircle(_laserImpactPoint, 2.6f * primingPulse, new Color(4.2f, 3.2f, 1.1f, 0.75f * primingProgress));
         }
         else
         {
-            // Ujung sinar di ruang hampa
-            DrawCircle(_laserImpactPoint, mainBeamWidth * 0.5f, coreBeamColor);
+            // =========================================================================
+            // TAHAP MENEMBAK PENUH (HEAVY MINING LASER BLAST)
+            // =========================================================================
+            float focusRadius = Mathf.Lerp(2.0f, 3.2f + _currentLaserBlockSpan * 1.4f, _laserFocusWarmup);
+            DrawCircle(_laserConvergencePoint, focusRadius * 1.45f, new Color(2.2f, 1.2f, 0.25f, 0.32f * _laserFocusWarmup));
+            DrawCircle(_laserConvergencePoint, focusRadius, new Color(3.2f, 2.6f, 1.1f, 0.95f * _laserFocusWarmup));
+
+            // SINAR UTAMA DINAMIS (1-14 Miner: 3-5px | 15-29 Miner: 16-20px (>1 blok) | 30-44 Miner: 28-33px | 45+: 40-58px)
+            float mainBeamWidth = _currentVisualBeamWidth;
+            float coreBeamWidth = mainBeamWidth * Mathf.Lerp(0.42f, 0.58f, densityFactor);
+
+            Color sheathColor = new Color(
+                2.0f + densityFactor * 0.8f,
+                0.95f + densityFactor * 0.55f,
+                0.18f,
+                (0.24f + 0.16f * highFreqWave) * _laserFocusWarmup
+            );
+            DrawLine(_laserConvergencePoint, _laserImpactPoint, sheathColor, mainBeamWidth + 2.4f, false);
+
+            Color mainBeamColor = new Color(
+                Mathf.Lerp(2.4f, 3.4f, densityFactor),
+                Mathf.Lerp(1.25f, 2.45f, densityFactor) + highFreqWave * 0.25f,
+                Mathf.Lerp(0.25f, 0.85f, densityFactor),
+                (0.88f + 0.10f * densityFactor) * _laserFocusWarmup
+            );
+            DrawLine(_laserConvergencePoint, _laserImpactPoint, mainBeamColor, mainBeamWidth, false);
+
+            Color coreBeamColor = new Color(
+                Mathf.Lerp(3.2f, 4.4f, densityFactor),
+                Mathf.Lerp(2.6f, 4.1f, densityFactor),
+                Mathf.Lerp(1.2f, 2.6f, densityFactor),
+                0.96f * _laserFocusWarmup
+            );
+            DrawLine(_laserConvergencePoint, _laserImpactPoint, coreBeamColor, coreBeamWidth, false);
+
+            // Garis-garis sub-beam paralel industrial saat lebar laser >= 2 blok (15+ Miner)
+            if (_currentLaserBlockSpan >= 2)
+            {
+                Vector2 tangent = new Vector2(-_laserAimDir.Y, _laserAimDir.X);
+                Color subLineCol = new Color(4.6f, 4.2f, 2.2f, 0.65f * _laserFocusWarmup);
+                for (int b = 0; b < _currentLaserBlockSpan; b++)
+                {
+                    float offset = ((float)b / (_currentLaserBlockSpan - 1) - 0.5f) * (mainBeamWidth * 0.72f);
+                    DrawLine(_laserConvergencePoint + tangent * offset, _laserImpactPoint + tangent * offset, subLineCol, 1.4f, false);
+                }
+            }
+
+            // Sorotan Pemanasan pada Seluruh Kotak 13 px yang Sedang Dikikis (Oranye Panas -> Kuning Pijar)
+            if (_laserActiveHitBoxes.Count > 0)
+            {
+                Color hotOrange = new Color(2.8f, 0.95f, 0.15f, 0.90f);
+                Color yellowIncandescent = new Color(4.8f, 4.3f, 1.35f, 1.0f);
+
+                for (int i = 0; i < _laserActiveHitBoxes.Count; i++)
+                {
+                    var box = _laserActiveHitBoxes[i];
+                    float h = Mathf.Clamp(box.heat, 0.0f, 1.0f);
+                    Color impactColor = hotOrange.Lerp(yellowIncandescent, h);
+
+                    DrawSetTransform(box.worldCenter, _laserHitAsteroidRotation, Vector2.One);
+                    Rect2 targetBox = new Rect2(
+                        new Vector2(-Asteroid.VoxelSize * 0.5f, -Asteroid.VoxelSize * 0.5f),
+                        new Vector2(Asteroid.VoxelSize, Asteroid.VoxelSize)
+                    );
+                    DrawRect(targetBox, new Color(impactColor.R, impactColor.G, impactColor.B, 0.25f + h * 0.55f), true);
+
+                    // Jika kotak 13 px yang dicapai laser adalah Resource, tepinya menyala neon sesuai warna resource!
+                    if (Asteroid.TryGetResourceType(box.type, out ResourceType rType))
+                    {
+                        Color resNeon = Asteroid.GetResourceColor(rType) * 1.7f;
+                        resNeon.A = 1.0f;
+                        DrawRect(targetBox.Grow(1.2f), resNeon, false, 2.2f);
+                    }
+                    else
+                    {
+                        DrawRect(targetBox, impactColor, false, 1.5f);
+                    }
+                }
+                DrawSetTransform(Vector2.Zero, 0.0f, Vector2.One);
+
+                float spotRadius = 2.4f + _currentLaserBlockSpan * 1.4f;
+                DrawCircle(_laserImpactPoint, spotRadius, yellowIncandescent);
+            }
+            else
+            {
+                DrawCircle(_laserImpactPoint, mainBeamWidth * 0.5f, coreBeamColor);
+            }
         }
     }
+    catch (Exception ex)
+    {
+        GD.PrintErr($"[SwarmSimulation._Draw] {ex}");
+    }
+}
 
     public void FireSwarmStream(Vector2 targetPos, int count = 2)
     {
@@ -1655,31 +2286,37 @@ public partial class SwarmSimulation : Node2D
         {
             switch (keyEvent.Keycode)
             {
+                case Key.Tab:
+                case Key.B:
+                    ToggleFoundryPanel();
+                    break;
                 case Key.Key1:
-                    AddSpecificSwarm(SwarmRole.DartNeedle, 100);
+                    if (!TryCraftRecipe(0)) AddSpecificSwarm(SwarmRole.DartNeedle, 10);
                     break;
                 case Key.Key2:
-                    _playerCore.AddNextHoneycombCell();
+                    if (!TryCraftRecipe(1)) AddSpecificSwarm(SwarmRole.MiningDroid, 5);
                     break;
                 case Key.Key3:
-                    AddSpecificSwarm(SwarmRole.GigaShuriken, 50);
+                    if (!TryCraftRecipe(2)) AddSpecificSwarm(SwarmRole.ScannerDrone, 5);
                     break;
                 case Key.Key4:
-                    AddSpecificSwarm(SwarmRole.DrillDrone, 50);
+                    if (!TryCraftRecipe(3)) AddSpecificSwarm(SwarmRole.Guardian, 10);
                     break;
                 case Key.Key5:
-                    AddSpecificSwarm(SwarmRole.CrescentBoomerang, 50);
+                    if (!TryCraftRecipe(4)) AddSpecificSwarm(SwarmRole.DrillDrone, 10);
                     break;
                 case Key.Key6:
-                    AddSpecificSwarm(SwarmRole.Guardian, 50);
-                    break;
-                case Key.Key8:
-                    AddSpecificSwarm(SwarmRole.ScannerDrone, 5);
-                    break;
-                case Key.Key9:
-                    AddSpecificSwarm(SwarmRole.MiningDroid, 10);
+                    if (!TryCraftRecipe(5)) AddSpecificSwarm(SwarmRole.GigaShuriken, 10);
                     break;
                 case Key.Key7:
+                    if (!TryCraftRecipe(6)) AddSpecificSwarm(SwarmRole.CrescentBoomerang, 10);
+                    break;
+                case Key.Key8:
+                    if (!TryCraftRecipe(7)) _playerCore.AddNextHoneycombCell();
+                    break;
+                case Key.Key9:
+                    AddSpecificSwarm(SwarmRole.MiningDroid, 15);
+                    break;
                 case Key.E:
                     SpawnEnemySectorAttack(GetGlobalMousePosition(), 50);
                     break;

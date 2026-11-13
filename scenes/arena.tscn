@@ -70,7 +70,7 @@ text = "GEOMETRY SWARM // COLOSSAL ASTEROIDS & STARTER SWARM (5 SCANNERS + 10 MI
 layout_mode = 2
 theme_override_colors/font_color = Color(0.85, 0.75, 1.0, 0.9)
 theme_override_font_sizes/font_size = 13
-text = "WASD: Gerak  |  LMB: Stream  |  TAHAN RMB: Giga Drill  |  Kamera Auto-Zoom  |  [8] +5 Scanner  [9] +10 Miner  [1..6] Swarm Tempur"
+text = "WASD: Gerak  |  LMB: Stream Laser  |  TAHAN RMB: Super Giga Drill  |  TAB: Pabrik Swarm  |  [1..7] Unit  |  [8] Belah Core (Mitosis)"
 
 [node name="RightMargin" type="MarginContainer" parent="HUD"]
 anchors_preset = 1

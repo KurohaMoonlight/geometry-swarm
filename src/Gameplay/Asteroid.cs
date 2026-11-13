@@ -6,14 +6,24 @@ using Godot;
 namespace GeometrySwarm.Gameplay;
 
 /// <summary>
-/// Asteroid prosedural raksasa berbasis Grid Voxel 13 px (Zero-Lag Voxel Collision & Raymarching Erosion).
-/// - Setiap sel berukuran 13 x 13 px memiliki status: Empty (Kosong), Rock (Batu), atau Resource (Kristal).
-/// - Mendukung Raymarching presisi (DDA Grid Traversal): sinar laser berhenti tepat di blok solid 13 px
-///   pertama yang dihadang, memanaskannya secara bertahap (oranye panas -> kuning pijar), lalu mengubahnya
-///   menjadi Empty sehingga di frame berikutnya laser otomatis maju 1 langkah lebih dalam (membentuk terowongan).
-/// - Menggunakan kolisi Circle-to-Grid tanpa merekonstruksi poligon fisika Godot setiap kali sel 13 px hancur:
-///   Kapal Induk Core dan Swarm bergerak bebas di sel Empty (terowongan) dan otomatis tertahan serta meluncur
-///   (slide) di sepanjang dinding sel Rock atau Resource.
+/// Jenis mineral tambang & kristal energi untuk fabrikasi di Pabrik (Hive Foundry).
+/// </summary>
+public enum ResourceType : byte
+{
+    Ferrite = 0,   // Ferrite Alloy (Kuning Amber) - Rangka dasar semua drone & Dart Needle
+    Quartz = 1,    // Optic Quartz (Sian Elektrik) - Lensa Scanner, Miner, Guardian, Boomerang
+    Carbide = 2,   // Vulcan Carbide (Merah Bara) - Baja keras Drill Drone, Shuriken, Guardian
+    Vortexum = 3,  // Vortexum Ore (Hijau Zamrud) - Pendorong kurva Boomerang & rotasi Shuriken
+    Aether = 4     // Aether Crystal (Putih-Emas Menyala) - Energi murni Hive Core & baterai aktif
+}
+
+/// <summary>
+/// Asteroid prosedural raksasa berbasis Grid Voxel 13 px:
+/// - Asteroid batu memiliki jumlah deposit resource acak (2-8 kantung) dan mengandung 1-2 jenis resource berbeda.
+/// - Jika pengeboran/laser sudah sampai ke blok resource (atau membuka batu di sebelahnya menjadi Empty),
+///   tepi blok resource 13 px yang terekspos otomatis menyala terang (HDR Neon Vein Edge Glow).
+/// - Asteroid khusus Energy Crystal (IsEnergyAsteroid) memiliki bentuk geometri Bintang Kristal Runcing
+///   (Star-Crystal 10-12 sudut tajam) yang terus berdenyut menyala-nyala sepanjang waktu.
 /// </summary>
 public partial class Asteroid : RigidBody2D
 {
@@ -22,7 +32,6 @@ public partial class Asteroid : RigidBody2D
 
     public static readonly List<Asteroid> ActiveAsteroids = new();
 
-    // Ukuran baku 1 blok voxel asteroid = 13 px
     public const float VoxelSize = 13.0f;
     public const float InvVoxelSize = 1.0f / VoxelSize;
 
@@ -30,7 +39,11 @@ public partial class Asteroid : RigidBody2D
     {
         Empty = 0,
         Rock = 1,
-        Resource = 2
+        ResourceFerrite = 2,
+        ResourceQuartz = 3,
+        ResourceCarbide = 4,
+        ResourceVortexum = 5,
+        ResourceAether = 6
     }
 
     public struct VoxelRayHit
@@ -45,18 +58,6 @@ public partial class Asteroid : RigidBody2D
         public float CurrentHeat;
     }
 
-    private struct WallEdge
-    {
-        public Vector2 A;
-        public Vector2 B;
-
-        public WallEdge(Vector2 a, Vector2 b)
-        {
-            A = a;
-            B = b;
-        }
-    }
-
     private struct OutlineSegment
     {
         public Vector2 A;
@@ -65,7 +66,6 @@ public partial class Asteroid : RigidBody2D
         public int CheckGridY;
     }
 
-    // Jumlah Scanner Drone yang dimiliki armada pemain saat ini
     public static int CurrentScannerCount { get; set; } = 5;
 
     [Export] public float Radius { get; set; } = 450.0f;
@@ -75,39 +75,109 @@ public partial class Asteroid : RigidBody2D
     [Export] public bool IsEnergyAsteroid { get; set; } = false;
     [Export] public bool IsScanned { get; set; } = false;
 
-    // Palet warna neon inti asteroid sesuai tipe swarm
-    public Color ResourceGlowColor { get; private set; }
+    // 1 atau 2 jenis resource berbeda di dalam asteroid ini
+    public ResourceType PrimaryResource { get; set; } = ResourceType.Ferrite;
+    public ResourceType SecondaryResource { get; set; } = ResourceType.Quartz;
+    public bool HasSecondaryResource { get; set; } = false;
+
+    // Cache transformasi murni di C# (Zero P/Invoke overhead)
+    public Vector2 CachedPosition { get; private set; }
+    public float CachedRotation { get; private set; }
+    public float CachedCos { get; private set; } = 1.0f;
+    public float CachedSin { get; private set; } = 0.0f;
+    public Vector2 CachedLinearVelocity { get; private set; }
+    public bool IsActiveInTree => !_isDestroyed;
+
+    public Color ResourceGlowColor => GetResourceColor(IsEnergyAsteroid ? ResourceType.Aether : PrimaryResource);
     private Color _unscannedBorderColor;
     private Color _tunnelWallBorderColor;
     private Color _rockBodyColor;
 
-    // Titik-titik geometri poligon prosedural awal
     public Vector2[] PolygonVertices { get; private set; } = Array.Empty<Vector2>();
+    private Vector2[] _closedOutlinePoints = Array.Empty<Vector2>();
     private readonly List<OutlineSegment> _perimeterSegments = new();
 
-    // Data Grid Voxel 13 px (Flat 1D Array untuk akses L1-Cache O(1))
     public int GridSide { get; private set; }
     public Vector2 GridOriginLocal { get; private set; }
     public float OuterBoundRadius { get; private set; }
 
     private VoxelType[] _voxels = Array.Empty<VoxelType>();
+    private bool[] _initialSolidMask = Array.Empty<bool>();
     private float[] _voxelHeat = Array.Empty<float>();
     private readonly List<int> _activeHeatedIndices = new();
     private readonly HashSet<int> _heatedThisFrame = new();
 
-    // Cache Horizontal Row-Span (Run-Length Encoding per baris untuk rendering ribuan voxel 13 px tanpa lag)
+    // Cache 2D Greedy Meshed Rectangles & Batched Lines per Tipe Resource (5 jenis resource)
+    private const int ResourceCount = 5;
     private List<Rect2>[] _rockSpansByRow = Array.Empty<List<Rect2>>();
-    private List<Rect2>[] _resourceRectsByRow = Array.Empty<List<Rect2>>();
-    private List<WallEdge>[] _exposedWallEdgesByRow = Array.Empty<List<WallEdge>>();
+    private List<Rect2>[][] _resourceSpansByTypeAndRow = Array.Empty<List<Rect2>[]>();
+    private readonly List<Rect2> _mergedRockRects = new();
+    private readonly List<Rect2>[] _mergedResourceRects = new List<Rect2>[ResourceCount];
+    private readonly Vector2[][] _batchedExposedResourceEdges = new Vector2[ResourceCount][];
+    private Vector2[] _batchedWallLines = Array.Empty<Vector2>();
+    private Vector2[] _batchedPerimeterLines = Array.Empty<Vector2>();
+    private bool _geometryBatchDirty = true;
 
     private int _initialSolidVoxelCount = 0;
     private int _remainingSolidVoxelCount = 0;
     private int _carvedVoxelCount = 0;
+    private float _energyPulseTimer = 0.0f;
 
     private CollisionShape2D _collisionShape = null!;
     private CircleShape2D _circleShape = null!;
     private int _lastDrawnScannerCount = -1;
     private bool _isDestroyed = false;
+
+    public static Color GetResourceColor(ResourceType resType)
+    {
+        return resType switch
+        {
+            ResourceType.Ferrite => new Color(2.3f, 2.5f, 0.35f, 1.0f),   // Kuning Amber
+            ResourceType.Quartz => new Color(0.3f, 2.4f, 3.1f, 1.0f),     // Sian Elektrik
+            ResourceType.Carbide => new Color(3.3f, 0.65f, 0.22f, 1.0f),  // Merah Bara
+            ResourceType.Vortexum => new Color(0.35f, 2.9f, 1.25f, 1.0f), // Hijau Zamrud
+            ResourceType.Aether => new Color(3.8f, 3.2f, 1.15f, 1.0f),    // Putih-Emas Menyala
+            _ => new Color(2.3f, 2.5f, 0.35f, 1.0f)
+        };
+    }
+
+    public static VoxelType ResourceToVoxelType(ResourceType resType)
+    {
+        return resType switch
+        {
+            ResourceType.Ferrite => VoxelType.ResourceFerrite,
+            ResourceType.Quartz => VoxelType.ResourceQuartz,
+            ResourceType.Carbide => VoxelType.ResourceCarbide,
+            ResourceType.Vortexum => VoxelType.ResourceVortexum,
+            ResourceType.Aether => VoxelType.ResourceAether,
+            _ => VoxelType.ResourceFerrite
+        };
+    }
+
+    public static bool TryGetResourceType(VoxelType voxelType, out ResourceType resType)
+    {
+        switch (voxelType)
+        {
+            case VoxelType.ResourceFerrite:
+                resType = ResourceType.Ferrite;
+                return true;
+            case VoxelType.ResourceQuartz:
+                resType = ResourceType.Quartz;
+                return true;
+            case VoxelType.ResourceCarbide:
+                resType = ResourceType.Carbide;
+                return true;
+            case VoxelType.ResourceVortexum:
+                resType = ResourceType.Vortexum;
+                return true;
+            case VoxelType.ResourceAether:
+                resType = ResourceType.Aether;
+                return true;
+            default:
+                resType = ResourceType.Ferrite;
+                return false;
+        }
+    }
 
     public override void _EnterTree()
     {
@@ -121,92 +191,188 @@ public partial class Asteroid : RigidBody2D
 
     public override void _Ready()
     {
-        // 1. Setup Fisika Ruang Hampa (Zero Gravity, Linear & Angular Damp)
-        // Gunakan CollisionLayer/Mask = 2 agar benturan antar-asteroid tetap berjalan,
-        // sedangkan PlayerCore & Swarm menggunakan Zero-Lag Voxel Collision (Circle-to-Grid)
-        // agar bisa masuk dengan mulus ke dalam terowongan 13 px yang sudah dilubangi!
         CollisionLayer = 2;
         CollisionMask = 2;
         GravityScale = 0.0f;
-        LinearDamp = 0.55f;
-        AngularDamp = 0.75f;
+        // Hanyut pelan kosmik alami tanpa redaman gesekan ruang hampa
+        LinearDampMode = DampMode.Replace;
+        LinearDamp = 0.0f;
+        AngularDampMode = DampMode.Replace;
+        AngularDamp = 0.0f;
+        PhysicsMaterialOverride = new PhysicsMaterial
+        {
+            Bounce = 0.95f,
+            Friction = 0.05f
+        };
         Mass = MathF.Max(150.0f, (Radius * Radius) * 0.12f);
         ContactMonitor = false;
 
-        // 2. Tentukan Warna Neon berdasarkan Tipe
-        ConfigureColors();
+        for (int t = 0; t < ResourceCount; t++)
+        {
+            _mergedResourceRects[t] = new List<Rect2>();
+            _batchedExposedResourceEdges[t] = Array.Empty<Vector2>();
+        }
 
-        // 3. Bangkitkan Bentuk Poligon Prosedural Raksasa
+        UpdateCachedTransform();
+        ConfigureResourceCompositionAndColors();
         GenerateProceduralGeometry();
-
-        // 4. Bangkitkan Grid Voxel 13 px (Rock & Resource) beserta Cache Row-Span
         InitializeVoxelGrid();
         GenerateResourceVoxelPatches();
         BuildPerimeterSegments();
         RebuildAllRowSpans();
+        RebuildBatchedRenderGeometry();
 
-        // 5. Pasang Collision Shape Fisik khusus antar-asteroid (Layer 2)
-        _circleShape = new CircleShape2D { Radius = Radius * 0.95f };
+        // Bentuk collision melingkupi seluruh batas terluar polygon (termasuk faset kristal)
+        _circleShape = new CircleShape2D { Radius = OuterBoundRadius };
         _collisionShape = new CollisionShape2D { Shape = _circleShape };
         AddChild(_collisionShape);
 
         CurrentHealth = MaxHealth;
     }
 
-    private void ConfigureColors()
+    private void UpdateCachedTransform()
     {
+        CachedPosition = GlobalPosition;
+        CachedRotation = GlobalRotation;
+        CachedCos = MathF.Cos(CachedRotation);
+        CachedSin = MathF.Sin(CachedRotation);
+        CachedLinearVelocity = LinearVelocity;
+    }
+
+    private Vector2 FastWorldToLocal(Vector2 worldPt)
+    {
+        float dx = worldPt.X - CachedPosition.X;
+        float dy = worldPt.Y - CachedPosition.Y;
+        return new Vector2(dx * CachedCos + dy * CachedSin, -dx * CachedSin + dy * CachedCos);
+    }
+
+    private Vector2 FastLocalToWorld(Vector2 localPt)
+    {
+        return new Vector2(
+            CachedPosition.X + (localPt.X * CachedCos - localPt.Y * CachedSin),
+            CachedPosition.Y + (localPt.X * CachedSin + localPt.Y * CachedCos)
+        );
+    }
+
+    private Vector2 FastRotateToLocal(Vector2 v)
+    {
+        return new Vector2(v.X * CachedCos + v.Y * CachedSin, -v.X * CachedSin + v.Y * CachedCos);
+    }
+
+    private Vector2 FastRotateToWorld(Vector2 v)
+    {
+        return new Vector2(v.X * CachedCos - v.Y * CachedSin, v.X * CachedSin + v.Y * CachedCos);
+    }
+
+    private void ConfigureResourceCompositionAndColors()
+    {
+        var rng = new RandomNumberGenerator();
+        long seedVal = ((long)CachedPosition.X * 2654435761L) ^ ((long)CachedPosition.Y * 19349663L);
+        rng.Seed = (ulong)Math.Abs(seedVal);
+        _energyPulseTimer = rng.Randf() * Mathf.Tau;
+
         if (IsEnergyAsteroid)
         {
-            ResourceGlowColor = new Color(3.2f, 2.8f, 1.2f, 1.0f); // Emas / Putih Energy
+            PrimaryResource = ResourceType.Aether;
+            SecondaryResource = ResourceType.Quartz;
+            HasSecondaryResource = rng.Randf() < 0.35f;
+
+            // Asteroid Khusus Energy Crystal: Badan kristal translusen biru-emas & garis tepi menyala
+            _unscannedBorderColor = new Color(3.2f, 2.6f, 0.9f, 0.95f);
+            _tunnelWallBorderColor = new Color(1.8f, 2.8f, 3.2f, 0.92f);
+            _rockBodyColor = new Color(0.08f, 0.11f, 0.18f, 0.95f);
         }
         else
         {
-            ResourceGlowColor = AsteroidType switch
+            // Tentukan Resource Pertama (Primary) dan peluang 65% memiliki Resource Kedua (Secondary) yang berbeda
+            PrimaryResource = AsteroidType switch
             {
-                SwarmRole.DartNeedle => new Color(2.4f, 2.6f, 0.4f, 1.0f),        // Kuning Dart
-                SwarmRole.GigaShuriken => new Color(2.8f, 0.4f, 2.2f, 1.0f),      // Magenta Shuriken
-                SwarmRole.DrillDrone => new Color(3.4f, 0.8f, 0.3f, 1.0f),        // Merah Scarlet Drill
-                SwarmRole.CrescentBoomerang => new Color(0.4f, 3.0f, 1.2f, 1.0f), // Hijau Boomerang
-                SwarmRole.Guardian => new Color(0.4f, 2.5f, 3.2f, 1.0f),          // Cyan Guardian
-                _ => new Color(2.2f, 1.8f, 0.8f, 1.0f)
+                SwarmRole.DartNeedle => ResourceType.Ferrite,
+                SwarmRole.Guardian => ResourceType.Quartz,
+                SwarmRole.DrillDrone => ResourceType.Carbide,
+                SwarmRole.GigaShuriken => ResourceType.Carbide,
+                SwarmRole.CrescentBoomerang => ResourceType.Vortexum,
+                _ => (ResourceType)rng.RandiRange(0, 3)
             };
-        }
 
-        // Cangkang luar & dinding terowongan: Gelap pekat obsidian/charcoal
-        _unscannedBorderColor = new Color(0.18f, 0.16f, 0.22f, 0.85f);
-        _tunnelWallBorderColor = new Color(0.24f, 0.20f, 0.30f, 0.78f);
-        _rockBodyColor = new Color(0.032f, 0.028f, 0.045f, 0.98f);
+            HasSecondaryResource = rng.Randf() < 0.65f;
+            if (HasSecondaryResource)
+            {
+                int sec = (int)PrimaryResource;
+                while (sec == (int)PrimaryResource)
+                {
+                    sec = rng.RandiRange(0, 3);
+                }
+                SecondaryResource = (ResourceType)sec;
+            }
+            else
+            {
+                SecondaryResource = PrimaryResource;
+            }
+
+            _unscannedBorderColor = new Color(0.18f, 0.16f, 0.22f, 0.85f);
+            _tunnelWallBorderColor = new Color(0.24f, 0.20f, 0.30f, 0.78f);
+            _rockBodyColor = new Color(0.032f, 0.028f, 0.045f, 0.98f);
+        }
     }
 
     private void GenerateProceduralGeometry()
     {
-        int sides = (int)Mathf.Clamp(MathF.Round(Radius * 0.038f), 16, 28);
-        PolygonVertices = new Vector2[sides];
-
         var rng = new RandomNumberGenerator();
-        long seedVal = ((long)GlobalPosition.X * 73856093L) ^ ((long)GlobalPosition.Y * 19349663L);
+        long seedVal = ((long)CachedPosition.X * 73856093L) ^ ((long)CachedPosition.Y * 19349663L);
         rng.Seed = (ulong)Math.Abs(seedVal);
 
-        float maxVertDist = Radius;
-        for (int i = 0; i < sides; i++)
+        if (IsEnergyAsteroid)
         {
-            float baseAngle = (float)i / sides * Mathf.Tau;
-            float angleJitter = (rng.Randf() - 0.5f) * (Mathf.Tau / sides * 0.35f);
-            float angle = baseAngle + angleJitter;
+            // BENTUK KHUSUS ENERGY CRYSTAL ASTEROID:
+            // Bintang Kristal Runcing (Star-Crystal 10-12 Puncak Lancip Berfaset)
+            int spikes = rng.RandiRange(9, 12);
+            int sides = spikes * 2;
+            PolygonVertices = new Vector2[sides];
+            _closedOutlinePoints = new Vector2[sides + 1];
 
-            float rFactor = rng.RandfRange(0.85f, 1.15f);
-            float r = Radius * rFactor;
-            if (r > maxVertDist) maxVertDist = r;
+            float maxVertDist = Radius;
+            for (int i = 0; i < sides; i++)
+            {
+                float baseAngle = (float)i / sides * Mathf.Tau;
+                bool isOuterPeak = (i % 2 == 0);
+                float rFactor = isOuterPeak
+                    ? rng.RandfRange(1.04f, 1.24f)
+                    : rng.RandfRange(0.54f, 0.70f);
+                float r = Radius * rFactor;
+                if (r > maxVertDist) maxVertDist = r;
 
-            PolygonVertices[i] = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * r;
+                PolygonVertices[i] = new Vector2(MathF.Cos(baseAngle), MathF.Sin(baseAngle)) * r;
+                _closedOutlinePoints[i] = PolygonVertices[i];
+            }
+            _closedOutlinePoints[sides] = _closedOutlinePoints[0];
+            OuterBoundRadius = maxVertDist + VoxelSize * 1.5f;
         }
+        else
+        {
+            int sides = (int)Mathf.Clamp(MathF.Round(Radius * 0.038f), 16, 28);
+            PolygonVertices = new Vector2[sides];
+            _closedOutlinePoints = new Vector2[sides + 1];
 
-        OuterBoundRadius = maxVertDist + VoxelSize * 1.5f;
+            float maxVertDist = Radius;
+            for (int i = 0; i < sides; i++)
+            {
+                float baseAngle = (float)i / sides * Mathf.Tau;
+                float angleJitter = (rng.Randf() - 0.5f) * (Mathf.Tau / sides * 0.35f);
+                float angle = baseAngle + angleJitter;
+
+                float rFactor = rng.RandfRange(0.85f, 1.15f);
+                float r = Radius * rFactor;
+                if (r > maxVertDist) maxVertDist = r;
+
+                PolygonVertices[i] = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * r;
+                _closedOutlinePoints[i] = PolygonVertices[i];
+            }
+            _closedOutlinePoints[sides] = _closedOutlinePoints[0];
+            OuterBoundRadius = maxVertDist + VoxelSize * 1.5f;
+        }
     }
 
-    /// <summary>
-    /// Menginisialisasi sel-sel grid 13 px di dalam siluet poligon asteroid sebagai VoxelType.Rock.
-    /// </summary>
     private void InitializeVoxelGrid()
     {
         int halfCells = (int)MathF.Ceiling(OuterBoundRadius * InvVoxelSize) + 1;
@@ -215,17 +381,24 @@ public partial class Asteroid : RigidBody2D
 
         int totalCells = GridSide * GridSide;
         _voxels = new VoxelType[totalCells];
+        _initialSolidMask = new bool[totalCells];
         _voxelHeat = new float[totalCells];
 
         _rockSpansByRow = new List<Rect2>[GridSide];
-        _resourceRectsByRow = new List<Rect2>[GridSide];
-        _exposedWallEdgesByRow = new List<WallEdge>[GridSide];
+        _resourceSpansByTypeAndRow = new List<Rect2>[ResourceCount][];
+
+        for (int t = 0; t < ResourceCount; t++)
+        {
+            _resourceSpansByTypeAndRow[t] = new List<Rect2>[GridSide];
+            for (int gy = 0; gy < GridSide; gy++)
+            {
+                _resourceSpansByTypeAndRow[t][gy] = new List<Rect2>(2);
+            }
+        }
 
         for (int gy = 0; gy < GridSide; gy++)
         {
             _rockSpansByRow[gy] = new List<Rect2>(4);
-            _resourceRectsByRow[gy] = new List<Rect2>(4);
-            _exposedWallEdgesByRow[gy] = new List<WallEdge>(4);
         }
 
         _initialSolidVoxelCount = 0;
@@ -241,6 +414,7 @@ public partial class Asteroid : RigidBody2D
 
                 if (pt.LengthSquared() <= OuterBoundRadius * OuterBoundRadius && IsPointInPolygon(pt, PolygonVertices))
                 {
+                    _initialSolidMask[rowOffset + gx] = true;
                     _voxels[rowOffset + gx] = VoxelType.Rock;
                     _initialSolidVoxelCount++;
                 }
@@ -251,77 +425,100 @@ public partial class Asteroid : RigidBody2D
     }
 
     /// <summary>
-    /// Menempatkan deposit kristal (VoxelType.Resource) berukuran 13 px di dalam grid batu asteroid.
+    /// Membangkitkan kantung-kantung resource dengan jumlah ACAK dan 1-2 jenis resource berbeda.
     /// </summary>
     private void GenerateResourceVoxelPatches()
     {
         var rng = new RandomNumberGenerator();
-        long seedVal = ((long)GlobalPosition.X * 19349663L) ^ ((long)GlobalPosition.Y * 73856093L);
+        long seedVal = ((long)CachedPosition.X * 19349663L) ^ ((long)CachedPosition.Y * 73856093L);
         rng.Seed = (ulong)Math.Abs(seedVal);
 
         int centerCell = GridSide / 2;
-        bool isGiantDeposit = rng.Randf() < 0.45f;
 
-        if (isGiantDeposit)
+        if (IsEnergyAsteroid)
         {
-            float coreRadius = Radius * rng.RandfRange(0.30f, 0.45f);
+            // Asteroid Energy Crystal: Inti bintang penuh kristal Aether + urat kristal menjalar ke puncak bintang
+            float coreRadius = Radius * rng.RandfRange(0.28f, 0.42f);
             int cellSpan = (int)MathF.Ceiling(coreRadius * InvVoxelSize);
 
             for (int dy = -cellSpan; dy <= cellSpan; dy++)
             {
                 int gy = centerCell + dy;
-                if (gy < 2 || gy >= GridSide - 2) continue;
-
+                if (gy < 1 || gy >= GridSide - 1) continue;
                 for (int dx = -cellSpan; dx <= cellSpan; dx++)
                 {
                     int gx = centerCell + dx;
-                    if (gx < 2 || gx >= GridSide - 2) continue;
+                    if (gx < 1 || gx >= GridSide - 1) continue;
 
                     Vector2 localPos = GridToLocalCenter(gx, gy);
-                    if (localPos.Length() <= coreRadius && _voxels[gy * GridSide + gx] == VoxelType.Rock && rng.Randf() > 0.15f)
+                    if (localPos.Length() <= coreRadius && _voxels[gy * GridSide + gx] == VoxelType.Rock && rng.Randf() > 0.12f)
                     {
-                        _voxels[gy * GridSide + gx] = VoxelType.Resource;
+                        _voxels[gy * GridSide + gx] = VoxelType.ResourceAether;
                     }
                 }
             }
-        }
-        else
-        {
-            int pocketCount = rng.RandiRange(5, 10);
-            for (int p = 0; p < pocketCount; p++)
+
+            // Urat tambahan di lengan bintang
+            int rayCount = rng.RandiRange(4, 8);
+            for (int r = 0; r < rayCount; r++)
             {
-                float pAngle = rng.Randf() * Mathf.Tau;
-                float pDist = rng.RandfRange(Radius * 0.15f, Radius * 0.65f);
-                Vector2 pocketCenter = new Vector2(MathF.Cos(pAngle), MathF.Sin(pAngle)) * pDist;
-                Vector2I pocketGrid = LocalToGrid(pocketCenter);
+                float angle = rng.Randf() * Mathf.Tau;
+                float dist = rng.RandfRange(Radius * 0.35f, Radius * 0.68f);
+                Vector2 pos = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * dist;
+                PlaceResourceCluster(LocalToGrid(pos), rng.RandiRange(2, 4), HasSecondaryResource && (r % 3 == 0) ? VoxelType.ResourceQuartz : VoxelType.ResourceAether, rng);
+            }
+            return;
+        }
 
-                int clusterRadius = rng.RandiRange(2, 4);
-                for (int dy = -clusterRadius; dy <= clusterRadius; dy++)
+        // Asteroid Batu Biasa: Jumlah deposit ACAK (antara 2 hingga 9 kantung dengan ukuran acak)
+        // dan berisi 1 atau 2 jenis resource berbeda!
+        VoxelType primaryVox = ResourceToVoxelType(PrimaryResource);
+        VoxelType secondaryVox = ResourceToVoxelType(SecondaryResource);
+
+        bool hasMotherlodeCore = rng.Randf() < 0.35f;
+        if (hasMotherlodeCore)
+        {
+            float coreRadius = Radius * rng.RandfRange(0.20f, 0.34f);
+            PlaceResourceCluster(new Vector2I(centerCell, centerCell), (int)MathF.Ceiling(coreRadius * InvVoxelSize), primaryVox, rng);
+        }
+
+        int randomPocketCount = rng.RandiRange(2, 9);
+        for (int p = 0; p < randomPocketCount; p++)
+        {
+            float pAngle = rng.Randf() * Mathf.Tau;
+            float pDist = rng.RandfRange(Radius * 0.14f, Radius * 0.68f);
+            Vector2 pocketCenter = new Vector2(MathF.Cos(pAngle), MathF.Sin(pAngle)) * pDist;
+            Vector2I pocketGrid = LocalToGrid(pocketCenter);
+
+            int clusterRadius = rng.RandiRange(2, 5);
+            // Jika memiliki 2 resource berbeda, separuh kantung menggunakan SecondaryResource
+            VoxelType chosenVox = (HasSecondaryResource && (p % 2 == 1)) ? secondaryVox : primaryVox;
+            PlaceResourceCluster(pocketGrid, clusterRadius, chosenVox, rng);
+        }
+    }
+
+    private void PlaceResourceCluster(Vector2I centerGrid, int clusterRadius, VoxelType targetVoxelType, RandomNumberGenerator rng)
+    {
+        for (int dy = -clusterRadius; dy <= clusterRadius; dy++)
+        {
+            for (int dx = -clusterRadius; dx <= clusterRadius; dx++)
+            {
+                if (dx * dx + dy * dy > clusterRadius * clusterRadius + 1) continue;
+                if (rng.Randf() < 0.22f) continue;
+
+                int gx = centerGrid.X + dx;
+                int gy = centerGrid.Y + dy;
+                if (!IsValidGridCoord(gx, gy)) continue;
+
+                Vector2 cellCenter = GridToLocalCenter(gx, gy);
+                if (cellCenter.Length() < Radius * 0.80f && _voxels[gy * GridSide + gx] == VoxelType.Rock)
                 {
-                    for (int dx = -clusterRadius; dx <= clusterRadius; dx++)
-                    {
-                        if (dx * dx + dy * dy > clusterRadius * clusterRadius + 1) continue;
-                        if (rng.Randf() < 0.28f) continue;
-
-                        int gx = pocketGrid.X + dx;
-                        int gy = pocketGrid.Y + dy;
-                        if (!IsValidGridCoord(gx, gy)) continue;
-
-                        Vector2 cellCenter = GridToLocalCenter(gx, gy);
-                        if (cellCenter.Length() < Radius * 0.78f && _voxels[gy * GridSide + gx] == VoxelType.Rock)
-                        {
-                            _voxels[gy * GridSide + gx] = VoxelType.Resource;
-                        }
-                    }
+                    _voxels[gy * GridSide + gx] = targetVoxelType;
                 }
             }
         }
     }
 
-    /// <summary>
-    /// Memecah garis kontur luar poligon menjadi segmen-segmen ~13 px yang terikat ke sel voxel terdekat,
-    /// sehingga ketika mulut terowongan digali oleh laser, garis kontur luar di titik itu ikut terbuka.
-    /// </summary>
     private void BuildPerimeterSegments()
     {
         _perimeterSegments.Clear();
@@ -333,7 +530,7 @@ public partial class Asteroid : RigidBody2D
             Vector2 a = PolygonVertices[i];
             Vector2 b = PolygonVertices[(i + 1) % n];
             float len = a.DistanceTo(b);
-            int steps = Math.Max(1, (int)MathF.Ceiling(len / VoxelSize));
+            int steps = Math.Max(1, (int)MathF.Ceiling(len / (VoxelSize * 1.5f)));
 
             for (int s = 0; s < steps; s++)
             {
@@ -363,89 +560,297 @@ public partial class Asteroid : RigidBody2D
         {
             RebuildRowSpans(gy);
         }
+        _geometryBatchDirty = true;
     }
 
-    /// <summary>
-    /// Membangun ulang rentang gambar horizontal (RLE Spans) hanya pada 1 baris gy.
-    /// Menggabungkan kotak-kotak 13 px bersebelahan menjadi 1 Rect2 memanjang agar rendering bebas lag.
-    /// </summary>
     private void RebuildRowSpans(int gy)
     {
         if (gy < 0 || gy >= GridSide) return;
 
         var rockSpans = _rockSpansByRow[gy];
-        var resRects = _resourceRectsByRow[gy];
-        var wallEdges = _exposedWallEdgesByRow[gy];
-
         rockSpans.Clear();
-        resRects.Clear();
-        wallEdges.Clear();
+
+        for (int t = 0; t < ResourceCount; t++)
+        {
+            _resourceSpansByTypeAndRow[t][gy].Clear();
+        }
 
         int rowOffset = gy * GridSide;
         float rowY = GridOriginLocal.Y + gy * VoxelSize;
 
-        int runStart = -1;
+        int rockStart = -1;
+        int curResTypeIdx = -1;
+        int resStart = -1;
+
         for (int gx = 0; gx < GridSide; gx++)
         {
-            VoxelType t = _voxels[rowOffset + gx];
-            bool isSolid = t != VoxelType.Empty;
+            VoxelType vox = _voxels[rowOffset + gx];
 
-            if (isSolid)
+            if (vox != VoxelType.Empty)
             {
-                if (runStart == -1) runStart = gx;
-
-                if (t == VoxelType.Resource)
-                {
-                    float cellX = GridOriginLocal.X + gx * VoxelSize;
-                    resRects.Add(new Rect2(cellX + 1.0f, rowY + 1.0f, VoxelSize - 2.0f, VoxelSize - 2.0f));
-                }
-
-                if (_carvedVoxelCount > 0)
-                {
-                    float x0 = GridOriginLocal.X + gx * VoxelSize;
-                    float x1 = x0 + VoxelSize;
-                    float y0 = rowY;
-                    float y1 = rowY + VoxelSize;
-
-                    if (gx > 0 && _voxels[rowOffset + gx - 1] == VoxelType.Empty)
-                        wallEdges.Add(new WallEdge(new Vector2(x0, y0), new Vector2(x0, y1)));
-                    if (gx < GridSide - 1 && _voxels[rowOffset + gx + 1] == VoxelType.Empty)
-                        wallEdges.Add(new WallEdge(new Vector2(x1, y0), new Vector2(x1, y1)));
-                    if (gy > 0 && _voxels[(gy - 1) * GridSide + gx] == VoxelType.Empty)
-                        wallEdges.Add(new WallEdge(new Vector2(x0, y0), new Vector2(x1, y0)));
-                    if (gy < GridSide - 1 && _voxels[(gy + 1) * GridSide + gx] == VoxelType.Empty)
-                        wallEdges.Add(new WallEdge(new Vector2(x0, y1), new Vector2(x1, y1)));
-                }
+                if (rockStart == -1) rockStart = gx;
             }
-            else if (runStart != -1)
+            else if (rockStart != -1)
             {
-                int runLen = gx - runStart;
                 rockSpans.Add(new Rect2(
-                    GridOriginLocal.X + runStart * VoxelSize,
+                    GridOriginLocal.X + rockStart * VoxelSize,
                     rowY,
-                    runLen * VoxelSize,
+                    (gx - rockStart) * VoxelSize,
                     VoxelSize
                 ));
-                runStart = -1;
+                rockStart = -1;
+            }
+
+            int thisResIdx = TryGetResourceType(vox, out ResourceType rType) ? (int)rType : -1;
+            if (thisResIdx == curResTypeIdx)
+            {
+                // Lanjutkan span resource yang sama
+            }
+            else
+            {
+                if (curResTypeIdx != -1 && resStart != -1)
+                {
+                    _resourceSpansByTypeAndRow[curResTypeIdx][gy].Add(new Rect2(
+                        GridOriginLocal.X + resStart * VoxelSize + 1.0f,
+                        rowY + 1.0f,
+                        (gx - resStart) * VoxelSize - 2.0f,
+                        VoxelSize - 2.0f
+                    ));
+                }
+                curResTypeIdx = thisResIdx;
+                resStart = (thisResIdx != -1) ? gx : -1;
             }
         }
 
-        if (runStart != -1)
+        if (rockStart != -1)
         {
-            int runLen = GridSide - runStart;
             rockSpans.Add(new Rect2(
-                GridOriginLocal.X + runStart * VoxelSize,
+                GridOriginLocal.X + rockStart * VoxelSize,
                 rowY,
-                runLen * VoxelSize,
+                (GridSide - rockStart) * VoxelSize,
                 VoxelSize
             ));
+        }
+
+        if (curResTypeIdx != -1 && resStart != -1)
+        {
+            _resourceSpansByTypeAndRow[curResTypeIdx][gy].Add(new Rect2(
+                GridOriginLocal.X + resStart * VoxelSize + 1.0f,
+                rowY + 1.0f,
+                (GridSide - resStart) * VoxelSize - 2.0f,
+                VoxelSize - 2.0f
+            ));
+        }
+
+        _geometryBatchDirty = true;
+    }
+
+    private void RebuildBatchedRenderGeometry()
+    {
+        _geometryBatchDirty = false;
+        MergeVerticalSpans(_rockSpansByRow, _mergedRockRects);
+
+        for (int t = 0; t < ResourceCount; t++)
+        {
+            MergeVerticalSpans(_resourceSpansByTypeAndRow[t], _mergedResourceRects[t]);
+        }
+
+        if (_carvedVoxelCount > 0)
+        {
+            List<Vector2> wallPts = new(128);
+            List<Vector2>[] exposedResPts = new List<Vector2>[ResourceCount];
+            for (int t = 0; t < ResourceCount; t++)
+            {
+                exposedResPts[t] = new List<Vector2>(32);
+            }
+
+            // Fungsi lokal: sel Empty hanya dianggap dinding lorong jika aslinya berada di dalam asteroid!
+            // Ruang angkasa hampa di luar asteroid tidak akan digambar garis dinding kisi-kisi (tepian luar tetap mulus poligon!)
+            bool IsCarvedEmpty(int nGx, int nGy)
+            {
+                if (nGx < 0 || nGx >= GridSide || nGy < 0 || nGy >= GridSide) return false;
+                int nIdx = nGy * GridSide + nGx;
+                if (nIdx < 0 || nIdx >= _voxels.Length || _initialSolidMask == null || nIdx >= _initialSolidMask.Length) return false;
+                return _voxels[nIdx] == VoxelType.Empty && _initialSolidMask[nIdx];
+            }
+
+            for (int gy = 0; gy < GridSide; gy++)
+            {
+                int rowOffset = gy * GridSide;
+                float y0 = GridOriginLocal.Y + gy * VoxelSize;
+                float y1 = y0 + VoxelSize;
+
+                for (int gx = 0; gx < GridSide; gx++)
+                {
+                    VoxelType vox = _voxels[rowOffset + gx];
+                    if (vox == VoxelType.Empty) continue;
+
+                    float x0 = GridOriginLocal.X + gx * VoxelSize;
+                    float x1 = x0 + VoxelSize;
+
+                    bool isRes = TryGetResourceType(vox, out ResourceType rType);
+                    List<Vector2> targetList = isRes ? exposedResPts[(int)rType] : wallPts;
+
+                    // Garis dinding galian interior di dalam asteroid
+                    if (gx > 0 && IsCarvedEmpty(gx - 1, gy))
+                    {
+                        targetList.Add(new Vector2(x0, y0));
+                        targetList.Add(new Vector2(x0, y1));
+                    }
+                    if (gx < GridSide - 1 && IsCarvedEmpty(gx + 1, gy))
+                    {
+                        targetList.Add(new Vector2(x1, y0));
+                        targetList.Add(new Vector2(x1, y1));
+                    }
+                    if (gy > 0 && IsCarvedEmpty(gx, gy - 1))
+                    {
+                        targetList.Add(new Vector2(x0, y0));
+                        targetList.Add(new Vector2(x1, y0));
+                    }
+                    if (gy < GridSide - 1 && IsCarvedEmpty(gx, gy + 1))
+                    {
+                        targetList.Add(new Vector2(x0, y1));
+                        targetList.Add(new Vector2(x1, y1));
+                    }
+
+                    // Tambahan: jika blok Resource sudah tersentuh lorong galian di salah satu sisinya,
+                    // nyalakan juga seluruh bingkai luar klaster resource di sekitar titik kontak!
+                    if (isRes)
+                    {
+                        bool touchesEmpty =
+                            (gx > 0 && IsCarvedEmpty(gx - 1, gy)) ||
+                            (gx < GridSide - 1 && IsCarvedEmpty(gx + 1, gy)) ||
+                            (gy > 0 && IsCarvedEmpty(gx, gy - 1)) ||
+                            (gy < GridSide - 1 && IsCarvedEmpty(gx, gy + 1));
+
+                        if (touchesEmpty)
+                        {
+                            if (gx > 0 && _voxels[rowOffset + gx - 1] == VoxelType.Rock)
+                            {
+                                targetList.Add(new Vector2(x0, y0));
+                                targetList.Add(new Vector2(x0, y1));
+                            }
+                            if (gx < GridSide - 1 && _voxels[rowOffset + gx + 1] == VoxelType.Rock)
+                            {
+                                targetList.Add(new Vector2(x1, y0));
+                                targetList.Add(new Vector2(x1, y1));
+                            }
+                            if (gy > 0 && _voxels[(gy - 1) * GridSide + gx] == VoxelType.Rock)
+                            {
+                                targetList.Add(new Vector2(x0, y0));
+                                targetList.Add(new Vector2(x1, y0));
+                            }
+                            if (gy < GridSide - 1 && _voxels[(gy + 1) * GridSide + gx] == VoxelType.Rock)
+                            {
+                                targetList.Add(new Vector2(x0, y1));
+                                targetList.Add(new Vector2(x1, y1));
+                            }
+                        }
+                    }
+                }
+            }
+
+            _batchedWallLines = wallPts.ToArray();
+            for (int t = 0; t < ResourceCount; t++)
+            {
+                _batchedExposedResourceEdges[t] = exposedResPts[t].ToArray();
+            }
+
+            List<Vector2> perimPts = new(_perimeterSegments.Count * 2);
+            for (int i = 0; i < _perimeterSegments.Count; i++)
+            {
+                var seg = _perimeterSegments[i];
+                if (_voxels[seg.CheckGridY * GridSide + seg.CheckGridX] != VoxelType.Empty)
+                {
+                    perimPts.Add(seg.A);
+                    perimPts.Add(seg.B);
+                }
+            }
+            _batchedPerimeterLines = perimPts.ToArray();
+        }
+    }
+
+    private static void MergeVerticalSpans(List<Rect2>[] rows, List<Rect2> output)
+    {
+        output.Clear();
+        for (int gy = 0; gy < rows.Length; gy++)
+        {
+            var curRow = rows[gy];
+            for (int i = 0; i < curRow.Count; i++)
+            {
+                Rect2 r = curRow[i];
+                bool merged = false;
+
+                for (int j = output.Count - 1; j >= 0; j--)
+                {
+                    Rect2 prev = output[j];
+                    if (prev.End.Y + 2.5f < r.Position.Y) break;
+
+                    if (MathF.Abs(prev.Position.X - r.Position.X) < 0.1f
+                        && MathF.Abs(prev.Size.X - r.Size.X) < 0.1f
+                        && MathF.Abs(prev.End.Y - r.Position.Y) <= 2.1f)
+                    {
+                        output[j] = new Rect2(prev.Position, new Vector2(prev.Size.X, r.End.Y - prev.Position.Y));
+                        merged = true;
+                        break;
+                    }
+                }
+
+                if (!merged)
+                {
+                    output.Add(r);
+                }
+            }
         }
     }
 
     public override void _PhysicsProcess(double delta)
     {
+        try
+        {
+            UpdateCachedTransform();
+
         float dt = (float)delta;
         bool needsRedraw = false;
+
+        // Jaga kecepatan hanyut tetap pelan & stabil khas objek kosmik (antara 4.0 - 14.0 px/s)
+        float currentSpeed = LinearVelocity.Length();
+        if (currentSpeed > 14.0f)
+        {
+            LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 12.0f, dt * 2.0f);
+        }
+        else if (currentSpeed < 3.5f && currentSpeed > 0.01f)
+        {
+            LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 5.0f, dt * 2.0f);
+        }
+
+        // Perlindungan Batas Sektor (12.000 x 12.000 px) & Area Kapal Induk Pemain (Pusat 0,0):
+        // Jika asteroid mendekati dinding batas luar, belokkan kembali ke arah dalam secara halus
+        float maxBoundary = 5700.0f - OuterBoundRadius;
+        Vector2 pos = GlobalPosition;
+        if (MathF.Abs(pos.X) > maxBoundary || MathF.Abs(pos.Y) > maxBoundary)
+        {
+            Vector2 toCenter = (-pos).Normalized();
+            LinearVelocity = LinearVelocity.Lerp(toCenter * 8.0f, dt * 1.5f);
+        }
+        // Jika mendekati area awal kapal induk di (0,0), dorong perlahan menjauh agar base tetap lapang
+        float distToPlayerSpawn = pos.Length();
+        if (distToPlayerSpawn < 950.0f)
+        {
+            Vector2 awayFromCenter = pos.LengthSquared() > 1.0f ? pos.Normalized() : Vector2.Right;
+            LinearVelocity = LinearVelocity.Lerp(awayFromCenter * 10.0f, dt * 2.0f);
+        }
+
+        // Asteroid Energy Crystal berdenyut menyala-nyala secara berkala
+        if (IsEnergyAsteroid)
+        {
+            float oldPhase = MathF.Floor(_energyPulseTimer * 6.0f);
+            _energyPulseTimer += dt * 3.2f;
+            if (MathF.Floor(_energyPulseTimer * 6.0f) != oldPhase)
+            {
+                needsRedraw = true;
+            }
+        }
 
         if (_lastDrawnScannerCount != CurrentScannerCount)
         {
@@ -477,80 +882,93 @@ public partial class Asteroid : RigidBody2D
             QueueRedraw();
         }
     }
+    catch (Exception ex)
+    {
+        GD.PrintErr($"[Asteroid._PhysicsProcess] {ex}");
+    }
+}
 
     public override void _Draw()
     {
-        if (PolygonVertices.Length < 3 || GridSide == 0) return;
+        try
+        {
+            if (PolygonVertices.Length < 3 || GridSide == 0) return;
 
-        // 1. Gambar Badan Batu 13 px:
+        if (_geometryBatchDirty)
+        {
+            RebuildBatchedRenderGeometry();
+        }
+
+        // 1. Gambar Badan Asteroid
         if (_carvedVoxelCount == 0)
         {
             DrawColoredPolygon(PolygonVertices, _rockBodyColor);
         }
         else
         {
-            for (int gy = 0; gy < GridSide; gy++)
+            for (int i = 0; i < _mergedRockRects.Count; i++)
             {
-                var spans = _rockSpansByRow[gy];
-                for (int i = 0; i < spans.Count; i++)
-                {
-                    DrawRect(spans[i], _rockBodyColor, true);
-                }
+                DrawRect(_mergedRockRects[i], _rockBodyColor, true);
             }
         }
 
-        // 2. Gambar Patch Resource 13 px: Intensitas disesuaikan dari jumlah Scanner
-        float scanRatio = Mathf.Clamp((CurrentScannerCount - 4) / 46.0f, 0.04f, 1.0f);
+        // 2. Gambar Patch Resource (1-2 Jenis Berbeda per Asteroid, atau Menyala Terang untuk Energy Crystal!)
+        float scanRatio = IsEnergyAsteroid
+            ? (0.78f + 0.22f * MathF.Sin(_energyPulseTimer))
+            : Mathf.Clamp((CurrentScannerCount - 4) / 46.0f, 0.05f, 1.0f);
 
-        Color fillColor = new Color(
-            ResourceGlowColor.R * (0.06f + scanRatio * 0.94f),
-            ResourceGlowColor.G * (0.06f + scanRatio * 0.94f),
-            ResourceGlowColor.B * (0.06f + scanRatio * 0.94f),
-            0.04f + scanRatio * 0.72f
-        );
-
-        Color borderColor = new Color(
-            ResourceGlowColor.R * (0.10f + scanRatio * 0.90f),
-            ResourceGlowColor.G * (0.10f + scanRatio * 0.90f),
-            ResourceGlowColor.B * (0.10f + scanRatio * 0.90f),
-            0.07f + scanRatio * 0.88f
-        );
-
-        for (int gy = 0; gy < GridSide; gy++)
+        for (int t = 0; t < ResourceCount; t++)
         {
-            var resList = _resourceRectsByRow[gy];
-            for (int i = 0; i < resList.Count; i++)
+            var rectList = _mergedResourceRects[t];
+            if (rectList.Count == 0) continue;
+
+            Color baseResCol = GetResourceColor((ResourceType)t);
+            Color fillColor = new Color(
+                baseResCol.R * (0.08f + scanRatio * 0.92f),
+                baseResCol.G * (0.08f + scanRatio * 0.92f),
+                baseResCol.B * (0.08f + scanRatio * 0.92f),
+                0.06f + scanRatio * 0.76f
+            );
+
+            for (int i = 0; i < rectList.Count; i++)
             {
-                Rect2 sq = resList[i];
-                DrawRect(sq, fillColor, true);
-                DrawRect(sq, borderColor, false, 1.0f);
+                DrawRect(rectList[i], fillColor, true);
             }
         }
 
-        // 3. Gambar Tepian Dinding Terowongan Dalam
+        // 3. Gambar Tepian Dinding Terowongan Batu Biasa
+        if (_carvedVoxelCount > 0 && _batchedWallLines.Length >= 2)
+        {
+            DrawMultiline(_batchedWallLines, _tunnelWallBorderColor, 1.2f, false);
+        }
+
+        // 4. TEPI BATU RESOURCE MENYALA SAAT DRILLING SUDAH SAMPAI RESOURCE!
         if (_carvedVoxelCount > 0)
         {
-            for (int gy = 0; gy < GridSide; gy++)
+            for (int t = 0; t < ResourceCount; t++)
             {
-                var edges = _exposedWallEdgesByRow[gy];
-                for (int i = 0; i < edges.Count; i++)
+                var exposedEdges = _batchedExposedResourceEdges[t];
+                if (exposedEdges != null && exposedEdges.Length >= 2)
                 {
-                    DrawLine(edges[i].A, edges[i].B, _tunnelWallBorderColor, 1.3f, true);
+                    Color neonEdgeCol = GetResourceColor((ResourceType)t) * 1.45f;
+                    neonEdgeCol.A = 1.0f;
+                    DrawMultiline(exposedEdges, neonEdgeCol, 2.4f, false);
                 }
             }
         }
 
-        // 4. Gambar Pemanasan Bertahap pada Blok 13 px yang Sedang Dikikis Laser
-        //    (Berpendar dari Oranye Panas -> Kuning Pijar sebelum hancur jadi Empty)
+        // 5. Gambar Pemanasan Bertahap pada Blok 13 px yang Sedang Dikikis Laser
+        //    Jika blok yang sedang dikikis adalah Resource, tepi blok resource tersebut langsung menyala terang!
         if (_activeHeatedIndices.Count > 0)
         {
-            Color hotOrange = new Color(2.6f, 0.85f, 0.12f, 0.85f);          // Oranye Panas
-            Color incandescentYellow = new Color(4.6f, 4.1f, 1.15f, 0.98f);  // Kuning Pijar
+            Color hotOrange = new Color(2.6f, 0.85f, 0.12f, 0.85f);
+            Color incandescentYellow = new Color(4.6f, 4.1f, 1.15f, 0.98f);
 
             for (int i = 0; i < _activeHeatedIndices.Count; i++)
             {
                 int idx = _activeHeatedIndices[i];
-                if (_voxels[idx] == VoxelType.Empty) continue;
+                VoxelType vox = _voxels[idx];
+                if (vox == VoxelType.Empty) continue;
 
                 float heat = Mathf.Clamp(_voxelHeat[idx], 0.0f, 1.0f);
                 if (heat <= 0.01f) continue;
@@ -566,65 +984,79 @@ public partial class Asteroid : RigidBody2D
 
                 Color glowCol = hotOrange.Lerp(incandescentYellow, heat * heat);
                 Color fillHeatCol = new Color(glowCol.R, glowCol.G, glowCol.B, 0.22f + heat * 0.72f);
-                Color outlineHeatCol = new Color(glowCol.R * 1.15f, glowCol.G * 1.15f, glowCol.B * 1.1f, 0.55f + heat * 0.45f);
 
                 DrawRect(cellRect, fillHeatCol, true);
-                DrawRect(cellRect, outlineHeatCol, false, 1.4f);
+
+                if (TryGetResourceType(vox, out ResourceType rType))
+                {
+                    // Jika laser sedang mengenai blok Resource, tepi blok resource menyala neon sangat terang!
+                    Color resNeon = GetResourceColor(rType) * 1.65f;
+                    resNeon.A = 1.0f;
+                    DrawRect(cellRect.Grow(1.2f), resNeon, false, 2.2f);
+                }
+                else
+                {
+                    Color outlineHeatCol = new Color(glowCol.R * 1.15f, glowCol.G * 1.15f, glowCol.B * 1.1f, 0.55f + heat * 0.45f);
+                    DrawRect(cellRect, outlineHeatCol, false, 1.4f);
+                }
             }
         }
 
-        // 5. Garis Kontur Luar Asteroid (Terbuka otomatis pada mulut terowongan yang sudah Empty)
+        // 6. Garis Kontur Luar Asteroid (Menyala-nyala berdenyut untuk Energy Crystal Asteroid!)
         Color outlineColor = _unscannedBorderColor;
-        if (scanRatio > 0.45f)
+        if (IsEnergyAsteroid)
+        {
+            float pulse = 0.85f + 0.35f * MathF.Sin(_energyPulseTimer);
+            outlineColor = new Color(3.4f * pulse, 2.8f * pulse, 1.1f, 0.98f);
+        }
+        else if (scanRatio > 0.45f)
         {
             outlineColor = outlineColor.Lerp(ResourceGlowColor * 0.5f, (scanRatio - 0.45f) * 0.8f);
         }
 
-        for (int i = 0; i < _perimeterSegments.Count; i++)
+        float borderWidth = IsEnergyAsteroid ? 2.8f : 2.2f;
+        if (_carvedVoxelCount == 0)
         {
-            var seg = _perimeterSegments[i];
-            if (_voxels[seg.CheckGridY * GridSide + seg.CheckGridX] != VoxelType.Empty)
-            {
-                DrawLine(seg.A, seg.B, outlineColor, 2.4f, true);
-            }
+            DrawPolyline(_closedOutlinePoints, outlineColor, borderWidth, false);
+        }
+        else if (_batchedPerimeterLines.Length >= 2)
+        {
+            DrawMultiline(_batchedPerimeterLines, outlineColor, borderWidth, false);
         }
     }
+    catch (Exception ex)
+    {
+        GD.PrintErr($"[Asteroid._Draw] {ex}");
+    }
+}
 
     // =========================================================================
     // A. MEKANIK PENGIKISAN TITIK TUMBUKAN (RAYMARCHING & EROSION 13 PX)
     // =========================================================================
 
-    /// <summary>
-    /// Menelusuri sel-sel 13 px asteroid sepanjang lintasan sinar (2D DDA Voxel Raymarching)
-    /// dan berhenti tepat pada blok solid (Rock atau Resource) 13 px pertama yang dihadang.
-    /// Jika blok di depan sudah Empty (Kosong), sinar otomatis menembus masuk ke blok di belakangnya.
-    /// </summary>
     public bool RaycastVoxel(Vector2 worldStart, Vector2 worldDir, float maxDist, out VoxelRayHit hit)
     {
         hit = default;
         if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
 
         Vector2 dirNorm = worldDir.Normalized();
-        Vector2 toCenter = GlobalPosition - worldStart;
+        Vector2 toCenter = CachedPosition - worldStart;
         float proj = toCenter.Dot(dirNorm);
         if (proj < -OuterBoundRadius || proj - OuterBoundRadius > maxDist) return false;
 
-        // Jarak tegak lurus dari pusat asteroid ke garis lintasan sinar
         Vector2 perpFoot = worldStart + dirNorm * proj;
-        float perpDistSq = (GlobalPosition - perpFoot).LengthSquared();
+        float perpDistSq = (CachedPosition - perpFoot).LengthSquared();
         float boundSq = OuterBoundRadius * OuterBoundRadius;
         if (perpDistSq > boundSq) return false;
 
-        // Transformasi murni rotasi & translasi ke ruang lokal grid asteroid
-        Vector2 localStart = (worldStart - GlobalPosition).Rotated(-GlobalRotation);
-        Vector2 localDir = dirNorm.Rotated(-GlobalRotation);
+        Vector2 localStart = FastWorldToLocal(worldStart);
+        Vector2 localDir = FastRotateToLocal(dirNorm);
 
         float halfChord = MathF.Sqrt(MathF.Max(0.0f, boundSq - perpDistSq));
         float tEnter = MathF.Max(0.0f, proj - halfChord - VoxelSize);
         float tExit = MathF.Min(maxDist, proj + halfChord + VoxelSize);
         if (tExit < tEnter) return false;
 
-        // Inisialisasi 2D Amanatides & Woo Voxel DDA pada ukuran sel 13 px
         Vector2 rayEntry = localStart + localDir * tEnter;
         float relX = (rayEntry.X - GridOriginLocal.X) * InvVoxelSize;
         float relY = (rayEntry.Y - GridOriginLocal.Y) * InvVoxelSize;
@@ -656,7 +1088,6 @@ public partial class Asteroid : RigidBody2D
 
                 if (cellType != VoxelType.Empty)
                 {
-                    // Berhenti tepat di blok solid 13 px pertama yang dihadang!
                     float hitT = MathF.Max(0.0f, t);
                     Vector2 localHit = localStart + localDir * hitT;
                     Vector2 localCellCenter = GridToLocalCenter(gx, gy);
@@ -667,8 +1098,8 @@ public partial class Asteroid : RigidBody2D
                         GridX = gx,
                         GridY = gy,
                         Type = cellType,
-                        WorldHitPoint = GlobalPosition + localHit.Rotated(GlobalRotation),
-                        WorldCellCenter = GlobalPosition + localCellCenter.Rotated(GlobalRotation),
+                        WorldHitPoint = FastLocalToWorld(localHit),
+                        WorldCellCenter = FastLocalToWorld(localCellCenter),
                         Distance = hitT,
                         CurrentHeat = _voxelHeat[idx]
                     };
@@ -676,7 +1107,6 @@ public partial class Asteroid : RigidBody2D
                 }
             }
 
-            // Melangkah 1 sel 13 px lebih dalam mengikuti lintasan sinar
             if (tMaxX < tMaxY)
             {
                 t = tMaxX;
@@ -694,10 +1124,6 @@ public partial class Asteroid : RigidBody2D
         return false;
     }
 
-    /// <summary>
-    /// Menyalurkan panas laser ke blok 13 px pada koordinat (gx, gy).
-    /// Ketika panas mencapai >= 1.0, blok tersebut hancur dan berubah status menjadi Empty (Kosong).
-    /// </summary>
     public bool ApplyLaserHeatAtVoxel(
         int gx,
         int gy,
@@ -708,7 +1134,7 @@ public partial class Asteroid : RigidBody2D
         out float currentHeat)
     {
         destroyedType = VoxelType.Empty;
-        worldCellCenter = GlobalPosition;
+        worldCellCenter = CachedPosition;
         currentHeat = 0.0f;
 
         if (_isDestroyed || !IsValidGridCoord(gx, gy)) return false;
@@ -717,7 +1143,7 @@ public partial class Asteroid : RigidBody2D
         VoxelType currentType = _voxels[idx];
         if (currentType == VoxelType.Empty) return false;
 
-        worldCellCenter = GlobalPosition + GridToLocalCenter(gx, gy).Rotated(GlobalRotation);
+        worldCellCenter = FastLocalToWorld(GridToLocalCenter(gx, gy));
 
         if (_voxelHeat[idx] <= 0.0f && !_activeHeatedIndices.Contains(idx))
         {
@@ -728,13 +1154,11 @@ public partial class Asteroid : RigidBody2D
         _voxelHeat[idx] += heatDelta;
         currentHeat = Mathf.Clamp(_voxelHeat[idx], 0.0f, 1.0f);
 
-        // Tekanan radiasi halus dari sinar laser
-        ApplyImpulse(worldRayDir * (heatDelta * 1.5f), worldCellCenter - GlobalPosition);
+        ApplyImpulse(worldRayDir * (heatDelta * 1.2f), worldCellCenter - CachedPosition);
         QueueRedraw();
 
         if (_voxelHeat[idx] >= 1.0f)
         {
-            // Blok 13 px hancur dan berubah status menjadi Empty (Kosong)!
             destroyedType = currentType;
             _voxels[idx] = VoxelType.Empty;
             _voxelHeat[idx] = 0.0f;
@@ -743,12 +1167,8 @@ public partial class Asteroid : RigidBody2D
             _remainingSolidVoxelCount = Math.Max(0, _remainingSolidVoxelCount - 1);
             _carvedVoxelCount++;
 
-            // Perbarui span pada baris yang terdampak beserta tetangga atas/bawahnya
             RebuildRowSpans(gy);
-            if (gy > 0) RebuildRowSpans(gy - 1);
-            if (gy < GridSide - 1) RebuildRowSpans(gy + 1);
 
-            // Jika seluruh isi asteroid hampir habis tergali (< 8% tersisa), runtuhkan sisa cangkang
             if (_remainingSolidVoxelCount <= Math.Max(6, (int)(_initialSolidVoxelCount * 0.08f)))
             {
                 DestroyAsteroid();
@@ -761,32 +1181,35 @@ public partial class Asteroid : RigidBody2D
     }
 
     // =========================================================================
-    // B. KOLISI FISIKA TEROWONGAN (ZERO-LAG VOXEL COLLISION / CIRCLE-TO-GRID)
+    // B. KOLISI FISIKA TEROWONGAN (ZERO-INTEROP CIRCLE-TO-GRID COLLISION)
     // =========================================================================
 
-    /// <summary>
-    /// Pemeriksaan titik lingkaran terhadap grid voxel 13 px (Circle-to-Grid Collision):
-    /// - Mengecek sel-sel 13 px di sekitar tepian lingkaran kapal/drone.
-    /// - Jika sel berstatus Empty (sudah dilubangi / luar angkasa), bergerak bebas tanpa hambatan.
-    /// - Jika menyentuh sel yang masih Rock atau Resource, posisi tertahan di luar permukaan blok 13 px
-    ///   dan vektor kecepatan otomatis meluncur (slide) di sepanjang dinding batu.
-    /// </summary>
     public bool ResolveCircleVoxelCollision(
         ref Vector2 worldPos,
         ref Vector2 worldVel,
         float radius,
         float impulseWeight = 0.0f)
     {
+        return ResolveCircleVoxelCollision(ref worldPos, ref worldVel, radius, out _, impulseWeight);
+    }
+
+    public bool ResolveCircleVoxelCollision(
+        ref Vector2 worldPos,
+        ref Vector2 worldVel,
+        float radius,
+        out Vector2 hitNormal,
+        float impulseWeight = 0.0f)
+    {
+        hitNormal = Vector2.Zero;
         if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
 
-        // 1. Cek AABB & Lingkaran Luar Cepat (Eliminasi 98% asteroid jauh tanpa beban CPU)
         float maxBound = OuterBoundRadius + radius;
-        Vector2 diffFromCenter = worldPos - GlobalPosition;
-        if (MathF.Abs(diffFromCenter.X) > maxBound || MathF.Abs(diffFromCenter.Y) > maxBound) return false;
-        if (diffFromCenter.LengthSquared() > maxBound * maxBound) return false;
+        float diffX = worldPos.X - CachedPosition.X;
+        float diffY = worldPos.Y - CachedPosition.Y;
+        if (MathF.Abs(diffX) > maxBound || MathF.Abs(diffY) > maxBound) return false;
+        if (diffX * diffX + diffY * diffY > maxBound * maxBound) return false;
 
-        // 2. Transformasi posisi ke ruang lokal grid asteroid
-        Vector2 localPos = diffFromCenter.Rotated(-GlobalRotation);
+        Vector2 localPos = new Vector2(diffX * CachedCos + diffY * CachedSin, -diffX * CachedSin + diffY * CachedCos);
 
         int minGx = Math.Clamp((int)MathF.Floor((localPos.X - radius - GridOriginLocal.X) * InvVoxelSize), 0, GridSide - 1);
         int maxGx = Math.Clamp((int)MathF.Floor((localPos.X + radius - GridOriginLocal.X) * InvVoxelSize), 0, GridSide - 1);
@@ -797,8 +1220,7 @@ public partial class Asteroid : RigidBody2D
         Vector2 accumLocalNormal = Vector2.Zero;
         float radiusSq = radius * radius;
 
-        // Resolusi hingga 3 iterasi terdalam lebih dulu agar meluncur mulus di dinding & sudut terowongan 13 px
-        for (int pass = 0; pass < 3; pass++)
+        for (int pass = 0; pass < 2; pass++)
         {
             float deepestPenetration = 0.0f;
             Vector2 bestPushNormal = Vector2.Zero;
@@ -811,7 +1233,6 @@ public partial class Asteroid : RigidBody2D
 
                 for (int gx = minGx; gx <= maxGx; gx++)
                 {
-                    // Jika sel berstatus Empty (ruang angkasa / terowongan), lewati tanpa hambatan!
                     if (_voxels[rowOffset + gx] == VoxelType.Empty) continue;
 
                     float cellMinX = GridOriginLocal.X + gx * VoxelSize;
@@ -878,14 +1299,13 @@ public partial class Asteroid : RigidBody2D
 
         if (!anyCollision) return false;
 
-        // 3. Kembalikan posisi hasil resolusi ke koordinat dunia & luncurkan kecepatan sepanjang dinding batu
-        worldPos = GlobalPosition + localPos.Rotated(GlobalRotation);
+        worldPos = FastLocalToWorld(localPos);
 
         Vector2 worldNormal = accumLocalNormal.LengthSquared() > 1e-5f
-            ? accumLocalNormal.Rotated(GlobalRotation).Normalized()
-            : (worldPos - GlobalPosition).Normalized();
+            ? FastRotateToWorld(accumLocalNormal).Normalized()
+            : (worldPos - CachedPosition).Normalized();
 
-        Vector2 relVel = worldVel - LinearVelocity;
+        Vector2 relVel = worldVel - CachedLinearVelocity;
         float inwardSpeed = relVel.Dot(worldNormal);
         if (inwardSpeed < 0.0f)
         {
@@ -893,21 +1313,19 @@ public partial class Asteroid : RigidBody2D
 
             if (impulseWeight > 0.0f)
             {
-                ApplyImpulse(-worldNormal * (-inwardSpeed * impulseWeight), worldPos - GlobalPosition);
+                ApplyImpulse(-worldNormal * (-inwardSpeed * impulseWeight), worldPos - CachedPosition);
             }
         }
 
+        hitNormal = worldNormal;
         return true;
     }
 
-    /// <summary>
-    /// Melubangi sel-sel voxel 13 px dalam radius lingkaran (misal saat diterjang Super Giga Drill Break).
-    /// </summary>
     public int CarveVoxelCircle(Vector2 worldCenter, float carveRadius)
     {
         if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return 0;
 
-        Vector2 localCenter = (worldCenter - GlobalPosition).Rotated(-GlobalRotation);
+        Vector2 localCenter = FastWorldToLocal(worldCenter);
         if (localCenter.Length() > OuterBoundRadius + carveRadius) return 0;
 
         int minGx = Math.Clamp((int)MathF.Floor((localCenter.X - carveRadius - GridOriginLocal.X) * InvVoxelSize), 0, GridSide - 1);
@@ -969,7 +1387,7 @@ public partial class Asteroid : RigidBody2D
 
     public void ApplyHitImpulse(Vector2 hitWorldPos, Vector2 impulse, float damage)
     {
-        Vector2 offset = hitWorldPos - GlobalPosition;
+        Vector2 offset = hitWorldPos - CachedPosition;
         ApplyImpulse(impulse, offset);
         CurrentHealth -= damage;
 
@@ -995,7 +1413,7 @@ public partial class Asteroid : RigidBody2D
         if (_isDestroyed) return;
         _isDestroyed = true;
 
-        EmitSignal(SignalName.AsteroidDestroyed, GlobalPosition, Radius, ResourceGlowColor, IsEnergyAsteroid);
+        EmitSignal(SignalName.AsteroidDestroyed, CachedPosition, Radius, ResourceGlowColor, IsEnergyAsteroid);
 
         if (Radius > 320.0f && GetParent() != null)
         {
@@ -1009,7 +1427,7 @@ public partial class Asteroid : RigidBody2D
 
                 var frag = new Asteroid
                 {
-                    GlobalPosition = GlobalPosition + offset,
+                    GlobalPosition = CachedPosition + offset,
                     Radius = subRadius,
                     MaxHealth = subRadius * 4.0f,
                     AsteroidType = AsteroidType,
@@ -1017,7 +1435,7 @@ public partial class Asteroid : RigidBody2D
                 };
 
                 float blastSpeed = (float)GD.RandRange(50.0, 140.0);
-                frag.LinearVelocity = LinearVelocity + offset.Normalized() * blastSpeed;
+                frag.LinearVelocity = CachedLinearVelocity + offset.Normalized() * blastSpeed;
                 frag.AngularVelocity = (GD.Randf() - 0.5f) * 1.2f;
 
                 GetParent().CallDeferred("add_child", frag);

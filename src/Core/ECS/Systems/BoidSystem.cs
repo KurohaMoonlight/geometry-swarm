@@ -8,17 +8,9 @@ using Godot;
 namespace GeometrySwarm.Core.ECS.Systems;
 
 /// <summary>
-/// Sistem gerak & state machine kawanan (Orbiting, Launched, Returning, ChargingDrill, DrillExhaust).
-/// Mengimplementasikan:
-/// 1. Pembagian 12 Sektor (Pizza Slices) di sekitar Core yang memindai Spatial Grid untuk menghitung
-///    Skor Ancaman = (Jumlah Musuh di Sektor - Jumlah Defender di Sektor).
-/// 2. Alokasi sudut orbit dinamis dari sektor aman ke sektor berancaman tinggi.
-/// 3. Defender "bodoh" & organik yang hanya mengikuti gaya pegas sederhana (radial + sudut orbit ~120px)
-///    serta saling menjaga jarak (separation via SpatialHashGrid) dengan kecepatan lebih lambat dari swarm,
-///    sehingga membentuk barisan tameng rapat namun organik dengan celah alami.
-/// 4. Kolisi Fisika Terowongan (Zero-Lag Voxel Collision): setiap unit swarm mengecek sel 13 px
-///    di sekitar tepiannya sehingga bebas terbang masuk ke sel Empty (terowongan galian) dan
-///    otomatis tertahan serta meluncur (slide) di sepanjang dinding batu (Rock/Resource).
+/// Sistem gerak & state machine kawanan (Dioptimalkan dengan Pre-Filtered Nearby Asteroids & Zero-Interop).
+/// - Menyaring hanya asteroid yang berada di dekat Core (1x per frame) sehingga ribuan unit Swarm
+///   tidak perlu meloop 32 asteroid atau memanggil P/Invoke C++ Godot di dalam loop utama.
 /// </summary>
 public sealed class BoidSystem
 {
@@ -33,34 +25,32 @@ public sealed class BoidSystem
     private readonly short[] _densityGrid = new short[GridWidth * GridHeight];
     private readonly short[] _enemyCellGrid = new short[GridWidth * GridHeight];
 
-    // SpatialHashGrid untuk Separation antar-Defender dan deteksi tumbukan peluru musuh vs Defender
     private readonly SpatialHashGrid _defenderSpatialGrid = new(cellSize: 24.0f, maxEntities: 4096, tableSize: 2048);
     private readonly Vector2[] _defenderPositions = new Vector2[4096];
     private readonly Vector2[] _defenderVelocities = new Vector2[4096];
     private readonly int[] _neighborBuffer = new int[32];
     private int _activeDefenderCount = 0;
 
-    // Parameter Orbiting Attacker (Swarm Cepat & Lincah)
+    // Buffer asteroid terdekat yang sudah disaring sekali per frame (Zero-GC, Zero-Interop di dalam loop)
+    private readonly Asteroid[] _nearbyAsteroids = new Asteroid[16];
+    private int _nearbyAsteroidCount = 0;
+
     public float SeparationWeight { get; set; } = 88.0f;
     public float OrbitSpringWeight { get; set; } = 5.6f;
     public float OrbitTangentialWeight { get; set; } = 250.0f;
     public float Damping { get; set; } = 0.94f;
     public float MaxOrbitSpeed { get; set; } = 500.0f;
 
-    // ===============================================================
-    // PARAMETER DEFENDER / GUARDIAN (Organik, Reaktif, Pegas Sederhana)
-    // ===============================================================
     public const int SectorCount = 12;
     public const float SectorArc = Mathf.Tau / SectorCount;
-    public float ShieldRadius { get; set; } = 88.0f;                // Radius perisai organik diperketat untuk skala swarm baru
-    public float ThreatScanRadius { get; set; } = 750.0f;           // Radius pemindaian Spatial Grid di sekitar markas
-    public float ShieldRadialSpring { get; set; } = 4.8f;           // Gaya pegas radial menjaga jarak ring dari Core
-    public float ShieldAngularSpring { get; set; } = 7.5f;          // Gaya pegas sudut reaktif meluncur cepat ke sektor ancaman
-    public float DefenderSeparationRadius { get; set; } = 18.0f;    // Jarak jaga antar Defender (separation) disesuaikan
-    public float DefenderSeparationWeight { get; set; } = 260.0f;   // Kekuatan tolak-menolak agar berbaris rapat tapi organik
-    public float MaxGuardianSpeed { get; set; } = 340.0f;           // Lincah berputar merespon ancaman!
+    public float ShieldRadius { get; set; } = 88.0f;
+    public float ThreatScanRadius { get; set; } = 750.0f;
+    public float ShieldRadialSpring { get; set; } = 4.8f;
+    public float ShieldAngularSpring { get; set; } = 7.5f;
+    public float DefenderSeparationRadius { get; set; } = 18.0f;
+    public float DefenderSeparationWeight { get; set; } = 260.0f;
+    public float MaxGuardianSpeed { get; set; } = 340.0f;
 
-    // Array 12 Sektor untuk pemindaian ancaman Core
     private readonly int[] _sectorEnemyCounts = new int[SectorCount];
     private readonly int[] _sectorDefenderCounts = new int[SectorCount];
     private readonly float[] _sectorThreatScores = new float[SectorCount];
@@ -69,28 +59,21 @@ public sealed class BoidSystem
     private float _sectorRebalanceTimer = 0.0f;
     private float _organicWaveTime = 0.0f;
 
-    // Parameter Peluru (Launched Mode)
     public float BulletThrust { get; set; } = 2200.0f;
     public float BulletMaxSpeed { get; set; } = 1350.0f;
 
-    // Parameter Kepulangan (Returning Mode)
     public float ReturnThrust { get; set; } = 2400.0f;
     public float ReturnMaxSpeed { get; set; } = 750.0f;
 
-    // Radius kolisi fisik sebuah unit swarm terhadap sel voxel 13 px
     private const float DroneVoxelRadius = 5.0f;
 
-    // Counter status kawanan real-time
     public int OrbitingCount { get; private set; }
     public int LaunchedCount { get; private set; }
     public int ReturningCount { get; private set; }
     public int EnemyCount { get; private set; }
 
-    // Warna saat drone menjadi peluru berenergi tinggi (Blazing White-Gold)
     private static readonly Color BulletGlowColor = new(3.2f, 2.6f, 1.2f, 1.0f);
-    // Warna saat drone terbang pulang (Emerald Glow)
     private static readonly Color ReturnGlowColor = new(0.8f, 2.6f, 1.8f, 1.0f);
-    // Warna proyektil/swarm musuh (Crimson-Violet)
     private static readonly Color EnemyGlowColor = new(3.4f, 0.35f, 0.9f, 1.0f);
 
     public BoidSystem(World world)
@@ -99,9 +82,6 @@ public sealed class BoidSystem
         _boidQuery = new QueryDescription().WithAll<PositionComponent, VelocityComponent, SwarmUnitComponent, VisualComponent>();
     }
 
-    /// <summary>
-    /// Ekspos skor ancaman per sektor untuk keperluan debug/visualisasi jika dibutuhkan.
-    /// </summary>
     public ReadOnlySpan<float> GetSectorThreatScores() => _sectorThreatScores;
 
     public void Update(float delta, Vector2 anchorPos, Vector2 anchorVelocity, Vector2 cursorThreatPos)
@@ -121,7 +101,30 @@ public sealed class BoidSystem
         int enemyCount = 0;
 
         // =========================================================================
-        // 1. ISI SPATIAL GRID (Attacker Density, Enemy Grid Cells, & Defender Hash)
+        // 0. PRE-FILTER ASTEROID TERDEKAT SEKALI PER FRAME (MENGHILANGKAN >95% INTEROP!)
+        // =========================================================================
+        _nearbyAsteroidCount = 0;
+        var allAsteroids = Asteroid.ActiveAsteroids;
+        const float maxSwarmReach = 1850.0f;
+
+        for (int a = 0; a < allAsteroids.Count; a++)
+        {
+            var ast = allAsteroids[a];
+            if (ast == null || !ast.IsActiveInTree) continue;
+
+            float checkDist = maxSwarmReach + ast.OuterBoundRadius;
+            Vector2 d = ast.CachedPosition - anchorPos;
+            if (MathF.Abs(d.X) <= checkDist && MathF.Abs(d.Y) <= checkDist)
+            {
+                if (_nearbyAsteroidCount < _nearbyAsteroids.Length)
+                {
+                    _nearbyAsteroids[_nearbyAsteroidCount++] = ast;
+                }
+            }
+        }
+
+        // =========================================================================
+        // 1. ISI SPATIAL GRID
         // =========================================================================
         Array.Clear(_densityGrid, 0, _densityGrid.Length);
         Array.Clear(_enemyCellGrid, 0, _enemyCellGrid.Length);
@@ -133,7 +136,6 @@ public sealed class BoidSystem
         _activeDefenderCount = 0;
 
         Vector2 gridOrigin = anchorPos - new Vector2(GridWidth * CellSize * 0.5f, GridHeight * CellSize * 0.5f);
-        var activeAsteroids = Asteroid.ActiveAsteroids;
 
         _world.Query(in _boidQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm) =>
         {
@@ -199,7 +201,7 @@ public sealed class BoidSystem
         }
 
         // =========================================================================
-        // 2. CORE MEMINDAI SEL SPATIAL GRID DI RADIUS SEKITAR MARKAS (12 SEKTOR PIZZA)
+        // 2. CORE MEMINDAI SEL SPATIAL GRID DI RADIUS SEKITAR MARKAS
         // =========================================================================
         int centerCx = GridWidth / 2;
         int centerCy = GridHeight / 2;
@@ -241,7 +243,7 @@ public sealed class BoidSystem
         // =========================================================================
         // 3. ALOKASI SUDUT ORBIT DINAMIS OLEH CORE
         // =========================================================================
-        if (_activeDefenderCount > 0 && _sectorRebalanceTimer >= 0.02f)
+        if (_activeDefenderCount > 0 && _sectorRebalanceTimer >= 0.04f)
         {
             _sectorRebalanceTimer = 0.0f;
             ComputeSectorTargetQuotas(_activeDefenderCount, totalScannedEnemies);
@@ -286,13 +288,12 @@ public sealed class BoidSystem
         // =========================================================================
         // 4. PROSES GERAK UNIT BERDASARKAN STATE MACHINE & KOLISI VOXEL 13 PX
         // =========================================================================
+        int nearbyCount = _nearbyAsteroidCount;
+
         _world.Query(in _boidQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
             if (swarm.State == SwarmState.Dead) return;
 
-            // -----------------------------------------------------------------
-            // LOGIKA SWARM / AMUNISI MUSUH (OwnerId > 0)
-            // -----------------------------------------------------------------
             if (swarm.OwnerId > 0)
             {
                 swarm.LifeTime += dt;
@@ -326,13 +327,9 @@ public sealed class BoidSystem
 
                 pos.Value += vel.Value * dt;
 
-                // Kolisi Circle-to-Grid terhadap sel 13 px Asteroid (bebas lewat jika sel Empty)
-                for (int a = 0; a < activeAsteroids.Count; a++)
+                for (int a = 0; a < nearbyCount; a++)
                 {
-                    var ast = activeAsteroids[a];
-                    if (!GodotObject.IsInstanceValid(ast)) continue;
-
-                    if (ast.ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, impulseWeight: 0.0f))
+                    if (_nearbyAsteroids[a].ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, impulseWeight: 0.0f))
                     {
                         break;
                     }
@@ -348,12 +345,25 @@ public sealed class BoidSystem
 
             switch (swarm.State)
             {
-                // ==========================================
-                // 1. STATE ORBITING
-                // ==========================================
                 case SwarmState.Orbiting:
                     orbitCount++;
-                    vis.Color = vis.BaseColor;
+
+                    // Transisi mekar ukuran dan peredaman flash saat unit baru saja diluncurkan dari palka Core
+                    if (vis.Color != vis.BaseColor)
+                    {
+                        vis.Color = vis.Color.Lerp(vis.BaseColor, dt * 5.0f);
+                    }
+                    float targetRoleScale = swarm.Role switch
+                    {
+                        SwarmRole.Guardian => 0.72f,
+                        SwarmRole.ScannerDrone => 0.60f,
+                        SwarmRole.MiningDroid => 0.62f,
+                        _ => 0.55f
+                    };
+                    if (vis.Scale < targetRoleScale)
+                    {
+                        vis.Scale = Mathf.Lerp(vis.Scale, targetRoleScale, dt * 6.5f);
+                    }
 
                     if (swarm.Role == SwarmRole.Guardian)
                     {
@@ -439,7 +449,6 @@ public sealed class BoidSystem
                             vel.Value = vel.Value.Normalized() * MaxOrbitSpeed;
                         }
 
-                        // Mining Droid (Tapal Kuda U): Selalu menghadap ke arah kursor dengan bukaan U ke kursor
                         if (swarm.Role == SwarmRole.MiningDroid)
                         {
                             Vector2 toCursor = cursorThreatPos - pos.Value;
@@ -452,16 +461,10 @@ public sealed class BoidSystem
                     }
                     break;
 
-                // ==========================================
-                // 2. STATE CHARGING DRILL (Dikelola SwarmSimulation)
-                // ==========================================
                 case SwarmState.ChargingDrill:
                     orbitCount++;
                     break;
 
-                // ==========================================
-                // 3. STATE LAUNCHED (Swarm sebagai Peluru)
-                // ==========================================
                 case SwarmState.Launched:
                     launchCount++;
                     swarm.LifeTime += dt;
@@ -495,16 +498,10 @@ public sealed class BoidSystem
                     }
                     break;
 
-                // ==========================================
-                // 4. STATE DRILL EXHAUST
-                // ==========================================
                 case SwarmState.DrillExhaust:
                     launchCount++;
                     return;
 
-                // ==========================================
-                // 5. STATE RETURNING (Terbang Pulang ke Core)
-                // ==========================================
                 case SwarmState.Returning:
                     returnCount++;
                     vis.Color = ReturnGlowColor;
@@ -532,26 +529,83 @@ public sealed class BoidSystem
                     break;
             }
 
+            // =========================================================================
+            // PROTOKOL KEMBALI OTOMATIS SWARM NYANGKUT (QUANTUM PHASE RECALL)
+            // =========================================================================
+            bool isPhaseRecalling = false;
+            if (swarm.OwnerId == 0 && swarm.State != SwarmState.Dead && swarm.State != SwarmState.Launched && swarm.State != SwarmState.ChargingDrill && swarm.State != SwarmState.DrillExhaust)
+            {
+                Vector2 diffCore = anchorPos - pos.Value;
+                float distCore = diffCore.Length();
+                float maxAllowedDist = (swarm.Role == SwarmRole.Guardian) ? (ShieldRadius + 160.0f) : (swarm.OrbitDistance + 220.0f);
+
+                // Jika drone tertinggal jauh di belakang asteroid atau terjebak (> 520 px dari Core)
+                if (distCore > maxAllowedDist)
+                {
+                    swarm.State = SwarmState.Returning;
+                    Vector2 recallDir = diffCore / MathF.Max(0.001f, distCore);
+                    
+                    // Kecepatan meluncur tinggi fase nano-energi langsung kembali ke Core
+                    vel.Value = vel.Value.Lerp(recallDir * 1280.0f, dt * 7.5f);
+                    vis.Color = new Color(2.8f, 3.6f, 4.5f, 0.96f); // Cahaya Neon Phase Return
+                    isPhaseRecalling = true;
+                }
+            }
+
             pos.Value += vel.Value * dt;
 
-            // =========================================================================
-            // KOLISI FISIKA TEROWONGAN (ZERO-LAG VOXEL COLLISION 13 PX):
-            // - Mengecek sel 13 px di sekitar tepian drone.
-            // - Jika sel Empty (sudah dilubangi/ruang angkasa), drone bergerak bebas masuk terowongan.
-            // - Jika menyentuh sel Rock atau Resource, drone tertahan dan meluncur (slide) di sepanjang dinding batu.
-            // =========================================================================
-            for (int a = 0; a < activeAsteroids.Count; a++)
+            // Jika sedang dalam Phase Recall menembus rintangan untuk kembali ke Core, lewati benturan voxel
+            if (isPhaseRecalling)
             {
-                var ast = activeAsteroids[a];
-                if (!GodotObject.IsInstanceValid(ast)) continue;
+                float curDist = (anchorPos - pos.Value).Length();
+                float resetDist = (swarm.Role == SwarmRole.Guardian) ? (ShieldRadius + 35.0f) : (swarm.OrbitDistance + 35.0f);
+                if (curDist <= resetDist)
+                {
+                    swarm.State = SwarmState.Orbiting;
+                    vis.Color = vis.BaseColor;
+                }
+                return;
+            }
 
+            // Cek kolisi terhadap asteroid terdekat + navigasi meluncur tangensial menghindari dinding
+            for (int a = 0; a < nearbyCount; a++)
+            {
                 float impulseWeight = (swarm.State == SwarmState.Launched) ? 0.08f : 0.0f;
-                if (ast.ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, impulseWeight))
+                if (_nearbyAsteroids[a].ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, out Vector2 hitNormal, impulseWeight))
                 {
                     if (swarm.State == SwarmState.Launched && swarm.Role != SwarmRole.DrillDrone)
                     {
                         swarm.State = SwarmState.Returning;
                         swarm.LifeTime = 0.0f;
+                    }
+                    else if (swarm.OwnerId == 0) // Drone pemain (Orbiting atau Returning)
+                    {
+                        Vector2 toCore = anchorPos - pos.Value;
+                        float distCore = toCore.Length();
+
+                        // Jika arah tarikan menuju Core terhalang oleh dinding batu (toCore berlawanan dengan hitNormal)
+                        if (toCore.Dot(hitNormal) < 0.0f)
+                        {
+                            Vector2 tangentA = new Vector2(-hitNormal.Y, hitNormal.X);
+                            Vector2 tangent = (tangentA.Dot(toCore) >= 0.0f) ? tangentA : -tangentA;
+
+                            // Berikan dorongan meluncur tangensial sepanjang kontur asteroid + pantulan keluar dinding
+                            vel.Value += (tangent * 620.0f + hitNormal * 240.0f) * dt;
+
+                            if (distCore > swarm.OrbitDistance + 50.0f)
+                            {
+                                swarm.State = SwarmState.Returning;
+                            }
+                        }
+
+                        // Anti-terjepit di ceruk sempit: jika kecepatan sangat rendah saat bersentuhan dengan asteroid
+                        if (vel.Value.LengthSquared() < 70.0f * 70.0f)
+                        {
+                            Vector2 unstuckDir = hitNormal.LengthSquared() > 0.01f ? hitNormal : (pos.Value - _nearbyAsteroids[a].CachedPosition).Normalized();
+                            Vector2 slideSide = new Vector2(-unstuckDir.Y, unstuckDir.X);
+                            vel.Value += unstuckDir * 320.0f + slideSide * 280.0f;
+                            swarm.State = SwarmState.Returning;
+                        }
                     }
                     break;
                 }

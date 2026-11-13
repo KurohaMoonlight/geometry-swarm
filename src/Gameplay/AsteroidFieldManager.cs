@@ -31,42 +31,117 @@ public partial class AsteroidFieldManager : Node2D
         var rng = new RandomNumberGenerator();
         rng.Randomize();
 
-        // 1. Sabuk Awal (Radius 950 - 2.200 px dari pusat)
-        // Berada di luar area spawn pemain agar kapal tidak bertubrukan saat mulai
-        int innerCount = 5;
-        for (int i = 0; i < innerCount; i++)
-        {
-            float angle = ((float)i / innerCount * Mathf.Tau) + rng.RandfRange(-0.25f, 0.25f);
-            float dist = rng.RandfRange(1000.0f, 2100.0f);
-            Vector2 spawnPos = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * dist;
+        // Daftar posisi asteroid yang sudah berhasil ditempatkan beserta radius efektifnya
+        var placedAsteroids = new List<(Vector2 Pos, float EffRadius)>();
 
-            float radius = rng.RandfRange(320.0f, 480.0f);
-            SpawnAsteroid(spawnPos, radius, PickRandomType(rng, out bool isEnergy), isEnergy, rng);
+        // Jarak bebas minimum antar tepi asteroid (margin lorong manuver pemain dan swarm)
+        const float InterAsteroidPadding = 260.0f;
+        const float PlayerSafeZoneRadius = 1100.0f;
+        float halfSector = SectorSize.X * 0.5f;
+
+        // Fungsi pembantu untuk memvalidasi posisi tanpa tumpang tindih
+        bool IsLocationClear(Vector2 candPos, float effRadius)
+        {
+            // 1. Cek zona aman pemain di pusat (0,0)
+            if (candPos.Length() < PlayerSafeZoneRadius + effRadius)
+            {
+                return false;
+            }
+
+            // 2. Cek batas dalam sektor (12.000 x 12.000)
+            float maxLimit = halfSector - (effRadius + 140.0f);
+            if (MathF.Abs(candPos.X) > maxLimit || MathF.Abs(candPos.Y) > maxLimit)
+            {
+                return false;
+            }
+
+            // 3. Cek jarak terhadap semua asteroid yang sudah ada sebelumnya (Anti-Overlap!)
+            for (int p = 0; p < placedAsteroids.Count; p++)
+            {
+                float minDist = effRadius + placedAsteroids[p].EffRadius + InterAsteroidPadding;
+                if (candPos.DistanceSquaredTo(placedAsteroids[p].Pos) < minDist * minDist)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
-        // 2. Sabuk Tengah (Radius 2.400 - 4.400 px)
-        int midCount = 16;
-        for (int i = 0; i < midCount; i++)
+        // Definisi 3 Sabuk Kosmik:
+        // Sabuk 1: Inner (5 asteroid, radius 320 - 450 px, jarak 1.200 - 2.200 px)
+        // Sabuk 2: Mid (15 asteroid, radius 440 - 720 px, jarak 2.450 - 4.250 px)
+        // Sabuk 3: Outer (11 asteroid, radius 700 - 1.100 px, jarak 4.450 - 5.500 px)
+        var beltConfigs = new (int Count, float MinDist, float MaxDist, float MinRad, float MaxRad)[]
         {
-            float angle = ((float)i / midCount * Mathf.Tau) + rng.RandfRange(-0.2f, 0.2f);
-            float dist = rng.RandfRange(2400.0f, 4300.0f);
-            Vector2 spawnPos = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * dist;
+            (5, 1250.0f, 2200.0f, 320.0f, 440.0f),
+            (15, 2450.0f, 4250.0f, 440.0f, 700.0f),
+            (11, 4450.0f, 5500.0f, 680.0f, 1050.0f)
+        };
 
-            float radius = rng.RandfRange(460.0f, 780.0f);
-            SpawnAsteroid(spawnPos, radius, PickRandomType(rng, out bool isEnergy), isEnergy, rng);
-        }
-
-        // 3. Sabuk Luar & Deep Space (Radius 4.500 - 5.650 px)
-        // Asteroid Geode Raksasa Kolosal (Monolith)
-        int outerCount = 11;
-        for (int i = 0; i < outerCount; i++)
+        foreach (var belt in beltConfigs)
         {
-            float angle = ((float)i / outerCount * Mathf.Tau) + rng.RandfRange(-0.2f, 0.2f);
-            float dist = rng.RandfRange(4600.0f, 5600.0f);
-            Vector2 spawnPos = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * dist;
+            for (int i = 0; i < belt.Count; i++)
+            {
+                SwarmRole role = PickRandomType(rng, out bool isEnergy);
+                float baseRadius = rng.RandfRange(belt.MinRad, belt.MaxRad);
+                float radius = baseRadius;
+                
+                // Energy Asteroid memiliki ujung bintang yang menjulur hingga ~1.25x
+                float effFactor = isEnergy ? 1.28f : 1.18f;
+                float effRadius = radius * effFactor;
 
-            float radius = rng.RandfRange(750.0f, 1200.0f);
-            SpawnAsteroid(spawnPos, radius, PickRandomType(rng, out bool isEnergy), isEnergy, rng);
+                Vector2 chosenPos = Vector2.Zero;
+                bool foundSpot = false;
+
+                // Coba hingga 80 kali per asteroid untuk menemukan posisi yang 100% bebas tumpang tindih
+                for (int attempt = 0; attempt < 80; attempt++)
+                {
+                    float angleBase = ((float)i / belt.Count * Mathf.Tau) + rng.RandfRange(-0.35f, 0.35f);
+                    float dist = rng.RandfRange(belt.MinDist, belt.MaxDist);
+                    Vector2 candidatePos = new Vector2(MathF.Cos(angleBase), MathF.Sin(angleBase)) * dist;
+
+                    // Jika percobaan sudah lebih dari 40, sedikit perkecil radius agar muat di celah padat
+                    if (attempt > 40)
+                    {
+                        radius = MathF.Max(belt.MinRad * 0.85f, radius * 0.96f);
+                        effRadius = radius * effFactor;
+                    }
+
+                    if (IsLocationClear(candidatePos, effRadius))
+                    {
+                        chosenPos = candidatePos;
+                        foundSpot = true;
+                        break;
+                    }
+                }
+
+                // Fallback jika area sangat padat: acak radius dan jarak di seluruh jangkauan sabuk
+                if (!foundSpot)
+                {
+                    for (int fallback = 0; fallback < 60; fallback++)
+                    {
+                        float randAngle = rng.Randf() * Mathf.Tau;
+                        float randDist = rng.RandfRange(belt.MinDist * 0.9f, belt.MaxDist * 1.05f);
+                        Vector2 candidatePos = new Vector2(MathF.Cos(randAngle), MathF.Sin(randAngle)) * randDist;
+                        radius = belt.MinRad * 0.8f;
+                        effRadius = radius * effFactor;
+
+                        if (IsLocationClear(candidatePos, effRadius))
+                        {
+                            chosenPos = candidatePos;
+                            foundSpot = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (foundSpot)
+                {
+                    placedAsteroids.Add((chosenPos, effRadius));
+                    SpawnAsteroid(chosenPos, radius, role, isEnergy, rng);
+                }
+            }
         }
     }
 

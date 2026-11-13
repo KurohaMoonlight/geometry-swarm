@@ -4,106 +4,106 @@ namespace GeometrySwarm.Core.ECS.Components;
 
 public enum SwarmState : byte
 {
-    Orbiting = 0,
-    Launched = 1,
-    Returning = 2,
-    Mining = 3,
-    ChargingDrill = 4, // Sedang ditarik ke pusaran pembentukan Super Giga Drill
-    DrillExhaust = 5,  // Drone bagian belakang Giga Drill yang terbakar menjadi exhaust roket lalu mati
-    Dead = 6           // Unit yang telah mati/dikorbankan (dapat digunakan kembali oleh pool)
+	Orbiting = 0,
+	Launched = 1,
+	Returning = 2,
+	Mining = 3,
+	ChargingDrill = 4, // Sedang ditarik ke pusaran pembentukan Super Giga Drill
+	DrillExhaust = 5,  // Drone bagian belakang Giga Drill yang terbakar menjadi exhaust roket lalu mati
+	Dead = 6           // Unit yang telah mati/dikorbankan (dapat digunakan kembali oleh pool)
 }
 
 public enum SwarmRole : byte
 {
-    DartNeedle = 0,
-    GigaShuriken = 1,
-    DrillDrone = 2,
-    CrescentBoomerang = 3,
-    MiningDroid = 4,
-    Guardian = 5,
-    ScannerDrone = 6
+	DartNeedle = 0,
+	GigaShuriken = 1,
+	DrillDrone = 2,
+	CrescentBoomerang = 3,
+	MiningDroid = 4,
+	Guardian = 5,
+	ScannerDrone = 6
 }
 
 public struct PositionComponent
 {
-    public Vector2 Value;
+	public Vector2 Value;
 
-    public PositionComponent(Vector2 value) => Value = value;
-    public PositionComponent(float x, float y) => Value = new Vector2(x, y);
+	public PositionComponent(Vector2 value) => Value = value;
+	public PositionComponent(float x, float y) => Value = new Vector2(x, y);
 }
 
 public struct VelocityComponent
 {
-    public Vector2 Value;
+	public Vector2 Value;
 
-    public VelocityComponent(Vector2 value) => Value = value;
-    public VelocityComponent(float x, float y) => Value = new Vector2(x, y);
+	public VelocityComponent(Vector2 value) => Value = value;
+	public VelocityComponent(float x, float y) => Value = new Vector2(x, y);
 }
 
 public struct SwarmUnitComponent
 {
-    public SwarmRole Role;
-    public SwarmState State;
-    public int OwnerId;                 // 0 = Player, 1+ = Enemy Hives / Proyektil Musuh
-    public float OrbitDistance;         // Jarak orbit ideal dari Core (dengan variasi organik per unit)
-    public float OrbitAngle;            // Fase osilasi / sudut orbit organik unit
-    public float OrbitSpeed;            // Kecepatan angular putaran / osilasi
-    public float Energy;                // HP / Durability
-    public float LifeTime;              // Timer durasi terbang / terbakar
-    public float MaxLifeTime;           // Batas waktu sebelum kembali atau mati (exhaust)
-    public Vector2 TargetDirection;     // Vektor arah tembakan peluru / semburan exhaust
-    public float SpinAngle;             // Rotasi visual mandiri
-    public float SpinRate;              // Kecepatan rotasi (misal putaran Shuriken/Bor)
-    public float ShieldTargetAngle;     // Sudut orbit target yang diberikan Core ke Defender
-    public int AssignedSector;          // Sektor pertahanan (0..11) yang dialokasikan Core
-    public float PersonalAngleOffset;   // Offset sudut acak agar barisan tameng organik & tidak kaku
-    public float PersonalRadialOffset;  // Offset radius acak di sekitar ShieldRadius (120px)
-    public int FormationIndex;          // Indeks urutan formasi pada Super Giga Drill (0 = Tip, N-1 = Exhaust)
-    public float ExhaustTriggerTime;    // Waktu (detik) saat drone bagian belakang meledak jadi exhaust roket
+	public SwarmRole Role;
+	public SwarmState State;
+	public int OwnerId;                 // 0 = Player, 1+ = Enemy Hives / Proyektil Musuh
+	public float OrbitDistance;         // Jarak orbit ideal dari Core (dengan variasi organik per unit)
+	public float OrbitAngle;            // Fase osilasi / sudut orbit organik unit
+	public float OrbitSpeed;            // Kecepatan angular putaran / osilasi
+	public float Energy;                // HP / Durability
+	public float LifeTime;              // Timer durasi terbang / terbakar
+	public float MaxLifeTime;           // Batas waktu sebelum kembali atau mati (exhaust)
+	public Vector2 TargetDirection;     // Vektor arah tembakan peluru / semburan exhaust
+	public float SpinAngle;             // Rotasi visual mandiri
+	public float SpinRate;              // Kecepatan rotasi (misal putaran Shuriken/Bor)
+	public float ShieldTargetAngle;     // Sudut orbit target yang diberikan Core ke Defender
+	public int AssignedSector;          // Sektor pertahanan (0..11) yang dialokasikan Core
+	public float PersonalAngleOffset;   // Offset sudut acak agar barisan tameng organik & tidak kaku
+	public float PersonalRadialOffset;  // Offset radius acak di sekitar ShieldRadius (120px)
+	public int FormationIndex;          // Indeks urutan formasi pada Super Giga Drill (0 = Tip, N-1 = Exhaust)
+	public float ExhaustTriggerTime;    // Waktu (detik) saat drone bagian belakang meledak jadi exhaust roket
 
-    public SwarmUnitComponent(SwarmRole role, int ownerId, float orbitDist, float orbitSpd)
-    {
-        Role = role;
-        State = SwarmState.Orbiting;
-        OwnerId = ownerId;
-        OrbitDistance = orbitDist;
-        OrbitAngle = GD.Randf() * Mathf.Tau;
-        OrbitSpeed = orbitSpd;
-        Energy = 100.0f;
-        LifeTime = 0.0f;
-        MaxLifeTime = 1.3f;
-        TargetDirection = Vector2.Right;
-        SpinAngle = GD.Randf() * Mathf.Tau;
+	public SwarmUnitComponent(SwarmRole role, int ownerId, float orbitDist, float orbitSpd)
+	{
+		Role = role;
+		State = SwarmState.Orbiting;
+		OwnerId = ownerId;
+		OrbitDistance = orbitDist;
+		OrbitAngle = GD.Randf() * Mathf.Tau;
+		OrbitSpeed = orbitSpd;
+		Energy = 100.0f;
+		LifeTime = 0.0f;
+		MaxLifeTime = 1.3f;
+		TargetDirection = Vector2.Right;
+		SpinAngle = GD.Randf() * Mathf.Tau;
 
-        int initialSector = (int)(GD.Randf() * 12.0f) % 12;
-        AssignedSector = initialSector;
-        PersonalAngleOffset = (GD.Randf() - 0.5f) * (Mathf.Tau / 12.0f) * 0.85f;
-        PersonalRadialOffset = (GD.Randf() - 0.5f) * 22.0f;
-        ShieldTargetAngle = (initialSector + 0.5f) * (Mathf.Tau / 12.0f) - Mathf.Pi + PersonalAngleOffset;
-        FormationIndex = 0;
-        ExhaustTriggerTime = -1.0f;
+		int initialSector = (int)(GD.Randf() * 12.0f) % 12;
+		AssignedSector = initialSector;
+		PersonalAngleOffset = (GD.Randf() - 0.5f) * (Mathf.Tau / 12.0f) * 0.85f;
+		PersonalRadialOffset = (GD.Randf() - 0.5f) * 22.0f;
+		ShieldTargetAngle = (initialSector + 0.5f) * (Mathf.Tau / 12.0f) - Mathf.Pi + PersonalAngleOffset;
+		FormationIndex = 0;
+		ExhaustTriggerTime = -1.0f;
 
-        // Spin rate bervariasi sesuai tipe peran
-        SpinRate = role switch
-        {
-            SwarmRole.GigaShuriken => 24.0f,
-            SwarmRole.DrillDrone => 32.0f,
-            SwarmRole.CrescentBoomerang => 12.0f,
-            _ => 0.0f
-        };
-    }
+		// Spin rate bervariasi sesuai tipe peran
+		SpinRate = role switch
+		{
+			SwarmRole.GigaShuriken => 24.0f,
+			SwarmRole.DrillDrone => 32.0f,
+			SwarmRole.CrescentBoomerang => 12.0f,
+			_ => 0.0f
+		};
+	}
 }
 
 public struct VisualComponent
 {
-    public Color Color;
-    public float Scale;
-    public Color BaseColor; // Warna default berdasarkan peran
+	public Color Color;
+	public float Scale;
+	public Color BaseColor; // Warna default berdasarkan peran
 
-    public VisualComponent(Color color, float scale = 1.0f)
-    {
-        Color = color;
-        BaseColor = color;
-        Scale = scale;
-    }
+	public VisualComponent(Color color, float scale = 1.0f)
+	{
+		Color = color;
+		BaseColor = color;
+		Scale = scale;
+	}
 }
