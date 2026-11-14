@@ -64,13 +64,13 @@ theme_override_constants/separation = 4
 layout_mode = 2
 theme_override_colors/font_color = Color(3.0, 1.8, 0.6, 1)
 theme_override_font_sizes/font_size = 18
-text = "GEOMETRY SWARM // COLOSSAL ASTEROIDS & PLASMA BOOST (DEBUG RESOURCE: ∞)"
+text = "GEOMETRY SWARM // COLOSSAL ASTEROIDS & COSMIC RIFTS (DEBUG RESOURCE: ∞)"
 
 [node name="Guide" type="Label" parent="HUD/Margin/VBox"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.85, 0.75, 1.0, 0.9)
 theme_override_font_sizes/font_size = 13
-text = "WASD: Gerak  |  SPACE: Plasma Boost  |  LMB: Laser/Tembak  |  RMB: Giga Drill  |  T: Duel Auto-Fire  |  TAB: Pabrik"
+text = "WASD: Gerak  |  SPACE: Plasma Boost  |  LMB: Laser/Tembak  |  RMB: Giga Drill  |  TAB: Pabrik"
 
 [node name="RightMargin" type="MarginContainer" parent="HUD"]
 anchors_preset = 1

@@ -57,7 +57,7 @@ public partial class SwarmSimulation : Node2D
     // ENEMY CORE, MUSUH MENEMBAK & CLASH ANIMATION
     // =========================================================================
     private EnemyCore? _enemyCore;
-    public bool IsEnemyFiring { get; set; } = true;
+    public bool IsEnemyFiring { get; set; } = false;
     private float _duelFireTimer = 0.0f;
     private const float EnemyFireInterval = 0.20f;
     private readonly List<ClashSparkParticle> _clashSparks = new();
@@ -72,7 +72,14 @@ public partial class SwarmSimulation : Node2D
         public float Size;
         public bool IsCrystalMatter;
         public ResourceType MatterType;
+        public float Rotation;
+        public float RotSpeed;
+        public bool IsQuantumGlass;
+        public bool IsPlasmaPuff;
     }
+
+    private readonly Vector2[] _debrisPrismVerts4 = new Vector2[4];
+    private readonly Vector2[] _debrisPrismVerts5 = new Vector2[5];
 
     private sealed class FactoryRecipe
     {
@@ -110,7 +117,9 @@ public partial class SwarmSimulation : Node2D
     }
 
     [Export] public int InitialSwarmCount { get; set; } = 15;
-    [Export] public bool InfiniteDebugResources { get; set; } = true;
+    [Export] public bool InfiniteDebugResources { get; set; } = false;
+
+    public static SwarmSimulation? Instance { get; private set; }
 
     private World _world = null!;
     private BoidSystem _boidSystem = null!;
@@ -230,11 +239,38 @@ public partial class SwarmSimulation : Node2D
     private readonly List<Vector2> _activeMinerPositions = new();
     private readonly List<MiningDebrisParticle> _miningDebris = new();
 
+    private struct AsteroidShockwaveRing
+    {
+        public Vector2 Center;
+        public float Radius;
+        public float MaxRadius;
+        public float Life;
+        public float MaxLife;
+        public Color Color1;
+        public Color Color2;
+        public bool IsEnergy;
+    }
+    private readonly List<AsteroidShockwaveRing> _asteroidShockwaves = new();
+
+    // Efek Plasma Siphoning (Aliran plasma mengalir mundur dari Bintang Mini ke kapal saat ditambang)
+    private struct PlasmaSiphonWisp
+    {
+        public float Progress;
+        public float Speed;
+        public float Radius;
+        public float Angle;
+        public float AngleSpeed;
+        public Color Color;
+        public float Size;
+    }
+    private readonly List<PlasmaSiphonWisp> _plasmaSiphonWisps = new();
+    private bool _isMiningEnergyAsteroid = false;
+
     // =========================================================================
     // INVENTORI 5 RESOURCE, GUI PABRIK, & TACTICAL SWARM DOCK (TENGAH BAWAH)
     // =========================================================================
     private const int InfiniteStockValue = 999999;
-    private readonly int[] _resourceStock = new int[5] { InfiniteStockValue, InfiniteStockValue, InfiniteStockValue, InfiniteStockValue, InfiniteStockValue };
+    private readonly int[] _resourceStock = new int[5] { 35, 15, 10, 0, 0 };
     private readonly Label[] _resourceLabels = new Label[5];
     private Label? _laserTierInfoLabel;
     private PanelContainer? _foundryMainPanel;
@@ -275,6 +311,18 @@ public partial class SwarmSimulation : Node2D
     private float _drillEnemyGrindTimer = 0.0f;
     private float _drillAttritionTimer = 0.0f;
 
+    // Parameter Core-Ramming Sequence (Stall -> 0.5s Spin -> Spectacular Supernova) & Asteroid Grinding
+    private bool _isRammingEnemyCore = false;
+    private float _coreRamStallTimer = 0.0f;
+    private float _coreRamSpinTimer = 0.0f;
+    private int _coreRamInitialDrillerCount = 0;
+    private float _coreRamAttritionAccumulator = 0.0f;
+    private bool _isGrindingAsteroid = false;
+    private Vector2 _gigaDrillSafeOutsidePos = Vector2.Zero;
+    private readonly List<(Vector2 worldCenter, VoxelType type)> _destroyedVoxelsBuffer = new();
+
+    public bool IsRammingEnemyCore => _isRammingEnemyCore;
+
     public float PlayerHealth => _playerCore?.Health ?? 0.0f;
     public float PlayerMaxHealth => _playerCore?.MaxHealth ?? 1.0f;
     public bool IsPlayerEscapePod => _playerCore?.IsEscapePod ?? false;
@@ -288,6 +336,7 @@ public partial class SwarmSimulation : Node2D
 
     public override void _Ready()
     {
+        Instance = this;
         _world = World.Create();
         _boidSystem = new BoidSystem(_world);
         _allSwarmQuery = new QueryDescription().WithAll<PositionComponent, VelocityComponent, SwarmUnitComponent, VisualComponent>();
@@ -300,18 +349,18 @@ public partial class SwarmSimulation : Node2D
         }
         _renderer = GetNode<SwarmMultiMeshRenderer>("SwarmRenderer");
 
+        if (InfiniteDebugResources)
+        {
+            for (int r = 0; r < 5; r++) _resourceStock[r] = InfiniteStockValue;
+        }
+
         InitializeRecipes();
         InitializeTacticalSlots();
         CallDeferred(MethodName.BuildInteractiveFoundryGui);
         SpawnStartingSwarm();
 
-        // Inisialisasi Kapal Induk Musuh (Enemy Hive Core) berhadapan dengan Player Core
-        _enemyCore = new EnemyCore();
-        _enemyCore.Position = new Vector2(1150.0f, 0.0f);
-        _enemyCore.EnemyEscapePodEjected += OnEnemyEscapePodEjected;
-        _enemyCore.EnemyCoreDestroyed += OnEnemyCoreDestroyed;
-        AddChild(_enemyCore);
-        SpawnInitialEnemySwarm(60);
+        // Mode Eksplorasi Kosmik Murni: EnemyCore debug dinonaktifkan
+        _enemyCore = null;
     }
 
     public void SpawnStartingSwarm()
@@ -1509,8 +1558,30 @@ public partial class SwarmSimulation : Node2D
         if (_enemyCore == null) return;
         Vector2 enemyCorePos = _enemyCore.GlobalPosition;
         Color enemyColor = new Color(3.4f, 0.35f, 0.9f, 1.0f);
+        int remaining = count;
 
-        for (int i = 0; i < count; i++)
+        // Daur ulang entitas Dead terlebih dahulu agar memori ECS tidak bocor
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        {
+            if (remaining <= 0 || swarm.State != SwarmState.Dead) return;
+
+            float orbitDist = 55.0f + GD.Randf() * 75.0f;
+            float orbitSpd = (GD.Randf() > 0.5f ? 1.0f : -1.0f) * (1.2f + GD.Randf() * 1.8f);
+            float angle = GD.Randf() * Mathf.Tau;
+            Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * orbitDist;
+
+            pos.Value = enemyCorePos + offset;
+            vel.Value = Vector2.Zero;
+            swarm = new SwarmUnitComponent(SwarmRole.DartNeedle, ownerId: 1, orbitDist, orbitSpd)
+            {
+                State = SwarmState.Orbiting,
+                MaxLifeTime = 3.5f
+            };
+            vis = new VisualComponent(enemyColor, 0.70f);
+            remaining--;
+        });
+
+        for (int i = 0; i < remaining; i++)
         {
             float orbitDist = 55.0f + GD.Randf() * 75.0f;
             float orbitSpd = (GD.Randf() > 0.5f ? 1.0f : -1.0f) * (1.2f + GD.Randf() * 1.8f);
@@ -1546,6 +1617,8 @@ public partial class SwarmSimulation : Node2D
             Vector2 dir = toTarget.Normalized().Rotated(spread);
 
             swarm.State = SwarmState.Launched;
+            swarm.FormationIndex = -1;
+            swarm.ExhaustTriggerTime = -1.0f;
             swarm.MaxHealth = 1;
             swarm.Health = 1;
             swarm.TargetDirection = dir;
@@ -1555,11 +1628,6 @@ public partial class SwarmSimulation : Node2D
             vel.Value = dir * (_boidSystem.BulletMaxSpeed * (0.85f + GD.Randf() * 0.15f));
             fired++;
         });
-
-        if (DartNeedleCount < 25)
-        {
-            AddSpecificSwarm(SwarmRole.DartNeedle, 6);
-        }
     }
 
     public void FireEnemyDuelStream(Vector2 targetPos, int count = 1)
@@ -1761,7 +1829,26 @@ public partial class SwarmSimulation : Node2D
                 ? _enemyCore.GlobalPosition
                 : corePos + new Vector2(1150.0f, 0.0f);
 
-            _boidSystem.Update(dt, corePos, coreVel, enemyCorePos, mousePos, _isBoostActive);
+            float playerCoreRadius = _playerCore?.CoreCollisionRadius ?? 26.0f;
+            float enemyCoreRadius = (_enemyCore != null && IsInstanceValid(_enemyCore))
+                ? _enemyCore.CoreCollisionRadius
+                : 42.0f;
+            Vector2 enemyCoreVel = (_enemyCore != null && IsInstanceValid(_enemyCore))
+                ? _enemyCore.Velocity
+                : Vector2.Zero;
+
+            _boidSystem.Update(
+                dt,
+                corePos,
+                coreVel,
+                enemyCorePos,
+                mousePos,
+                _isBoostActive,
+                _isGigaDrillActive,
+                playerCoreRadius,
+                enemyCoreRadius,
+                enemyCoreVel
+            );
 
             // Eksekusi animasi benturan (Clash FX) & spawn kepingan scrap
             for (int i = 0; i < _boidSystem.ClashEvents.Count; i++)
@@ -1788,13 +1875,50 @@ public partial class SwarmSimulation : Node2D
 
             UpdateClashSparks(dt);
 
+            // Sinkronisasi jumlah swarm hidup milik pemain secara real-time dalam 1 pass render (100% bebas desync!)
+            int liveDart = 0, liveShuriken = 0, liveBoomerang = 0, liveDrill = 0, liveGuardian = 0, liveScanner = 0, liveMining = 0;
             _renderer.ResetCounters();
             _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
             {
                 if (swarm.State == SwarmState.Dead) return;
                 _renderer.SetInstance((int)swarm.Role, pos.Value, vel.Value, swarm.SpinAngle, vis.Color, vis.Scale);
+
+                if (swarm.OwnerId == 0)
+                {
+                    switch (swarm.Role)
+                    {
+                        case SwarmRole.DartNeedle: liveDart++; break;
+                        case SwarmRole.GigaShuriken: liveShuriken++; break;
+                        case SwarmRole.CrescentBoomerang: liveBoomerang++; break;
+                        case SwarmRole.DrillDrone: liveDrill++; break;
+                        case SwarmRole.Guardian: liveGuardian++; break;
+                        case SwarmRole.ScannerDrone: liveScanner++; break;
+                        case SwarmRole.MiningDroid: liveMining++; break;
+                    }
+                }
             });
             _renderer.FlushVisibleCounts();
+
+            int liveTotal = liveDart + liveShuriken + liveBoomerang + liveDrill + liveGuardian + liveScanner + liveMining;
+            if (liveTotal != _entityCount
+                || liveDart != DartNeedleCount
+                || liveShuriken != GigaShurikenCount
+                || liveBoomerang != CrescentBoomerangCount
+                || liveDrill != DrillDroneCount
+                || liveGuardian != GuardianCount
+                || liveScanner != ScannerCount
+                || liveMining != MiningCount)
+            {
+                _entityCount = liveTotal;
+                DartNeedleCount = liveDart;
+                GigaShurikenCount = liveShuriken;
+                CrescentBoomerangCount = liveBoomerang;
+                DrillDroneCount = liveDrill;
+                GuardianCount = liveGuardian;
+                ScannerCount = liveScanner;
+                MiningCount = liveMining;
+                RefreshFoundryGui();
+            }
         }
         catch (Exception ex)
         {
@@ -1806,6 +1930,8 @@ public partial class SwarmSimulation : Node2D
     {
         _laserPrimingTimer = 0.0f;
         _laserFocusWarmup = MathF.Max(0.0f, _laserFocusWarmup - dt * 8.0f);
+        _isMiningEnergyAsteroid = false;
+        _plasmaSiphonWisps.Clear();
         if (_isMiningLaserActive)
         {
             _isMiningLaserActive = false;
@@ -2441,6 +2567,7 @@ public partial class SwarmSimulation : Node2D
             DeactivateDartBoost();
         }
 
+        // Murni menggunakan DrillDrone hasil rakitan Pabrik (Hive Foundry), tanpa konversi otomatis dari DartNeedle!
         int readyLanceCount = 0;
         _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
         {
@@ -2450,7 +2577,7 @@ public partial class SwarmSimulation : Node2D
             }
         });
 
-        if (readyLanceCount < 6)
+        if (readyLanceCount < 1)
         {
             _isChargingDrill = false;
             return;
@@ -2459,27 +2586,6 @@ public partial class SwarmSimulation : Node2D
         _isChargingDrill = true;
         _drillChargeTimer = 0.0f;
         _overchargeExhaustTimer = 0.0f;
-
-        if (DrillDroneCount < 28)
-        {
-            int needed = 36 - DrillDroneCount;
-            _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
-            {
-                if (needed <= 0) return;
-                if (swarm.OwnerId == 0 && swarm.State == SwarmState.Orbiting && swarm.Role == SwarmRole.DartNeedle)
-                {
-                    swarm.Role = SwarmRole.DrillDrone;
-                    swarm.SpinRate = 32.0f;
-                    vis.BaseColor = DrillColor;
-                    vis.Color = DrillColor;
-                    vis.Scale = 0.95f;
-                    DrillDroneCount++;
-                    DartNeedleCount = Math.Max(0, DartNeedleCount - 1);
-                    needed--;
-                }
-            });
-            RefreshFoundryGui();
-        }
 
         Vector2 frontAnchor = corePos + aimDir * 56.0f;
         List<(float distSq, int tempId)> sortList = new();
@@ -2567,7 +2673,13 @@ public partial class SwarmSimulation : Node2D
             int totalUnits = Math.Max(1, _activeDrillFormationCount);
             ComputeGigaDrillDimensions(totalUnits, out float drillLength, out float drillBaseRadius, out float densityFactor);
 
-            Vector2 tipPos = corePos + aimDir * (52.0f + chargeProgress * 38.0f);
+            float desiredTipDist = 52.0f + chargeProgress * 38.0f;
+            if (TryRaycastClosestAsteroidVoxel(corePos, aimDir, desiredTipDist + 10.0f, out _, out VoxelRayHit chargeHit))
+            {
+                // Jangan biarkan ujung bor menembus melewati kulit pinggir asteroid saat sedang charge di dekat batu!
+                desiredTipDist = MathF.Min(desiredTipDist, MathF.Max(16.0f, chargeHit.Distance));
+            }
+            Vector2 tipPos = corePos + aimDir * desiredTipDist;
             Vector2 basePos = tipPos - aimDir * drillLength;
 
             GigaDrillTipPosition = tipPos;
@@ -2848,7 +2960,22 @@ public partial class SwarmSimulation : Node2D
     private void LaunchSuperGigaDrill(Vector2 corePos, Vector2 aimDir, Vector2 targetPos, float chargeProgress)
     {
         _isGigaDrillActive = true;
-        _gigaDrillTipPos = corePos + aimDir * (52.0f + chargeProgress * 38.0f);
+        _isRammingEnemyCore = false;
+        _isGrindingAsteroid = false;
+        _coreRamStallTimer = 0.0f;
+        _coreRamSpinTimer = 0.0f;
+        _coreRamAttritionAccumulator = 0.0f;
+        _drillAsteroidGrindTimer = 0.0f;
+        _drillEnemyGrindTimer = 0.0f;
+        _drillAttritionTimer = 0.0f;
+
+        _gigaDrillSafeOutsidePos = corePos;
+        float launchTipDist = 52.0f + chargeProgress * 38.0f;
+        if (TryRaycastClosestAsteroidVoxel(corePos, aimDir, launchTipDist + 10.0f, out _, out VoxelRayHit launchHit))
+        {
+            launchTipDist = MathF.Min(launchTipDist, MathF.Max(16.0f, launchHit.Distance));
+        }
+        _gigaDrillTipPos = corePos + aimDir * launchTipDist;
         _gigaDrillAimDir = aimDir;
         _gigaDrillTargetPos = targetPos;
         _hasDefenderNoseBreached = false;
@@ -2858,7 +2985,7 @@ public partial class SwarmSimulation : Node2D
 
         int totalUnits = Math.Max(1, _activeDrillFormationCount);
         int exhaustStartIdx = _gigaDrillExhaustStartIndex;
-        int exhaustCount = Math.Max(1, totalUnits - exhaustStartIdx);
+        int exhaustStageCount = Math.Max(1, totalUnits - exhaustStartIdx);
 
         ComputeGigaDrillDimensions(totalUnits, out float drillLength, out float drillBaseRadius, out _);
         Vector2 nozzlePos = _gigaDrillTipPos - aimDir * drillLength;
@@ -2872,7 +2999,7 @@ public partial class SwarmSimulation : Node2D
                 swarm.State = SwarmState.Launched;
                 if (swarm.Role == SwarmRole.Guardian)
                 {
-                    swarm.MaxHealth = 5; // Defender di Ballistic Shield punya 5 HP (tidak kebal, bisa hancur jika ditembak 5 kali)
+                    swarm.MaxHealth = 5; // Defender di Ballistic Shield punya 5 HP
                     swarm.Health = 5;
                 }
                 else
@@ -2882,19 +3009,26 @@ public partial class SwarmSimulation : Node2D
                 }
                 swarm.TargetDirection = aimDir;
                 swarm.LifeTime = 0.0f;
-                swarm.MaxLifeTime = GigaDrillFlightDuration + 0.3f;
+                swarm.MaxLifeTime = GigaDrillFlightDuration + 0.5f;
 
                 if (swarm.Role == SwarmRole.DrillDrone)
                 {
-                    // Seluruh driller bertindak sebagai pendorong bertingkat dari belakang ke depan
-                    // Semakin jauh jarak tempuh, semakin banyak driller yang mati terbakar sebagai thruster
-                    int orderFromBack = (totalUnits - 1) - swarm.FormationIndex;
-                    float ratio = (float)(orderFromBack + 1) / totalUnits;
-                    swarm.ExhaustTriggerTime = ratio * (GigaDrillFlightDuration * 0.95f);
-
-                    if (swarm.ExhaustTriggerTime <= 0.04f)
+                    // Hanya driller tahap belakang (exhaust stage) yang terbakar bertahap sebagai thruster selama meluncur.
+                    // Batang utama mata bor tetap utuh untuk menghantam Core atau menggerus Asteroid!
+                    if (swarm.FormationIndex >= exhaustStartIdx && totalUnits > 3)
                     {
-                        IgniteUnitAsExhaust(ref pos, ref vel, ref swarm, ref vis, nozzlePos, aimDir, 1050.0f);
+                        int orderInExhaust = (totalUnits - 1) - swarm.FormationIndex;
+                        float ratio = (float)(orderInExhaust + 1) / exhaustStageCount;
+                        swarm.ExhaustTriggerTime = ratio * (GigaDrillFlightDuration * 0.90f);
+
+                        if (swarm.ExhaustTriggerTime <= 0.04f)
+                        {
+                            IgniteUnitAsExhaust(ref pos, ref vel, ref swarm, ref vis, nozzlePos, aimDir, 1050.0f);
+                        }
+                    }
+                    else
+                    {
+                        swarm.ExhaustTriggerTime = -1.0f;
                     }
                 }
                 else
@@ -2907,6 +3041,7 @@ public partial class SwarmSimulation : Node2D
 
     private void TriggerNoseShieldBreach(float defConeLength)
     {
+        if (_hasDefenderNoseBreached) return;
         _hasDefenderNoseBreached = true;
         Vector2 breachCenter = _gigaDrillTipPos + _gigaDrillAimDir * (defConeLength * 0.5f);
 
@@ -2926,9 +3061,7 @@ public partial class SwarmSimulation : Node2D
         GuardianCount = Math.Max(0, GuardianCount - breachedCount);
         _activeDefenderCoreCount = 0;
 
-        _gigaDrillVel *= 1.35f;
-
-        EmitSignal(SignalName.GigaDrillNoseBreached, breachCenter, _gigaDrillAimDir, breachedCount);
+        EmitSignal(SignalName.GigaDrillNoseBreached, breachCenter, _gigaDrillAimDir, Math.Max(1, breachedCount));
         RefreshFoundryGui();
     }
 
@@ -2936,35 +3069,22 @@ public partial class SwarmSimulation : Node2D
     {
         if (!_isGigaDrillActive) return;
 
-        _gigaDrillFlightTimer -= dt;
-        _gigaDrillElapsedFlight += dt;
-        _gigaDrillSpinTime += dt * 44.0f;
-        _gigaDrillTipPos += _gigaDrillVel * dt;
-
         int totalUnits = Math.Max(1, _activeDrillFormationCount);
         int exhaustStartIdx = Math.Max(1, _gigaDrillExhaustStartIndex);
         ComputeGigaDrillDimensions(totalUnits, out float drillLength, out float drillBaseRadius, out float densityFactor);
 
-        Vector2 tangent = new Vector2(-_gigaDrillAimDir.Y, _gigaDrillAimDir.X);
-        Vector2 basePos = _gigaDrillTipPos - _gigaDrillAimDir * drillLength;
-
-        GigaDrillTipPosition = _gigaDrillTipPos;
-        GigaDrillBasePosition = basePos;
-        GigaDrillDirection = _gigaDrillAimDir;
-        GigaDrillLength = drillLength;
-        GigaDrillRadius = drillBaseRadius;
-        GigaDrillDensityFactor = densityFactor;
-
+        // =====================================================================
+        // 1. CEK JARAK DEKAT ENEMY CORE -> PECAHKAN BALLISTIC SHIELD (DEFENDER)
+        // =====================================================================
         if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
         {
-            float distToTarget = _gigaDrillTipPos.DistanceTo(_gigaDrillTargetPos);
-            Vector2 enemyCorePos = (_enemyCore != null && IsInstanceValid(_enemyCore))
-                ? _enemyCore.GlobalPosition
-                : Vector2.Zero;
-            float distToEnemyCore = enemyCorePos != Vector2.Zero ? _gigaDrillTipPos.DistanceTo(enemyCorePos) : 9999.0f;
-
-            bool nearTarget = (distToTarget <= 130.0f || distToEnemyCore <= 130.0f) && _gigaDrillElapsedFlight >= 0.08f;
-            bool flightProgressBreach = _gigaDrillElapsedFlight >= GigaDrillFlightDuration * 0.75f;
+            float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
+            float distToEnemyCore = (_enemyCore != null && IsInstanceValid(_enemyCore))
+                ? _gigaDrillTipPos.DistanceTo(_enemyCore.GlobalPosition)
+                : 9999.0f;
+            float shieldShatterDist = (_enemyCore != null && IsInstanceValid(_enemyCore))
+                ? (_enemyCore.CoreCollisionRadius + defConeLength + 42.0f)
+                : 130.0f;
 
             int aliveConeDefenders = 0;
             _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
@@ -2975,26 +3095,31 @@ public partial class SwarmSimulation : Node2D
                 }
             });
 
-            // Jika seluruh defender cone mati tertembak musuh di perjalanan:
             if (aliveConeDefenders == 0)
             {
                 _hasDefenderNoseBreached = true;
                 _activeDefenderCoreCount = 0;
             }
-            else if (nearTarget || flightProgressBreach)
+            else if (distToEnemyCore <= shieldShatterDist)
             {
-                float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
+                // Begitu dekat dengan Core, Ballistic Shield Defender pecah & mati semua!
                 TriggerNoseShieldBreach(defConeLength);
             }
         }
 
-        // Tabrakan & Gerusan Kinetik Aktif terhadap Kapal Induk Musuh (Enemy Core)
+        // =====================================================================
+        // 2. MEKANIK TABRAKAN KE ENEMY CORE (CORE-RAMMING SEQUENCE):
+        //    - Menabrak permukaan Core (TIDAK menembus) + Inersia Core berat
+        //    - Berhenti berputar sejenak (Stall)
+        //    - 0.5 detik berputar kencang selama sisa driller menggerus Core
+        //    - Saat hampir habis -> Meledak Spektakuler (Efek Grid + Supernova)
+        // =====================================================================
         if (_enemyCore != null && IsInstanceValid(_enemyCore))
         {
             float distToEnemy = _gigaDrillTipPos.DistanceTo(_enemyCore.GlobalPosition);
-            float contactRadius = _enemyCore.CoreCollisionRadius + drillBaseRadius * 0.65f;
+            float coreContactDist = _enemyCore.CoreCollisionRadius + 8.0f;
 
-            if (distToEnemy <= contactRadius)
+            if (_isRammingEnemyCore || distToEnemy <= coreContactDist)
             {
                 if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
                 {
@@ -3002,41 +3127,143 @@ public partial class SwarmSimulation : Node2D
                     TriggerNoseShieldBreach(defConeLength);
                 }
 
-                // OPSI 1: KINETIC DRAG & HEAVY GRINDING PADA ARMOR ENEMY CORE!
-                float curSpd = _gigaDrillVel.Length();
-                float decelSpd = MathF.Max(80.0f, curSpd - 3200.0f * dt);
-                _gigaDrillVel = _gigaDrillAimDir * decelSpd;
-
-                // Kerusakan gerusan terus menerus pada armor musuh
-                _enemyCore.TakeDamage(2500.0f * dt, _gigaDrillAimDir);
-                _enemyCore.Velocity += _gigaDrillAimDir * (380.0f * dt);
-
-                for (int s = 0; s < 3; s++)
+                if (!_isRammingEnemyCore)
                 {
-                    Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 22.0f, (GD.Randf() - 0.5f) * 22.0f);
-                    TriggerClashAnimation(_gigaDrillTipPos + sparkJitter, dropScrap: false);
+                    _isRammingEnemyCore = true;
+                    _coreRamStallTimer = 0.16f; // Berhenti berputar sejenak saat benturan keras pertama
+                    _coreRamSpinTimer = 0.0f;
+                    _coreRamAttritionAccumulator = 0.0f;
+
+                    int currentAlive = 0;
+                    _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
+                    {
+                        if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched)
+                        {
+                            s.ExhaustTriggerTime = -1.0f; // Hentikan auto-exhaust belakang, fokuskan ke tumbukan Core
+                            currentAlive++;
+                        }
+                    });
+                    _coreRamInitialDrillerCount = Math.Max(1, currentAlive);
+
+                    // Dorongan inersia awal ke EnemyCore (Core sangat berat: bergeser mundur sedikit tanpa terpental jauh)
+                    _enemyCore.Velocity += _gigaDrillAimDir * 115.0f;
+                    EmitSignal(SignalName.SwarmClashImpulse, _gigaDrillTipPos, 1650.0f, 220.0f);
                 }
 
-                _drillEnemyGrindTimer += dt;
-                _drillAttritionTimer += dt;
-                if (_drillAttritionTimer >= 0.10f)
-                {
-                    _drillAttritionTimer = 0.0f;
-                    WearDownFrontDriller();
-                }
+                // Kunci ujung bor menempel di permukaan Core (TIDAK menembus masuk!)
+                // dan bergerak mengikuti pergeseran inersia berat Core
+                _gigaDrillVel = Vector2.Zero;
+                _gigaDrillTipPos = _enemyCore.GlobalPosition - _gigaDrillAimDir * coreContactDist;
+                _gigaDrillFlightTimer = 0.5f;
 
-                // OPSI 2: TERMINAL BUNKER BUSTER DETONATION PADA ENEMY CORE!
-                if (_drillEnemyGrindTimer >= 0.35f || _gigaDrillVel.Length() <= 140.0f || _enemyCore.Health <= 0.0f)
+                if (_coreRamStallTimer > 0.0f)
                 {
-                    TriggerGigaDrillBunkerBuster(null, _enemyCore);
-                    return;
+                    // FASE A: Berhenti berputar sejenak akibat impak keras menahan beban Core
+                    _coreRamStallTimer -= dt;
+                    _enemyCore.Velocity += _gigaDrillAimDir * (135.0f * dt);
+                    bool ejectedNow = _enemyCore.TakeDamage(950.0f * dt, _gigaDrillAimDir);
+                    if (ejectedNow || _enemyCore.Health <= 0.0f)
+                    {
+                        TriggerGigaDrillCoreSupernova(_enemyCore, applyFinalDamage: !ejectedNow);
+                        return;
+                    }
+
+                    for (int s = 0; s < 2; s++)
+                    {
+                        Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 18.0f, (GD.Randf() - 0.5f) * 18.0f);
+                        TriggerClashAnimation(_gigaDrillTipPos + sparkJitter, dropScrap: false);
+                    }
                 }
-            }
-            else
-            {
-                _drillEnemyGrindTimer = MathF.Max(0.0f, _drillEnemyGrindTimer - dt * 2.0f);
+                else
+                {
+                    // FASE B: 0.5 Detik Berputar Kencang Selama Sisa Driller Menggerus Core
+                    _coreRamSpinTimer += dt;
+                    _gigaDrillSpinTime += dt * 56.0f;
+
+                    // Inersia berat terus menekan Core perlahan
+                    _enemyCore.Velocity += _gigaDrillAimDir * (95.0f * dt);
+                    bool ejectedDuringSpin = _enemyCore.TakeDamage(2600.0f * dt, _gigaDrillAimDir);
+                    if (ejectedDuringSpin)
+                    {
+                        TriggerGigaDrillCoreSupernova(_enemyCore, applyFinalDamage: false);
+                        return;
+                    }
+
+                    for (int s = 0; s < 4; s++)
+                    {
+                        Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 24.0f, (GD.Randf() - 0.5f) * 24.0f);
+                        TriggerClashAnimation(_gigaDrillTipPos + sparkJitter, dropScrap: false);
+                    }
+
+                    // Kuras driller selama 0.5 detik hingga hampir habis
+                    float wearRatePerSec = MathF.Max(3.5f, (_coreRamInitialDrillerCount * 0.82f) / 0.50f);
+                    _coreRamAttritionAccumulator += wearRatePerSec * dt;
+                    while (_coreRamAttritionAccumulator >= 1.0f)
+                    {
+                        _coreRamAttritionAccumulator -= 1.0f;
+                        WearDownFrontDriller();
+                    }
+
+                    int remainingDrillers = 0;
+                    _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
+                    {
+                        if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched)
+                        {
+                            remainingDrillers++;
+                        }
+                    });
+
+                    int almostEmptyThreshold = Math.Max(1, (int)MathF.Ceiling(_coreRamInitialDrillerCount * 0.15f));
+
+                    // FASE C: Jika sudah 0.5 detik berputar ATAU driller hampir habis -> MELEDAK SPEKTAKULER!
+                    if (_coreRamSpinTimer >= 0.50f || remainingDrillers <= almostEmptyThreshold || _enemyCore.Health <= 0.0f)
+                    {
+                        TriggerGigaDrillCoreSupernova(_enemyCore);
+                        return;
+                    }
+                }
             }
         }
+
+        // Jika tidak sedang menempel di Core, cek pergerakan maju dengan Swept Raycast terhadap kulit pinggir Asteroid
+        if (!_isRammingEnemyCore)
+        {
+            _gigaDrillFlightTimer -= dt;
+            _gigaDrillElapsedFlight += dt;
+            _gigaDrillSpinTime += dt * (_isGrindingAsteroid ? 52.0f : 44.0f);
+
+            if (!_isGrindingAsteroid)
+            {
+                Vector2 nextTip = _gigaDrillTipPos + _gigaDrillVel * dt;
+                float sweepDist = _gigaDrillSafeOutsidePos.DistanceTo(nextTip) + 8.0f;
+
+                if (TryRaycastClosestAsteroidVoxel(_gigaDrillSafeOutsidePos, _gigaDrillAimDir, sweepDist, out _, out VoxelRayHit edgeHit))
+                {
+                    // Kunci tepat di tile kulit pinggir terluar asteroid! Tidak boleh melompat ke tengah batu!
+                    _gigaDrillTipPos = edgeHit.WorldCellCenter;
+                    _gigaDrillVel = Vector2.Zero;
+                }
+                else
+                {
+                    _gigaDrillTipPos = nextTip;
+                    _gigaDrillSafeOutsidePos = _gigaDrillTipPos - _gigaDrillAimDir * 24.0f;
+                }
+            }
+        }
+
+        totalUnits = Math.Max(1, _activeDrillFormationCount);
+        exhaustStartIdx = Math.Max(1, _gigaDrillExhaustStartIndex);
+        ComputeGigaDrillDimensions(totalUnits, out drillLength, out drillBaseRadius, out densityFactor);
+
+        Vector2 tangent = new Vector2(-_gigaDrillAimDir.Y, _gigaDrillAimDir.X);
+        Vector2 basePos = _gigaDrillTipPos - _gigaDrillAimDir * drillLength;
+
+        GigaDrillTipPosition = _gigaDrillTipPos;
+        GigaDrillBasePosition = basePos;
+        GigaDrillDirection = _gigaDrillAimDir;
+        GigaDrillLength = drillLength;
+        GigaDrillRadius = drillBaseRadius;
+        GigaDrillDensityFactor = densityFactor;
 
         int fluteCount = Math.Clamp(3 + totalUnits / 42, 3, 9);
         int shellCount = totalUnits >= 135 ? 3 : (totalUnits >= 55 ? 2 : 1);
@@ -3077,16 +3304,17 @@ public partial class SwarmSimulation : Node2D
                 return;
             }
 
-            if (swarm.Role != SwarmRole.DrillDrone)
+            if (swarm.Role != SwarmRole.DrillDrone || swarm.FormationIndex < 0)
                 return;
 
-            if (swarm.ExhaustTriggerTime >= 0.0f && _gigaDrillElapsedFlight >= swarm.ExhaustTriggerTime)
+            if (!_isRammingEnemyCore && !_isGrindingAsteroid && swarm.ExhaustTriggerTime >= 0.0f && _gigaDrillElapsedFlight >= swarm.ExhaustTriggerTime)
             {
                 IgniteUnitAsExhaust(ref pos, ref vel, ref swarm, ref vis, basePos, _gigaDrillAimDir, 980.0f);
+                _activeDrillFormationCount = Math.Max(1, _activeDrillFormationCount - 1);
                 return;
             }
 
-            int idx = swarm.FormationIndex;
+            int idx = Math.Clamp(swarm.FormationIndex, 0, Math.Max(0, totalUnits - 1));
             bool isExhaustStage = idx >= exhaustStartIdx;
 
             float d;
@@ -3157,56 +3385,47 @@ public partial class SwarmSimulation : Node2D
         int aliveDrillers = 0;
         _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
         {
-            if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched)
+            if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched && s.FormationIndex >= 0)
             {
                 aliveDrillers++;
             }
         });
 
-        // Jika seluruh driller habis terbakar karena jarak terlalu jauh atau tertembak musuh: Serangan GAGAL!
         if (aliveDrillers == 0)
         {
             _isGigaDrillActive = false;
+            _isRammingEnemyCore = false;
+            _isGrindingAsteroid = false;
             _gigaDrillFlightTimer = 0.0f;
             TriggerClashAnimation(_gigaDrillTipPos, dropScrap: true);
             EmitSignal(SignalName.GigaDrillDetonated, _gigaDrillTipPos, basePos, 0);
             return;
         }
 
-        if (_gigaDrillFlightTimer <= 0.0f)
+        // Jika waktu terbang habis di ruang hampa (MISS: tidak menabrak Core dan tidak menabrak Asteroid)
+        // Sesuai aturan: drone yang MISS dan tidak menabrak apapun kembali ke orbit (Returning)!
+        if (!_isRammingEnemyCore && !_isGrindingAsteroid && _gigaDrillFlightTimer <= 0.0f)
         {
             _isGigaDrillActive = false;
-            int sacrificedCount = Math.Max(1, _activeDrillFormationCount - _gigaDrillExhaustStartIndex);
-            EmitSignal(SignalName.GigaDrillDetonated, _gigaDrillTipPos, basePos, sacrificedCount);
+            EmitSignal(SignalName.GigaDrillDetonated, _gigaDrillTipPos, basePos, 0);
 
             _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
             {
                 if (swarm.State == SwarmState.Launched && swarm.OwnerId == 0)
                 {
-                    if (swarm.Role == SwarmRole.DrillDrone)
+                    if (swarm.Role == SwarmRole.DrillDrone || swarm.Role == SwarmRole.Guardian)
                     {
-                        if (swarm.ExhaustTriggerTime >= 0.0f)
-                        {
-                            IgniteUnitAsExhaust(ref pos, ref vel, ref swarm, ref vis, basePos, _gigaDrillAimDir, 850.0f);
-                        }
-                        else
-                        {
-                            swarm.State = SwarmState.Returning;
-                            swarm.LifeTime = 0.0f;
-                            float scatter = (GD.Randf() - 0.5f) * Mathf.Tau;
-                            vel.Value = new Vector2(MathF.Cos(scatter), MathF.Sin(scatter)) * 420.0f;
-                        }
-                    }
-                    else if (swarm.Role == SwarmRole.Guardian)
-                    {
-                        swarm.State = SwarmState.Dead;
-                        vis.Color = new Color(0, 0, 0, 0);
-                        _entityCount = Math.Max(0, _entityCount - 1);
-                        GuardianCount = Math.Max(0, GuardianCount - 1);
+                        swarm.State = SwarmState.Returning;
+                        swarm.FormationIndex = -1;
+                        swarm.ExhaustTriggerTime = -1.0f;
+                        swarm.LifeTime = 0.0f;
+                        float scatter = (GD.Randf() - 0.5f) * Mathf.Tau;
+                        vel.Value = new Vector2(MathF.Cos(scatter), MathF.Sin(scatter)) * 420.0f;
                     }
                 }
             });
             _activeDefenderCoreCount = 0;
+            _activeDrillFormationCount = 0;
             RefreshFoundryGui();
         }
     }
@@ -3281,71 +3500,155 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
-    private void CheckAsteroidCollisions(float dt)
+    /// <summary>
+    /// Mekanik Tabrakan Super Giga Drill ke Asteroid (dengan Tile HP Masif):
+    /// - Tidak lagi memotong instan lewat CarveVoxelCircle setiap frame.
+    /// - Menggerus terus di permukaan batu (ApplyDrillGrindAtRadius) sambil mengauskan driller satu per satu.
+    /// - Begitu driller habis, meledak kecil dan membuat lubang/kawah lokal di permukaan asteroid.
+    /// </summary>
+    /// <summary>
+    /// Menembakkan raycast dari titik aman di luar asteroid (_gigaDrillSafeOutsidePos) searah aimDir
+    /// untuk menemukan tile padat PALING PINGGIR (kulit luar) yang pertama kali disentuh mata bor.
+    /// </summary>
+    private static bool TryRaycastClosestAsteroidVoxel(
+        Vector2 rayOrigin,
+        Vector2 aimDir,
+        float maxDist,
+        out Asteroid? hitAsteroid,
+        out VoxelRayHit bestHit)
     {
-        if (!_isGigaDrillActive) return;
+        hitAsteroid = null;
+        bestHit = default;
+        float closestDist = maxDist;
 
-        bool isGrindingAsteroid = false;
         var asteroids = Asteroid.ActiveAsteroids;
         for (int i = 0; i < asteroids.Count; i++)
         {
             var ast = asteroids[i];
             if (ast == null || !ast.IsActiveInTree) continue;
 
-            float outerReach = ast.OuterBoundRadius + GigaDrillRadius + 18.0f;
-            float distSq = ast.CachedPosition.DistanceSquaredTo(_gigaDrillTipPos);
-            if (distSq > outerReach * outerReach) continue;
-
-            // Gali lingkaran voxel di titik ujung bor
-            int carved = ast.CarveVoxelCircle(_gigaDrillTipPos, GigaDrillRadius * 0.88f);
-            float rockReach = ast.Radius + GigaDrillRadius * 0.5f;
-            bool inRock = distSq <= rockReach * rockReach;
-
-            if (carved > 0 || inRock)
+            if (ast.RaycastVoxel(rayOrigin, aimDir, closestDist, out VoxelRayHit vHit))
             {
-                isGrindingAsteroid = true;
-
-                // OPSI 1: KINETIC DRAG & ACTIVE GRINDING!
-                // Kecepatan bor anjlok drastis akibat friksi batuan keras
-                float curSpeed = _gigaDrillVel.Length();
-                float decelSpeed = MathF.Max(120.0f, curSpeed - 2400.0f * dt);
-                _gigaDrillVel = _gigaDrillAimDir * decelSpeed;
-
-                // Gaya dorong & torsi kinetik ke batuan asteroid
-                ast.ApplyCentralImpulse(_gigaDrillAimDir * (85000.0f * dt));
-                ast.ApplyTorqueImpulse((GD.Randf() > 0.5f ? 1.0f : -1.0f) * 35000.0f * dt);
-
-                // Percikan bunga api penggalian batuan (sparks)
-                for (int s = 0; s < 3; s++)
+                if (vHit.Hit && vHit.Distance < closestDist)
                 {
-                    Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 18.0f, (GD.Randf() - 0.5f) * 18.0f);
-                    TriggerClashAnimation(_gigaDrillTipPos + sparkJitter, dropScrap: false);
+                    closestDist = vHit.Distance;
+                    hitAsteroid = ast;
+                    bestHit = vHit;
                 }
-
-                // Keausan mata bor (Drill Wear / Attrition)
-                _drillAttritionTimer += dt;
-                if (_drillAttritionTimer >= 0.12f)
-                {
-                    _drillAttritionTimer = 0.0f;
-                    WearDownFrontDriller();
-                }
-
-                _drillAsteroidGrindTimer += dt;
-
-                // OPSI 2: TERMINAL BUNKER BUSTER DETONATION!
-                // Meledak jika kecepatan bor turun di bawah 170 px/s, atau grinding > 0.55s, atau waktu terbang habis
-                if (_gigaDrillVel.Length() <= 170.0f || _drillAsteroidGrindTimer >= 0.55f || _gigaDrillFlightTimer <= 0.05f)
-                {
-                    TriggerGigaDrillBunkerBuster(ast, null);
-                    return;
-                }
-
-                break;
             }
         }
 
-        if (!isGrindingAsteroid)
+        return hitAsteroid != null && bestHit.Hit;
+    }
+
+    private void CheckAsteroidCollisions(float dt)
+    {
+        if (!_isGigaDrillActive || _isRammingEnemyCore) return;
+
+        // Cari tile padat paling pinggir di sepanjang jalur mata bor dari titik luar (_gigaDrillSafeOutsidePos)
+        float maxScanDist = _gigaDrillSafeOutsidePos.DistanceTo(_gigaDrillTipPos) + 18.0f;
+        Asteroid? targetAst = null;
+        Vector2 grindCenter = _gigaDrillTipPos;
+
+        if (TryRaycastClosestAsteroidVoxel(_gigaDrillSafeOutsidePos, _gigaDrillAimDir, maxScanDist, out Asteroid? rayAst, out VoxelRayHit rayHit))
         {
+            targetAst = rayAst;
+            grindCenter = rayHit.WorldCellCenter;
+        }
+        else
+        {
+            // Fallback: cek apakah sisi samping mata bor menyentuh tile pinggir asteroid
+            var asteroids = Asteroid.ActiveAsteroids;
+            for (int i = 0; i < asteroids.Count; i++)
+            {
+                var ast = asteroids[i];
+                if (ast == null || !ast.IsActiveInTree) continue;
+                if (ast.HasSolidVoxelsInRadius(_gigaDrillTipPos, GigaDrillRadius * 0.62f, out Vector2 closestVox))
+                {
+                    targetAst = ast;
+                    grindCenter = closestVox;
+                    break;
+                }
+            }
+        }
+
+        if (targetAst != null)
+        {
+            if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
+            {
+                float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
+                TriggerNoseShieldBreach(defConeLength);
+            }
+
+            if (!_isGrindingAsteroid)
+            {
+                _isGrindingAsteroid = true;
+                // Matikan timer exhaust belakang agar seluruh sisa driller dipakai menggerus batu sampai habis
+                _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
+                {
+                    if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched)
+                    {
+                        s.ExhaustTriggerTime = -1.0f;
+                    }
+                });
+            }
+
+            // KUNCI UJUNG BOR TEPAT DI PERMUKAAN TILE PINGGIR!
+            // Bor berhenti (_gigaDrillVel = Zero) dan hanya maju 1 tile ke dalam SETELAH tile pinggir di depannya pecah!
+            _gigaDrillVel = Vector2.Zero;
+            _gigaDrillTipPos = _gigaDrillTipPos.Lerp(grindCenter, MathF.Min(1.0f, 35.0f * dt));
+            _gigaDrillFlightTimer = MathF.Max(_gigaDrillFlightTimer, 0.35f);
+
+            // Gerus tile pinggir di titik kontak melawan NonLaserTileMaxHp (45.0f)
+            // Radius gerusan dibuat terfokus di ujung mata bor agar mengikis dari tepi luar ke dalam secara berurutan
+            float focusedGrindRadius = Mathf.Clamp(GigaDrillRadius * 0.65f, 18.0f, 30.0f);
+            _destroyedVoxelsBuffer.Clear();
+            targetAst.ApplyDrillGrindAtRadius(grindCenter, focusedGrindRadius, 62.0f, dt, _destroyedVoxelsBuffer);
+            for (int v = 0; v < _destroyedVoxelsBuffer.Count; v++)
+            {
+                var broken = _destroyedVoxelsBuffer[v];
+                SpawnVoxelErosionDebris(broken.worldCenter, -_gigaDrillAimDir, broken.type);
+            }
+
+            // Gaya dorong fisik ke asteroid
+            targetAst.ApplyCentralImpulse(_gigaDrillAimDir * (28000.0f * dt));
+            targetAst.ApplyTorqueImpulse((GD.Randf() > 0.5f ? 1.0f : -1.0f) * 12000.0f * dt);
+
+            // Percikan bunga api penggalian batuan tepat di permukaan pinggir
+            for (int s = 0; s < 2; s++)
+            {
+                Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 14.0f, (GD.Randf() - 0.5f) * 14.0f);
+                TriggerClashAnimation(grindCenter + sparkJitter, dropScrap: false);
+            }
+
+            // Auskan driller terus-menerus sampai driller habis
+            _drillAttritionTimer += dt;
+            if (_drillAttritionTimer >= 0.055f)
+            {
+                _drillAttritionTimer = 0.0f;
+                WearDownFrontDriller();
+            }
+
+            int remainingDrillers = 0;
+            _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
+            {
+                if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched && s.FormationIndex >= 0)
+                {
+                    remainingDrillers++;
+                }
+            });
+
+            // Begitu driller habis -> Meledak kecil tepat di mulut coakan pinggir yang sedang digerus!
+            if (remainingDrillers <= 1)
+            {
+                _gigaDrillTipPos = grindCenter;
+                TriggerGigaDrillAsteroidSmallBlast(targetAst);
+                return;
+            }
+        }
+        else
+        {
+            _isGrindingAsteroid = false;
             _drillAsteroidGrindTimer = MathF.Max(0.0f, _drillAsteroidGrindTimer - dt * 2.0f);
         }
     }
@@ -3358,7 +3661,7 @@ public partial class SwarmSimulation : Node2D
 
         _world.Query(in _allSwarmQuery, (Entity ent, ref PositionComponent pos, ref SwarmUnitComponent swarm) =>
         {
-            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DrillDrone && swarm.State == SwarmState.Launched)
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DrillDrone && swarm.State == SwarmState.Launched && swarm.FormationIndex >= 0)
             {
                 if (swarm.FormationIndex < minIdx)
                 {
@@ -3384,90 +3687,142 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
-    private void TriggerGigaDrillBunkerBuster(Asteroid? hitAsteroid, EnemyCore? hitEnemyCore)
+    /// <summary>
+    /// Ledakan kecil akhir ketika seluruh driller habis menggerus permukaan asteroid:
+    /// Menciptakan lubang/kawah lokal pada titik gerusan tanpa membelah tembus asteroid.
+    /// </summary>
+    private void TriggerGigaDrillAsteroidSmallBlast(Asteroid hitAsteroid)
     {
         _isGigaDrillActive = false;
+        _isGrindingAsteroid = false;
+        _isRammingEnemyCore = false;
         _gigaDrillFlightTimer = 0.0f;
         _drillAsteroidGrindTimer = 0.0f;
-        _drillEnemyGrindTimer = 0.0f;
 
         Vector2 detPos = _gigaDrillTipPos;
         Vector2 basePos = GigaDrillBasePosition;
 
         if (hitAsteroid != null && IsInstanceValid(hitAsteroid))
         {
-            hitAsteroid.CarveVoxelCircle(detPos, GigaDrillRadius * 2.3f);
-            hitAsteroid.ApplyCentralImpulse(_gigaDrillAimDir * 240000.0f);
-            hitAsteroid.ApplyTorqueImpulse((GD.Randf() > 0.5f ? 1.0f : -1.0f) * 60000.0f);
+            float holeRadius = Mathf.Clamp(GigaDrillRadius * 0.85f, 22.0f, 36.0f);
+            _destroyedVoxelsBuffer.Clear();
+            hitAsteroid.CarveVoxelCircle(detPos, holeRadius, _destroyedVoxelsBuffer);
+            for (int v = 0; v < _destroyedVoxelsBuffer.Count; v++)
+            {
+                var broken = _destroyedVoxelsBuffer[v];
+                SpawnVoxelErosionDebris(broken.worldCenter, -_gigaDrillAimDir, broken.type);
+            }
+            hitAsteroid.ApplyCentralImpulse(_gigaDrillAimDir * 42000.0f);
         }
 
-        if (hitEnemyCore != null && IsInstanceValid(hitEnemyCore))
+        // Habiskan sisa driller terakhir yang meledak di dalam kawah batu
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
-            hitEnemyCore.TakeDamage(1800.0f, _gigaDrillAimDir);
-            hitEnemyCore.Velocity += _gigaDrillAimDir * 780.0f;
-        }
+            if (swarm.OwnerId == 0 && swarm.State == SwarmState.Launched && (swarm.Role == SwarmRole.DrillDrone || swarm.Role == SwarmRole.Guardian))
+            {
+                swarm.State = SwarmState.Dead;
+                vis.Color = new Color(0, 0, 0, 0);
+            }
+        });
 
-        // Ledakan katastropik: 14 ledakan percikan dan scrap di sekitar titik detonasi
-        for (int i = 0; i < 14; i++)
+        for (int i = 0; i < 6; i++)
         {
-            float r = GD.Randf() * GigaDrillRadius * 1.5f;
+            float r = GD.Randf() * 24.0f;
             float a = GD.Randf() * Mathf.Tau;
             Vector2 p = detPos + new Vector2(MathF.Cos(a), MathF.Sin(a)) * r;
             TriggerClashAnimation(p, dropScrap: (i % 2 == 0));
         }
 
-        // Konsumsi unit hulu ledak (maksimal 35% formasi meledak jadi serpihan)
-        // Unit driller belakang yang selamat terlempar keluar dan kembali ke orbit (Returning)
-        int totalUnits = _activeDrillFormationCount;
-        int warheadSacrifice = Math.Max(1, (int)(totalUnits * 0.35f));
-        int sacrificedCount = 0;
+        _activeDefenderCoreCount = 0;
+        _activeDrillFormationCount = 0;
 
-        _world.Query(in _allSwarmQuery, (Entity ent, ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        // Nilai negatif (-1) menandakan ledakan kecil pembuat lubang asteroid ke Arena & GigaDrillVFX
+        EmitSignal(SignalName.GigaDrillDetonated, detPos, basePos, -1);
+        RefreshFoundryGui();
+    }
+
+    /// <summary>
+    /// Ledakan Spektakuler Supernova (Grid Rupture + Multi-Ring Blast) saat Giga Drill selesai berputar 0.5 detik
+    /// dan driller hampir habis di permukaan Enemy Core!
+    /// </summary>
+    private void TriggerGigaDrillCoreSupernova(EnemyCore hitEnemyCore, bool applyFinalDamage = true)
+    {
+        _isGigaDrillActive = false;
+        _isRammingEnemyCore = false;
+        _isGrindingAsteroid = false;
+        _gigaDrillFlightTimer = 0.0f;
+        _drillEnemyGrindTimer = 0.0f;
+
+        Vector2 detPos = _gigaDrillTipPos;
+        Vector2 basePos = GigaDrillBasePosition;
+
+        int remainingSacrificed = 0;
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
-            if (swarm.OwnerId == 0 && swarm.State == SwarmState.Launched)
+            if (swarm.OwnerId == 0 && swarm.State == SwarmState.Launched && (swarm.Role == SwarmRole.DrillDrone || swarm.Role == SwarmRole.Guardian))
             {
-                if (swarm.Role == SwarmRole.DrillDrone)
-                {
-                    if (swarm.FormationIndex < warheadSacrifice)
-                    {
-                        swarm.State = SwarmState.Dead;
-                        vis.Color = new Color(0, 0, 0, 0);
-                        _entityCount = Math.Max(0, _entityCount - 1);
-                        IncrementRoleCounter(SwarmRole.DrillDrone, -1);
-                        sacrificedCount++;
-                    }
-                    else
-                    {
-                        swarm.State = SwarmState.Returning;
-                        swarm.LifeTime = 0.0f;
-                        float scatterAngle = _gigaDrillAimDir.Angle() + Mathf.Pi + (GD.Randf() - 0.5f) * 1.8f;
-                        vel.Value = new Vector2(MathF.Cos(scatterAngle), MathF.Sin(scatterAngle)) * (360.0f + GD.Randf() * 200.0f);
-                    }
-                }
-                else if (swarm.Role == SwarmRole.Guardian)
-                {
-                    swarm.State = SwarmState.Dead;
-                    vis.Color = new Color(0, 0, 0, 0);
-                    _entityCount = Math.Max(0, _entityCount - 1);
-                    GuardianCount = Math.Max(0, GuardianCount - 1);
-                }
+                swarm.State = SwarmState.Dead;
+                vis.Color = new Color(0, 0, 0, 0);
+                remainingSacrificed++;
             }
         });
+
+        int totalPowerCount = Math.Max(16, _coreRamInitialDrillerCount + remainingSacrificed);
+
+        if (hitEnemyCore != null && IsInstanceValid(hitEnemyCore))
+        {
+            if (applyFinalDamage)
+            {
+                bool ejectedNow = hitEnemyCore.TakeDamage(1600.0f + _coreRamInitialDrillerCount * 28.0f, _gigaDrillAimDir);
+                // Hanya berikan dorongan inersia berat jika belum berubah menjadi Escape Pod yang sedang lari cepat!
+                if (!ejectedNow && !hitEnemyCore.IsEscapePod)
+                {
+                    hitEnemyCore.Velocity += _gigaDrillAimDir * 135.0f;
+                }
+            }
+        }
+
+        // 26 Semburan bunga api & kepingan scrap menyebar radial di sekitar titik ledakan Core
+        for (int i = 0; i < 26; i++)
+        {
+            float r = GD.Randf() * (GigaDrillRadius * 2.2f);
+            float a = GD.Randf() * Mathf.Tau;
+            Vector2 p = detPos + new Vector2(MathF.Cos(a), MathF.Sin(a)) * r;
+            TriggerClashAnimation(p, dropScrap: (i % 3 == 0));
+        }
 
         _activeDefenderCoreCount = 0;
         _activeDrillFormationCount = 0;
 
-        EmitSignal(SignalName.GigaDrillDetonated, detPos, basePos, sacrificedCount);
+        EmitSignal(SignalName.GigaDrillDetonated, detPos, basePos, totalPowerCount);
         RefreshFoundryGui();
     }
 
     private void OnPlayerEscapePodEjected(Vector2 ejectionPos, Vector2 ejectionVel)
     {
-        for (int i = 0; i < 16; i++)
+        if (_isBoostActive) DeactivateDartBoost();
+        if (_isBrakeActive) DeactivateDartBrake();
+
+        // Hancurkan sisa swarm lama saat sarang lebah hancur sehingga menyisakan 1 Core + 1 Miner otomatis
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
-            Vector2 p = ejectionPos + new Vector2((GD.Randf() - 0.5f) * 48.0f, (GD.Randf() - 0.5f) * 48.0f);
+            if (swarm.OwnerId == 0 && swarm.State != SwarmState.Dead)
+            {
+                swarm.State = SwarmState.Dead;
+                vis.Color = new Color(0, 0, 0, 0);
+            }
+        });
+
+        for (int i = 0; i < 18; i++)
+        {
+            Vector2 p = ejectionPos + new Vector2((GD.Randf() - 0.5f) * 56.0f, (GD.Randf() - 0.5f) * 56.0f);
             TriggerClashAnimation(p, dropScrap: true);
         }
+
+        // Gelombang kejut lontaran Escape Pod pada grid
+        EmitSignal(SignalName.SwarmClashImpulse, ejectionPos, 2100.0f, 290.0f);
+
+        // Otomatis memproduksi 1 Miner yang ikut melesat bersama Escape Pod pemain
         SpawnEmergencyMiner(0);
         RefreshFoundryGui();
     }
@@ -3484,11 +3839,26 @@ public partial class SwarmSimulation : Node2D
 
     private void OnEnemyEscapePodEjected(Vector2 ejectionPos, Vector2 ejectionVel)
     {
-        for (int i = 0; i < 16; i++)
+        // Hancurkan sisa swarm pengorbit sarang lama musuh saat sarang induk pecah
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
-            Vector2 p = ejectionPos + new Vector2((GD.Randf() - 0.5f) * 48.0f, (GD.Randf() - 0.5f) * 48.0f);
+            if (swarm.OwnerId == 1 && swarm.State == SwarmState.Orbiting)
+            {
+                swarm.State = SwarmState.Dead;
+                vis.Color = new Color(0, 0, 0, 0);
+            }
+        });
+
+        for (int i = 0; i < 18; i++)
+        {
+            Vector2 p = ejectionPos + new Vector2((GD.Randf() - 0.5f) * 56.0f, (GD.Randf() - 0.5f) * 56.0f);
             TriggerClashAnimation(p, dropScrap: true);
         }
+
+        // Gelombang kejut lontaran Nemesis Escape Pod pada grid
+        EmitSignal(SignalName.SwarmClashImpulse, ejectionPos, 2100.0f, 290.0f);
+
+        // Otomatis memproduksi 1 Miner untuk Escape Pod musuh yang baru terlontar cepat
         SpawnEmergencyMiner(1);
     }
 
@@ -3512,23 +3882,43 @@ public partial class SwarmSimulation : Node2D
         {
             if (_enemyCore == null || !IsInstanceValid(_enemyCore)) return;
             Vector2 enemyCorePos = _enemyCore.GlobalPosition;
+            Vector2 enemyVel = _enemyCore.Velocity;
             Color minerColor = new Color(3.5f, 1.8f, 0.4f, 1.0f);
 
-            float orbitDist = 42.0f;
-            float orbitSpd = 1.6f;
+            // Trigger efek visual hologram / kilatan fabrikasi dan gunakan ulang entitas Dead bila ada
+            float orbitDist = 36.0f;
+            float orbitSpd = 1.8f;
             float angle = GD.Randf() * Mathf.Tau;
-            Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * orbitDist;
+            Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 18.0f;
 
-            var pos = new PositionComponent(enemyCorePos + offset);
-            var vel = new VelocityComponent(Vector2.Zero);
-            var unit = new SwarmUnitComponent(SwarmRole.MiningDroid, ownerId: 1, orbitDist, orbitSpd)
+            bool reused = false;
+            _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
             {
-                State = SwarmState.Orbiting,
-                MaxLifeTime = 9999.0f
-            };
-            var vis = new VisualComponent(minerColor, 0.65f);
+                if (reused || swarm.State != SwarmState.Dead) return;
+                pos.Value = enemyCorePos + offset;
+                vel.Value = enemyVel;
+                swarm = new SwarmUnitComponent(SwarmRole.MiningDroid, ownerId: 1, orbitDist, orbitSpd)
+                {
+                    State = SwarmState.Orbiting,
+                    MaxLifeTime = 9999.0f
+                };
+                vis = new VisualComponent(minerColor, 0.68f);
+                reused = true;
+            });
 
-            _world.Create(pos, vel, unit, vis);
+            if (!reused)
+            {
+                var pos = new PositionComponent(enemyCorePos + offset);
+                var vel = new VelocityComponent(enemyVel);
+                var unit = new SwarmUnitComponent(SwarmRole.MiningDroid, ownerId: 1, orbitDist, orbitSpd)
+                {
+                    State = SwarmState.Orbiting,
+                    MaxLifeTime = 9999.0f
+                };
+                var vis = new VisualComponent(minerColor, 0.68f);
+
+                _world.Create(pos, vel, unit, vis);
+            }
         }
     }
 
@@ -3605,6 +3995,7 @@ public partial class SwarmSimulation : Node2D
         float closestCenterDist = maxRange;
         Vector2 centerHitPoint = rayBaseOrigin + aimDir * maxRange;
         bool anyRayHit = false;
+        _isMiningEnergyAsteroid = false;
 
         var asteroids = Asteroid.ActiveAsteroids;
         float erosionBlocksPerSec = 2.8f + minerCount * 0.95f;
@@ -3640,6 +4031,10 @@ public partial class SwarmSimulation : Node2D
             if (subHitAst != null && subBestHit.Hit)
             {
                 anyRayHit = true;
+                if (subHitAst.IsEnergyAsteroid)
+                {
+                    _isMiningEnergyAsteroid = true;
+                }
                 if (subClosest < closestCenterDist)
                 {
                     closestCenterDist = subClosest;
@@ -3674,6 +4069,42 @@ public partial class SwarmSimulation : Node2D
         _laserConvergencePoint = corePos + aimDir * focusDist;
         _laserImpactPoint = anyRayHit ? centerHitPoint : (_laserConvergencePoint + aimDir * maxRange);
 
+        // Update Partikel Plasma Siphoning (mengalir mundur dari Bintang Mini ke kapal)
+        if (_isMiningEnergyAsteroid && anyRayHit && !isPriming && _plasmaSiphonWisps.Count < 36)
+        {
+            for (int p = 0; p < 2; p++)
+            {
+                Color wispColor = (GD.Randf() < 0.65f)
+                    ? new Color(3.8f, 3.2f, 1.15f, 0.95f)
+                    : new Color(0.4f, 2.5f, 3.9f, 0.90f);
+                _plasmaSiphonWisps.Add(new PlasmaSiphonWisp
+                {
+                    Progress = GD.Randf() * 0.05f,
+                    Speed = 1.35f + GD.Randf() * 0.95f,
+                    Radius = 5.0f + GD.Randf() * 12.0f,
+                    Angle = GD.Randf() * Mathf.Tau,
+                    AngleSpeed = (GD.Randf() > 0.5f ? 1.0f : -1.0f) * (14.0f + GD.Randf() * 12.0f),
+                    Color = wispColor,
+                    Size = 2.4f + GD.Randf() * 2.0f
+                });
+            }
+        }
+
+        for (int w = _plasmaSiphonWisps.Count - 1; w >= 0; w--)
+        {
+            var wisp = _plasmaSiphonWisps[w];
+            wisp.Progress += dt * wisp.Speed;
+            wisp.Angle += dt * wisp.AngleSpeed;
+            if (wisp.Progress >= 1.0f)
+            {
+                _plasmaSiphonWisps.RemoveAt(w);
+            }
+            else
+            {
+                _plasmaSiphonWisps[w] = wisp;
+            }
+        }
+
         QueueRedraw();
     }
 
@@ -3681,44 +4112,104 @@ public partial class SwarmSimulation : Node2D
     {
         if (brokenType == VoxelType.Rock)
         {
-            for (int i = 0; i < 3; i++)
+            // Puing batu kosmik: 2 serpihan debu/gravel cepat pudar (0.22 - 0.35 detik)
+            for (int i = 0; i < 2; i++)
             {
                 float spread = (GD.Randf() - 0.5f) * 1.35f;
                 Vector2 dir = outNormal.Rotated(spread);
-                float speed = 45.0f + GD.Randf() * 95.0f;
-                float life = 0.20f + GD.Randf() * 0.18f;
+                float speed = 40.0f + GD.Randf() * 75.0f;
+                float life = 0.22f + GD.Randf() * 0.15f;
 
                 _miningDebris.Add(new MiningDebrisParticle
                 {
-                    Position = worldCenter + new Vector2((GD.Randf() - 0.5f) * 6.0f, (GD.Randf() - 0.5f) * 6.0f),
+                    Position = worldCenter + new Vector2((GD.Randf() - 0.5f) * 4.0f, (GD.Randf() - 0.5f) * 4.0f),
                     Velocity = dir * speed,
-                    Color = new Color(0.55f, 0.48f, 0.42f, 0.78f).Lerp(new Color(1.6f, 0.85f, 0.35f, 0.85f), GD.Randf() * 0.45f),
+                    Color = new Color(0.50f, 0.45f, 0.42f, 0.70f).Lerp(new Color(1.4f, 0.80f, 0.35f, 0.80f), GD.Randf() * 0.35f),
                     Life = life,
                     MaxLife = life,
-                    Size = 1.6f + GD.Randf() * 1.4f,
-                    IsCrystalMatter = false
+                    Size = 1.5f + GD.Randf() * 1.2f,
+                    IsCrystalMatter = false,
+                    IsQuantumGlass = false,
+                    IsPlasmaPuff = false
                 });
             }
         }
-        else if (Asteroid.TryGetResourceType(brokenType, out ResourceType resType))
+        else if (brokenType == VoxelType.ResourceAether)
         {
-            Color resCol = Asteroid.GetResourceColor(resType);
-            for (int i = 0; i < 2; i++)
+            // Resource Aether (Sangat Langka):
+            // 1 serpihan Kaca Kuantum Bercahaya (+ 25% peluang pecahan bonus kedua)
+            int nuggetCount = (GD.Randf() < 0.25f) ? 2 : 1;
+            for (int i = 0; i < nuggetCount; i++)
             {
-                float spread = (GD.Randf() - 0.5f) * 1.6f;
+                float spread = (GD.Randf() - 0.5f) * 1.8f;
                 Vector2 dir = outNormal.Rotated(spread);
-                float speed = 90.0f + GD.Randf() * 110.0f;
+                float speed = 65.0f + GD.Randf() * 95.0f;
+                float life = 24.0f + GD.Randf() * 8.0f; // BERTAHAN LAMA (24 - 32 DETIK)!
+                float size = 4.0f + GD.Randf() * 2.0f;
+
+                Color prismCol = (GD.Randf() > 0.35f)
+                    ? new Color(4.8f, 4.0f, 1.5f, 1.0f)   // Aether Gold-White
+                    : new Color(0.9f, 3.5f, 5.2f, 1.0f);  // Refractive Cyan Flash
 
                 _miningDebris.Add(new MiningDebrisParticle
                 {
                     Position = worldCenter + new Vector2((GD.Randf() - 0.5f) * 5.0f, (GD.Randf() - 0.5f) * 5.0f),
                     Velocity = dir * speed,
-                    Color = resCol,
-                    Life = 1.45f,
-                    MaxLife = 1.45f,
-                    Size = 3.4f,
+                    Color = prismCol,
+                    Life = life,
+                    MaxLife = life,
+                    Size = size,
                     IsCrystalMatter = true,
-                    MatterType = resType
+                    MatterType = ResourceType.Aether,
+                    Rotation = GD.Randf() * Mathf.Tau,
+                    RotSpeed = (GD.Randf() - 0.5f) * 35.0f,
+                    IsQuantumGlass = true,
+                    IsPlasmaPuff = false
+                });
+            }
+
+            // 1 Semburan Gas Plasma Ethereal (VFX sekejap)
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = worldCenter,
+                Velocity = outNormal * 32.0f,
+                Color = new Color(3.6f, 2.5f, 0.8f, 0.65f),
+                Life = 0.30f,
+                MaxLife = 0.30f,
+                Size = 5.0f,
+                IsCrystalMatter = false,
+                IsQuantumGlass = false,
+                IsPlasmaPuff = true
+            });
+        }
+        else if (Asteroid.TryGetResourceType(brokenType, out ResourceType resType))
+        {
+            // Resource Mineral Padat (Quartz, Ferrite, Carbide, Vortexum):
+            // 1 serpihan kristal padat (+ 20% peluang pecahan bonus kedua)
+            int nuggetCount = (GD.Randf() < 0.20f) ? 2 : 1;
+            Color resCol = Asteroid.GetResourceColor(resType);
+
+            for (int i = 0; i < nuggetCount; i++)
+            {
+                float spread = (GD.Randf() - 0.5f) * 1.5f;
+                Vector2 dir = outNormal.Rotated(spread);
+                float speed = 60.0f + GD.Randf() * 85.0f;
+                float life = 24.0f + GD.Randf() * 8.0f; // BERTAHAN LAMA (24 - 32 DETIK)!
+
+                _miningDebris.Add(new MiningDebrisParticle
+                {
+                    Position = worldCenter + new Vector2((GD.Randf() - 0.5f) * 4.0f, (GD.Randf() - 0.5f) * 4.0f),
+                    Velocity = dir * speed,
+                    Color = resCol,
+                    Life = life,
+                    MaxLife = life,
+                    Size = 3.6f,
+                    IsCrystalMatter = true,
+                    MatterType = resType,
+                    Rotation = GD.Randf() * Mathf.Tau,
+                    RotSpeed = (GD.Randf() - 0.5f) * 18.0f,
+                    IsQuantumGlass = false,
+                    IsPlasmaPuff = false
                 });
             }
         }
@@ -3726,10 +4217,28 @@ public partial class SwarmSimulation : Node2D
 
     private void UpdateMiningDebris(float dt, Vector2 corePos)
     {
-        if (_miningDebris.Count == 0) return;
-
         bool redrawNeeded = !_isMiningLaserActive && !_isBoostActive;
         bool stockChanged = false;
+
+        // Update gelombang kejut kehancuran asteroid
+        for (int i = _asteroidShockwaves.Count - 1; i >= 0; i--)
+        {
+            var sw = _asteroidShockwaves[i];
+            sw.Life -= dt;
+            float progress = 1.0f - Mathf.Clamp(sw.Life / sw.MaxLife, 0.0f, 1.0f);
+            sw.Radius = Mathf.Lerp(12.0f, sw.MaxRadius, MathF.Sqrt(progress));
+            if (sw.Life <= 0.0f)
+            {
+                _asteroidShockwaves.RemoveAt(i);
+            }
+            else
+            {
+                _asteroidShockwaves[i] = sw;
+            }
+            redrawNeeded = true;
+        }
+
+        if (_miningDebris.Count == 0 && _asteroidShockwaves.Count == 0) return;
 
         for (int i = _miningDebris.Count - 1; i >= 0; i--)
         {
@@ -3740,35 +4249,31 @@ public partial class SwarmSimulation : Node2D
             {
                 Vector2 toCore = corePos - p.Position;
                 float dist = toCore.Length();
-                if (dist <= 24.0f)
+                if (dist <= 28.0f)
                 {
                     int rIdx = (int)p.MatterType;
                     if (rIdx >= 0 && rIdx < _resourceStock.Length)
                     {
-                        _resourceStock[rIdx] = InfiniteDebugResources ? InfiniteStockValue : (_resourceStock[rIdx] + 2);
+                        // PACING EARLY GAME: +1 Resource per serpihan yang dikumpulkan (Bukan +2)!
+                        _resourceStock[rIdx] = InfiniteDebugResources ? InfiniteStockValue : (_resourceStock[rIdx] + 1);
                         stockChanged = true;
                     }
-
-                    // Daur ulang puing menjadi Dart tambahan untuk koloni pemain!
-                    IncrementRoleCounter(SwarmRole.DartNeedle, 1);
-                    _entityCount++;
-                    SpawnOneOrbitingDartNearPlayer();
 
                     _miningDebris.RemoveAt(i);
                     continue;
                 }
 
-                // MAGNET PULL: Hanya aktif saat kapal pemain mendekat (dist <= 180 px)!
-                if (dist <= 180.0f)
+                // MAGNET PULL: Menarik puing kristal berharga saat kapal pemain mendekat (dist <= 220 px)!
+                if (dist <= 220.0f)
                 {
                     Vector2 pullDir = toCore / MathF.Max(0.001f, dist);
-                    p.Velocity = p.Velocity.Lerp(pullDir * 780.0f, MathF.Min(1.0f, dt * 7.5f));
+                    p.Velocity = p.Velocity.Lerp(pullDir * 820.0f, MathF.Min(1.0f, dt * 8.0f));
                     p.Position += p.Velocity * dt;
                 }
                 else
                 {
                     // Melayang pelan di luar angkasa dengan inersia
-                    p.Velocity *= MathF.Pow(0.92f, dt * 60.0f);
+                    p.Velocity *= MathF.Pow(0.94f, dt * 60.0f);
                     p.Position += p.Velocity * dt;
                 }
             }
@@ -3776,6 +4281,11 @@ public partial class SwarmSimulation : Node2D
             {
                 p.Velocity *= MathF.Pow(0.88f, dt * 60.0f);
                 p.Position += p.Velocity * dt;
+            }
+
+            if (p.IsQuantumGlass)
+            {
+                p.Rotation += p.RotSpeed * dt;
             }
 
             if (p.Life <= 0.0f)
@@ -3799,6 +4309,130 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
+    public void TriggerAsteroidDestructionFx(Vector2 position, float asteroidRadius, Color glowColor, bool isEnergy)
+    {
+        // 1. Gelombang kejut ledakan asteroid melingkar dinamis (Expanding Vector Shockwave Ring)
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = position,
+            Radius = 16.0f,
+            MaxRadius = asteroidRadius * (isEnergy ? 4.8f : 1.75f),
+            Life = isEnergy ? 0.85f : 0.55f,
+            MaxLife = isEnergy ? 0.85f : 0.55f,
+            Color1 = isEnergy ? new Color(5.2f, 4.4f, 1.8f, 0.98f) : new Color(0.9f, 0.9f, 1.0f, 0.75f),
+            Color2 = isEnergy ? new Color(0.8f, 3.8f, 5.2f, 0.90f) : new Color(0.35f, 0.35f, 0.45f, 0.5f),
+            IsEnergy = isEnergy
+        });
+
+        // EFEK SUPERNOVA DETONATION: Dorongan Kinetik Masif & Robekan Grid Latar Belakang
+        if (isEnergy)
+        {
+            // A. Dorongan Kinetik Supernova Dahsyat ke Kapal Induk Pemain
+            if (PlayerCore.Instance != null && IsInstanceValid(PlayerCore.Instance))
+            {
+                float pDist = position.DistanceTo(PlayerCore.Instance.GlobalPosition);
+                if (pDist < 950.0f)
+                {
+                    Vector2 pDir = (PlayerCore.Instance.GlobalPosition - position).Normalized();
+                    float blastForce = Mathf.Lerp(1200.0f, 280.0f, pDist / 950.0f);
+                    PlayerCore.Instance.Velocity += pDir * blastForce;
+                }
+            }
+
+            // B. Dorongan Kinetik Radial ke Seluruh Armada Drone di Sekitar
+            _world.Query(in _allSwarmQuery, (ref PositionComponent pPos, ref VelocityComponent pVel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+            {
+                if (swarm.State == SwarmState.Dead) return;
+                float dDist = position.DistanceTo(pPos.Value);
+                if (dDist < 900.0f)
+                {
+                    Vector2 dDir = (pPos.Value - position).Normalized();
+                    float blast = Mathf.Lerp(980.0f, 240.0f, dDist / 900.0f);
+                    pVel.Value += dDir * blast;
+                }
+            });
+
+            // C. Dorongan Kinetik Radial ke Asteroid Lain di Sekitarnya
+            for (int a = 0; a < Asteroid.ActiveAsteroids.Count; a++)
+            {
+                var other = Asteroid.ActiveAsteroids[a];
+                if (!IsInstanceValid(other) || !other.IsActiveInTree) continue;
+                float aDist = position.DistanceTo(other.CachedPosition);
+                if (aDist < 950.0f && aDist > 1.0f)
+                {
+                    Vector2 aDir = (other.CachedPosition - position).Normalized();
+                    other.LinearVelocity += aDir * 360.0f;
+                }
+            }
+
+            // D. GELOMBANG KEJUT ROBEKAN GRID LATAR BELAKANG (SUPERNOVA GRID RUPTURE)
+            EmitSignal(SignalName.SwarmClashImpulse, position, 3800.0f, 750.0f);
+        }
+
+        // 2. Serpihan bongkahan asteroid terbang berputar 360 derajat (Destruction Shards)
+        int shardCount = isEnergy ? GD.RandRange(26, 36) : GD.RandRange(18, 24);
+        for (int i = 0; i < shardCount; i++)
+        {
+            float angle = (float)i / shardCount * Mathf.Tau + (GD.Randf() - 0.5f) * 0.45f;
+            Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+            float speed = isEnergy ? (160.0f + GD.Randf() * 320.0f) : (120.0f + GD.Randf() * 220.0f);
+            float life = isEnergy ? (2.8f + GD.Randf() * 1.5f) : (2.0f + GD.Randf() * 1.2f);
+            float size = isEnergy ? (4.5f + GD.Randf() * 4.0f) : (3.5f + GD.Randf() * 3.5f);
+
+            Color shardColor = isEnergy
+                ? (GD.Randf() < 0.45f ? new Color(0.12f, 0.16f, 0.28f, 0.9f) : (GD.Randf() < 0.5f ? new Color(4.5f, 3.8f, 1.4f, 0.95f) : new Color(0.8f, 3.2f, 4.4f, 0.95f)))
+                : new Color(0.38f, 0.35f, 0.42f, 0.85f).Lerp(glowColor * 0.7f, GD.Randf() * 0.35f);
+
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = position + dir * (asteroidRadius * 0.22f),
+                Velocity = dir * speed,
+                Color = shardColor,
+                Life = life,
+                MaxLife = life,
+                Size = size,
+                IsCrystalMatter = false,
+                Rotation = GD.Randf() * Mathf.Tau,
+                RotSpeed = (GD.Randf() - 0.5f) * 18.0f,
+                IsQuantumGlass = isEnergy,
+                IsPlasmaPuff = false
+            });
+        }
+
+        // 3. Pelepasan kristal Aether & Quartz saat Bintang Mini meledak (Supernova Loot Drop)
+        int dropCount = isEnergy ? GD.RandRange(24, 32) : GD.RandRange(2, 4);
+        for (int i = 0; i < dropCount; i++)
+        {
+            float angle = GD.Randf() * Mathf.Tau;
+            Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+            float speed = isEnergy ? (75.0f + GD.Randf() * 160.0f) : (45.0f + GD.Randf() * 75.0f);
+            float life = 25.0f + GD.Randf() * 8.0f;
+
+            ResourceType curDrop = isEnergy
+                ? ((GD.Randf() < 0.78f) ? ResourceType.Aether : ResourceType.Quartz)
+                : ResourceType.Ferrite;
+            Color col = Asteroid.GetResourceColor(curDrop);
+
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = position + dir * (isEnergy ? 24.0f : 16.0f),
+                Velocity = dir * speed,
+                Color = col,
+                Life = life,
+                MaxLife = life,
+                Size = isEnergy ? (4.2f + GD.Randf() * 1.5f) : 3.8f,
+                IsCrystalMatter = true,
+                MatterType = curDrop,
+                Rotation = GD.Randf() * Mathf.Tau,
+                RotSpeed = (GD.Randf() - 0.5f) * 15.0f,
+                IsQuantumGlass = (curDrop == ResourceType.Aether),
+                IsPlasmaPuff = false
+            });
+        }
+
+        QueueRedraw();
+    }
+
     public override void _Draw()
     {
         try
@@ -3810,7 +4444,33 @@ public partial class SwarmSimulation : Node2D
                 float alpha = Mathf.Clamp(p.Life / p.MaxLife, 0.0f, 1.0f);
                 Color c = new Color(p.Color.R, p.Color.G, p.Color.B, p.Color.A * alpha);
 
-                if (p.IsCrystalMatter)
+                if (p.IsPlasmaPuff)
+                {
+                    float expandRatio = 1.0f - alpha;
+                    float radius = p.Size + expandRatio * 22.0f;
+                    DrawCircle(p.Position, radius, new Color(c.R, c.G, c.B, c.A * 0.30f));
+                    DrawArc(p.Position, radius, 0.0f, Mathf.Tau, 18, c, 1.4f, true);
+                }
+                else if (p.IsQuantumGlass)
+                {
+                    // Prisma Kaca Kuantum Berlian 4-Sisi Terdistorsi (Zero heap allocation)
+                    Vector2 fwd = new Vector2(MathF.Cos(p.Rotation), MathF.Sin(p.Rotation)) * p.Size;
+                    Vector2 right = new Vector2(-fwd.Y, fwd.X) * 0.52f;
+                    _debrisPrismVerts4[0] = p.Position + fwd;
+                    _debrisPrismVerts4[1] = p.Position + right;
+                    _debrisPrismVerts4[2] = p.Position - fwd;
+                    _debrisPrismVerts4[3] = p.Position - right;
+
+                    _debrisPrismVerts5[0] = _debrisPrismVerts4[0];
+                    _debrisPrismVerts5[1] = _debrisPrismVerts4[1];
+                    _debrisPrismVerts5[2] = _debrisPrismVerts4[2];
+                    _debrisPrismVerts5[3] = _debrisPrismVerts4[3];
+                    _debrisPrismVerts5[4] = _debrisPrismVerts4[0];
+
+                    DrawColoredPolygon(_debrisPrismVerts4, c);
+                    DrawPolyline(_debrisPrismVerts5, new Color(5.5f, 5.5f, 5.0f, c.A * 0.95f), 1.2f);
+                }
+                else if (p.IsCrystalMatter)
                 {
                     Rect2 shardRect = new Rect2(p.Position - new Vector2(p.Size * 0.5f, p.Size * 0.5f), new Vector2(p.Size, p.Size));
                     DrawRect(shardRect, c, true);
@@ -3828,6 +4488,21 @@ public partial class SwarmSimulation : Node2D
                 float alpha = Mathf.Clamp(sp.Life / sp.MaxLife, 0.0f, 1.0f);
                 Color c = new Color(sp.Color.R, sp.Color.G, sp.Color.B, sp.Color.A * alpha);
                 DrawLine(sp.Position, sp.Position - sp.Velocity * 0.025f, c, sp.Size);
+            }
+
+            // 1c. Gambar Gelombang Kejut Ledakan Asteroid (Shockwave Rings)
+            for (int i = 0; i < _asteroidShockwaves.Count; i++)
+            {
+                var sw = _asteroidShockwaves[i];
+                float alpha = Mathf.Clamp(sw.Life / sw.MaxLife, 0.0f, 1.0f);
+                Color col1 = new Color(sw.Color1.R, sw.Color1.G, sw.Color1.B, sw.Color1.A * alpha);
+                DrawArc(sw.Center, sw.Radius, 0.0f, Mathf.Tau, 40, col1, 2.8f, false);
+
+                if (sw.IsEnergy)
+                {
+                    Color col2 = new Color(sw.Color2.R, sw.Color2.G, sw.Color2.B, sw.Color2.A * alpha);
+                    DrawArc(sw.Center, sw.Radius * 0.72f, 0.0f, Mathf.Tau, 32, col2, 2.0f, false);
+                }
             }
 
             // 2. Gambar Efek Visual Sacrificial Dart Plasma Boost [SPACE], Kubah Parabola, & Retro-Brake
@@ -3959,6 +4634,50 @@ public partial class SwarmSimulation : Node2D
                 else
                 {
                     DrawCircle(_laserImpactPoint, mainBeamWidth * 0.5f, coreBeamColor);
+                }
+
+                // EFEK PLASMA SIPHONING: Aliran plasma terpilin mengalir mundur dari bintang ke kapal
+                if (_isMiningEnergyAsteroid && _plasmaSiphonWisps.Count > 0)
+                {
+                    Vector2 beamVec = _laserConvergencePoint - _laserImpactPoint;
+                    Vector2 beamNorm = beamVec.Normalized();
+                    Vector2 beamNormalPerp = new Vector2(-beamNorm.Y, beamNorm.X);
+
+                    // 1. Pilinan pita heliks ganda (Double Helix Plasma Strands) di sekeliling berkas laser
+                    int helixSteps = 22;
+                    Vector2 prevH1 = _laserImpactPoint;
+                    Vector2 prevH2 = _laserImpactPoint;
+                    Color helix1 = new Color(3.8f, 3.2f, 1.15f, 0.40f * _laserFocusWarmup);
+                    Color helix2 = new Color(0.4f, 2.5f, 3.9f, 0.40f * _laserFocusWarmup);
+
+                    for (int h = 1; h <= helixSteps; h++)
+                    {
+                        float t = (float)h / helixSteps;
+                        Vector2 curPt = _laserImpactPoint + beamVec * t;
+                        float phase = t * 24.0f - _laserPulseTimer * 16.0f;
+                        float r = 11.0f * (1.0f - t * 0.35f);
+
+                        Vector2 curH1 = curPt + beamNormalPerp * (MathF.Sin(phase) * r);
+                        Vector2 curH2 = curPt - beamNormalPerp * (MathF.Sin(phase) * r);
+
+                        DrawLine(prevH1, curH1, helix1, 1.4f, false);
+                        DrawLine(prevH2, curH2, helix2, 1.2f, false);
+                        prevH1 = curH1;
+                        prevH2 = curH2;
+                    }
+
+                    // 2. Partikel plasma siphoning yang melesat mundur ke kapal
+                    for (int w = 0; w < _plasmaSiphonWisps.Count; w++)
+                    {
+                        var wisp = _plasmaSiphonWisps[w];
+                        Vector2 centerPt = _laserImpactPoint + beamVec * wisp.Progress;
+                        float spiralOffset = MathF.Sin(wisp.Angle) * wisp.Radius * (1.0f - wisp.Progress * 0.4f);
+                        Vector2 pos = centerPt + beamNormalPerp * spiralOffset;
+
+                        float alphaFade = MathF.Sin(wisp.Progress * Mathf.Pi);
+                        Color c = new Color(wisp.Color.R, wisp.Color.G, wisp.Color.B, wisp.Color.A * alphaFade);
+                        DrawCircle(pos, wisp.Size, c);
+                    }
                 }
             }
         }
@@ -4235,6 +4954,8 @@ public partial class SwarmSimulation : Node2D
             Vector2 dir = toTarget.Normalized().Rotated(spreadAngle);
 
             swarm.State = SwarmState.Launched;
+            swarm.FormationIndex = -1;
+            swarm.ExhaustTriggerTime = -1.0f;
             swarm.MaxHealth = 1;
             swarm.Health = 1;
             swarm.TargetDirection = dir;
@@ -4266,6 +4987,8 @@ public partial class SwarmSimulation : Node2D
             Vector2 dir = baseDir.Rotated(spreadAngle);
 
             swarm.State = SwarmState.Launched;
+            swarm.FormationIndex = -1;
+            swarm.ExhaustTriggerTime = -1.0f;
             swarm.MaxHealth = 1;
             swarm.Health = 1;
             swarm.TargetDirection = dir;
@@ -4293,6 +5016,8 @@ public partial class SwarmSimulation : Node2D
             Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
 
             swarm.State = SwarmState.Launched;
+            swarm.FormationIndex = -1;
+            swarm.ExhaustTriggerTime = -1.0f;
             swarm.MaxHealth = 1;
             swarm.Health = 1;
             swarm.TargetDirection = dir;
@@ -4335,14 +5060,8 @@ public partial class SwarmSimulation : Node2D
                     // Multi-Toggle [5]: Drill Drone (Lance Projectile)
                     ToggleTacticalSlot(4);
                     break;
-                case Key.E:
-                    SpawnEnemySectorAttack(GetGlobalMousePosition(), 50);
-                    break;
                 case Key.Q:
                     FireRadialNova(80);
-                    break;
-                case Key.T:
-                    IsEnemyFiring = !IsEnemyFiring;
                     break;
             }
         }
@@ -4350,6 +5069,7 @@ public partial class SwarmSimulation : Node2D
 
     public override void _ExitTree()
     {
+        if (Instance == this) Instance = null;
         _world?.Dispose();
     }
 }

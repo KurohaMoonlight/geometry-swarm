@@ -9,7 +9,8 @@ const GigaDrillVFXClass = preload("res://visual/giga_drill_vfx.gd")
 ## - Grid belakang di-snap ke koordinat dunia (kelipatan cell_size) sehingga TIDAK ikut bergeser
 ##   saat kapal bergerak.
 ## - Di belakang grid terdapat 3 lapis partikel bintang parallax yang sangat ringan.
-## - Mendukung efek riak & gelombang kejut grid megah saat Sacrificial Dart Boost [SPACE] aktif.
+## - Mendukung efek riak & gelombang kejut grid megah saat Sacrificial Dart Boost [SPACE] aktif,
+##   serta efek robekan ruang-waktu (Supernova Grid Rupture) saat Giga Drill meledak di Core.
 
 @onready var grid_renderer: GridRendererClass = $GridRenderer
 @onready var world_env: WorldEnvironment = $WorldEnvironment
@@ -18,6 +19,7 @@ const GigaDrillVFXClass = preload("res://visual/giga_drill_vfx.gd")
 @onready var swarm_label: Label = $HUD/RightMargin/VBox/SwarmLabel
 
 @onready var swarm_sim: Node2D = get_node_or_null("SwarmSimulation")
+@onready var asteroid_field: Node2D = get_node_or_null("AsteroidField")
 var player_core: Node2D = null
 var player_camera: Camera2D = null
 
@@ -54,6 +56,12 @@ func _ready() -> void:
 		if swarm_sim.has_signal("SwarmClashImpulse"):
 			swarm_sim.connect("SwarmClashImpulse", Callable(self, "_on_swarm_clash_impulse"))
 
+	if asteroid_field:
+		if asteroid_field.has_signal("CosmicRiftInfall"):
+			asteroid_field.connect("CosmicRiftInfall", Callable(self, "_on_cosmic_rift_infall"))
+		if asteroid_field.has_signal("CosmicRiftErupted"):
+			asteroid_field.connect("CosmicRiftErupted", Callable(self, "_on_cosmic_rift_erupted"))
+
 	_update_grid_size()
 	grid_renderer.bind_physics(grid_physics)
 	get_tree().root.size_changed.connect(_on_viewport_resized)
@@ -73,7 +81,16 @@ func _on_giga_drill_detonated(tip_pos: Vector2, base_pos: Vector2, count: int) -
 	if giga_vfx:
 		giga_vfx.trigger_detonation(tip_pos, base_pos, count)
 	if grid_physics:
-		grid_physics.apply_radial_impulse(tip_pos, 1800.0, 260.0)
+		if count < 0:
+			# Ledakan kecil akhir saat driller habis menggerus batu asteroid
+			grid_physics.apply_radial_impulse(tip_pos, 950.0, 155.0)
+			trigger_shake(8.0)
+		elif count > 0:
+			# Ledakan Spektakuler Supernova saat menghantam Core!
+			grid_physics.apply_supernova_core_detonation(tip_pos, base_pos, count)
+			trigger_shake(22.0)
+		else:
+			grid_physics.apply_radial_impulse(tip_pos, 750.0, 145.0)
 
 func _on_giga_drill_nose_breached(breach_pos: Vector2, aim_dir: Vector2, count: int) -> void:
 	if giga_vfx:
@@ -92,6 +109,15 @@ func _on_boost_dart_sacrificed(nozzle_pos: Vector2, aim_dir: Vector2, power_rati
 func _on_swarm_clash_impulse(pos: Vector2, power: float, radius: float) -> void:
 	if grid_physics:
 		grid_physics.apply_radial_impulse(pos, power, radius)
+
+func _on_cosmic_rift_infall(rift_pos: Vector2, power: float, radius: float) -> void:
+	if grid_physics:
+		grid_physics.apply_radial_impulse(rift_pos, -power, radius)
+
+func _on_cosmic_rift_erupted(rift_pos: Vector2, power: float, radius: float) -> void:
+	if grid_physics:
+		grid_physics.apply_radial_impulse(rift_pos, power, radius)
+	trigger_shake(8.5)
 
 func _process(delta: float) -> void:
 	if screen_shake_intensity > 0.05:
@@ -171,7 +197,6 @@ func _process(delta: float) -> void:
 			var guardians: int = swarm_sim.GuardianCount
 			var scanners: int = swarm_sim.ScannerCount
 			var miners: int = swarm_sim.MiningCount
-			var enemies: int = swarm_sim.EnemyCount
 			var charge_ratio: float = swarm_sim.DrillChargeRatio
 			var is_charging: bool = swarm_sim.IsChargingDrill
 			var is_boosting: bool = swarm_sim.get("IsBoostActive") == true
@@ -188,17 +213,11 @@ func _process(delta: float) -> void:
 			var p_hp: int = int(float(swarm_sim.get("PlayerHealth")))
 			var p_max_hp: int = int(float(swarm_sim.get("PlayerMaxHealth")))
 			var is_p_pod: bool = swarm_sim.get("IsPlayerEscapePod") == true
-			var e_hp: int = int(float(swarm_sim.get("EnemyHealth")))
-			var e_max_hp: int = int(float(swarm_sim.get("EnemyMaxHealth")))
-			var is_e_pod: bool = swarm_sim.get("IsEnemyEscapePod") == true
-
 			var p_status: String = " [⚡ ESCAPE POD]" if is_p_pod else " [HIVE]"
-			var e_status: String = " [⚡ NEMESIS POD]" if is_e_pod else " [HIVE]"
 
-			var enemy_text: String = (" | ENEMY SWARM: %d" % enemies) if enemies > 0 else ""
-			swarm_label.text = "CORE: %d/%d%s | ENEMY CORE: %d/%d%s\nSWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d%s ]\nDARTS: %d | SCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d" % [
-				p_hp, p_max_hp, p_status, e_hp, e_max_hp, e_status,
-				total, status_text, orbiting, launched, returning, enemy_text, darts, scanners, miners, guardians, cores
+			swarm_label.text = "CORE: %d/%d%s\nSWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d ]\nDARTS: %d | SCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d" % [
+				p_hp, p_max_hp, p_status,
+				total, status_text, orbiting, launched, returning, darts, scanners, miners, guardians, cores
 			]
 
 func _unhandled_input(event: InputEvent) -> void:

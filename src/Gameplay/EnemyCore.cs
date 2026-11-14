@@ -7,7 +7,9 @@ namespace GeometrySwarm.Gameplay;
 /// <summary>
 /// Kapal Induk Musuh (Enemy Hive Core) bertema crimson-magenta neon.
 /// Berdiri berhadapan dengan Player Core sebagai markas komando swarm musuh.
-/// Dilengkapi sistem pertahanan darurat (Emergency Nemesis Escape Pod & Mining Drone Reboot).
+/// - Mode Hive Core: Massa kapal induk sangat berat (Heavy Mass Inertia).
+/// - Mode Emergency Escape Pod (1 Core tersisa): Terlontar kabur dengan kecepatan sangat tinggi
+///   menjauhi pemain, memproduksi 1 Miner otomatis, dan bermanuver lincah menghindari kejaran.
 /// </summary>
 public partial class EnemyCore : Node2D
 {
@@ -28,6 +30,8 @@ public partial class EnemyCore : Node2D
 
     public bool IsEscapePod { get; private set; } = false;
     public float InvulnerableTimer { get; private set; } = 0.0f;
+    public float EscapeBurstTimer { get; private set; } = 0.0f;
+    public Vector2 EscapeBurstDirection { get; private set; } = Vector2.Right;
     public Vector2 Velocity { get; set; } = Vector2.Zero;
 
     private readonly List<Vector2> _hexCellOffsets = new();
@@ -103,28 +107,66 @@ public partial class EnemyCore : Node2D
         {
             InvulnerableTimer -= dt;
         }
+        if (EscapeBurstTimer > 0.0f)
+        {
+            EscapeBurstTimer -= dt;
+        }
 
-        // Manuver pelarian AI jika berada dalam mode Escape Pod tunggal
+        // Manuver pelarian AI berkecepatan tinggi jika berada dalam mode Escape Pod tunggal (1 Core)
         if (IsEscapePod)
         {
+            Vector2 fleeDir = EscapeBurstDirection;
             Node? playerNode = GetTree()?.Root?.FindChild("PlayerCore", true, false);
             if (playerNode is Node2D player2D)
             {
-                Vector2 toPlayer = player2D.GlobalPosition - GlobalPosition;
-                float dist = toPlayer.Length();
-                if (dist < 1500.0f && dist > 1.0f)
+                Vector2 awayFromPlayer = GlobalPosition - player2D.GlobalPosition;
+                float dist = awayFromPlayer.Length();
+                if (dist > 1.0f)
                 {
-                    Vector2 fleeDir = -toPlayer / dist;
-                    Velocity += fleeDir * (420.0f * dt);
+                    fleeDir = awayFromPlayer / dist;
+                }
+
+                // Jika pemain mengejar dalam radius 2.400 px, terus pacu pendorong kabur berkecepatan tinggi!
+                if (dist < 2400.0f)
+                {
+                    Velocity += fleeDir * (1050.0f * dt);
                 }
             }
-            Velocity = Velocity.LimitLength(360.0f);
+
+            // Hindari batas luar sektor (5.400 px) dengan berbelok tangensial agar tidak terpojok di sudut map
+            const float safeArenaBound = 5100.0f;
+            if (MathF.Abs(GlobalPosition.X) > safeArenaBound || MathF.Abs(GlobalPosition.Y) > safeArenaBound)
+            {
+                Vector2 toCenter = (-GlobalPosition).Normalized();
+                Vector2 tangent = new Vector2(-toCenter.Y, toCenter.X);
+                Velocity += (toCenter * 0.65f + tangent * 0.75f).Normalized() * (1200.0f * dt);
+            }
+
+            if (EscapeBurstTimer > 0.0f)
+            {
+                // Fase Lontaran Darurat Awal (Eject Burst): Lari sangat cepat (~1.180 px/s) agar bisa kabur!
+                Velocity += EscapeBurstDirection * (1800.0f * dt);
+                Velocity = Velocity.LimitLength(1180.0f);
+                GlobalPosition += Velocity * dt;
+                Velocity *= MathF.Pow(0.985f, dt * 60.0f);
+            }
+            else
+            {
+                // Kecepatan jelajah kabur Escape Pod tetap lincah & cepat (720 px/s)
+                Velocity = Velocity.LimitLength(720.0f);
+                GlobalPosition += Velocity * dt;
+                Velocity *= MathF.Pow(0.95f, dt * 60.0f);
+            }
+        }
+        else
+        {
+            // Mode Hive Core penuh: Massa kapal induk sangat berat (terlihat bergeser karena inersia, namun tidak terpental jauh)
+            Velocity = Velocity.LimitLength(155.0f);
+            GlobalPosition += Velocity * dt;
+            Velocity *= MathF.Pow(0.85f, dt * 60.0f);
         }
 
-        GlobalPosition += Velocity * dt;
-        Velocity *= MathF.Pow(0.92f, dt * 60.0f);
-
-        // Pantulan fisik terhadap batuan asteroid agar tidak tembus/terjebak
+        // Pantulan fisik & seluncur tangensial terhadap batuan asteroid agar Escape Pod tidak nyangkut saat kabur
         var asteroids = Asteroid.ActiveAsteroids;
         for (int i = 0; i < asteroids.Count; i++)
         {
@@ -133,8 +175,16 @@ public partial class EnemyCore : Node2D
 
             Vector2 curPos = GlobalPosition;
             Vector2 curVel = Velocity;
-            if (ast.ResolveCircleVoxelCollision(ref curPos, ref curVel, CoreCollisionRadius, impulseWeight: 0.35f))
+            if (ast.ResolveCircleVoxelCollision(ref curPos, ref curVel, CoreCollisionRadius, out Vector2 hitNormal, impulseWeight: 0.35f))
             {
+                if (IsEscapePod)
+                {
+                    Vector2 tangent = new Vector2(-hitNormal.Y, hitNormal.X);
+                    if (tangent.Dot(EscapeBurstDirection) < 0.0f) tangent = -tangent;
+                    float keepSpeed = MathF.Max(curVel.Length(), 680.0f);
+                    curVel = (tangent * 0.85f + hitNormal * 0.15f).Normalized() * keepSpeed;
+                    EscapeBurstDirection = curVel.Normalized();
+                }
                 GlobalPosition = curPos;
                 Velocity = curVel;
             }
@@ -178,13 +228,25 @@ public partial class EnemyCore : Node2D
         _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
 
         Health = 800.0f;
-        InvulnerableTimer = 2.5f;
+        InvulnerableTimer = 3.0f;
+        EscapeBurstTimer = 1.45f;
 
-        Vector2 escapeDir = impactDir.LengthSquared() > 0.01f
-            ? -impactDir.Normalized()
-            : new Vector2(1.0f, (GD.Randf() - 0.5f)).Normalized();
+        // Pastikan arah eject SELALU menjauhi PlayerCore (bukan berbalik ke arah pemain!)
+        Vector2 awayDir = impactDir.LengthSquared() > 0.01f ? impactDir.Normalized() : Vector2.Right;
+        Node? playerNode = GetTree()?.Root?.FindChild("PlayerCore", true, false);
+        if (playerNode is Node2D player2D)
+        {
+            Vector2 fromPlayer = GlobalPosition - player2D.GlobalPosition;
+            if (fromPlayer.LengthSquared() > 1.0f)
+            {
+                awayDir = fromPlayer.Normalized();
+            }
+        }
 
-        Velocity = escapeDir * 700.0f;
+        // Beri sedikit sudut menghindar acak (~15-25 derajat) agar lintasannya dinamis & sulit ditembak lurus
+        float evadeAngle = (GD.Randf() > 0.5f ? 1.0f : -1.0f) * Mathf.DegToRad(18.0f + GD.Randf() * 12.0f);
+        EscapeBurstDirection = awayDir.Rotated(evadeAngle).Normalized();
+        Velocity = EscapeBurstDirection * 1180.0f;
 
         EmitSignal(SignalName.EnemyEscapePodEjected, GlobalPosition, Velocity);
         QueueRedraw();
@@ -209,6 +271,18 @@ public partial class EnemyCore : Node2D
             DrawCircle(offset, coreGlowRadius, EnemyPulseColor);
         }
 
+        // Ekor Thruster Darurat saat Escape Pod melesat kabur cepat
+        if (IsEscapePod && Velocity.LengthSquared() > 2500.0f)
+        {
+            Vector2 backDir = -Velocity.Normalized();
+            Vector2 tangent = new Vector2(-backDir.Y, backDir.X);
+            float jetLen = Mathf.Clamp(Velocity.Length() * 0.085f, 24.0f, 95.0f);
+            DrawLine(backDir * 12.0f, backDir * (12.0f + jetLen), new Color(4.8f, 0.6f, 2.2f, 0.85f), 5.2f);
+            DrawLine(backDir * 12.0f, backDir * (12.0f + jetLen * 0.72f), new Color(5.5f, 4.2f, 4.8f, 0.95f), 2.4f);
+            DrawLine(backDir * 14.0f + tangent * 6.0f, backDir * (12.0f + jetLen * 0.5f), new Color(3.8f, 0.4f, 1.8f, 0.65f), 1.8f);
+            DrawLine(backDir * 14.0f - tangent * 6.0f, backDir * (12.0f + jetLen * 0.5f), new Color(3.8f, 0.4f, 1.8f, 0.65f), 1.8f);
+        }
+
         // Perisai Darurat Invulnerability Flash
         if (InvulnerableTimer > 0.0f)
         {
@@ -229,4 +303,3 @@ public partial class EnemyCore : Node2D
         DrawArc(Vector2.Zero, CoreCollisionRadius, 0.0f, Mathf.Tau, 32, new Color(EnemyLineColor.R, EnemyLineColor.G, EnemyLineColor.B, 0.28f * pulse), 1.2f);
     }
 }
-

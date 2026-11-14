@@ -12,6 +12,9 @@ namespace GeometrySwarm.Core.ECS.Systems;
 /// Sistem gerak & state machine kawanan (Dioptimalkan dengan Pre-Filtered Nearby Asteroids & Zero-Interop).
 /// - Menyaring hanya asteroid yang berada di dekat Core (1x per frame) sehingga ribuan unit Swarm
 ///   tidak perlu meloop 32 asteroid atau memanggil P/Invoke C++ Godot di dalam loop utama.
+/// - Menerapkan aturan mutlak: Drone APAPUN yang dilontarkan (SwarmState.Launched) dan menabrak
+///   target apapun (Proyektil Musuh, Orbit Musuh, Core Musuh, atau Asteroid) PASTI MATI (SwarmState.Dead),
+///   dan HANYA kembali (SwarmState.Returning) apabila MISS (tidak menabrak apapun sampai durasi habis).
 /// </summary>
 public sealed class BoidSystem
 {
@@ -131,7 +134,17 @@ public sealed class BoidSystem
 
     public ReadOnlySpan<float> GetSectorThreatScores() => _sectorThreatScores;
 
-    public void Update(float delta, Vector2 anchorPos, Vector2 anchorVelocity, Vector2 enemyCorePos, Vector2 cursorThreatPos, bool isBoostActive = false)
+    public void Update(
+        float delta,
+        Vector2 anchorPos,
+        Vector2 anchorVelocity,
+        Vector2 enemyCorePos,
+        Vector2 cursorThreatPos,
+        bool isBoostActive = false,
+        bool isGigaDrillActive = false,
+        float playerCoreRadius = 26.0f,
+        float enemyCoreRadius = 42.0f,
+        Vector2 enemyCoreVelocity = default)
     {
         float dt = MathF.Min(delta, 0.033f);
         _organicWaveTime += dt;
@@ -399,6 +412,8 @@ public sealed class BoidSystem
         // 4. PROSES GERAK UNIT BERDASARKAN STATE MACHINE & KOLISI VOXEL 13 PX
         // =========================================================================
         int nearbyCount = _nearbyAsteroidCount;
+        float effectivePlayerCoreHitRadius = MathF.Max(22.0f, playerCoreRadius + 6.0f);
+        float effectiveEnemyCoreHitRadius = MathF.Max(22.0f, enemyCoreRadius);
 
         _world.Query(in _boidQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
@@ -414,16 +429,24 @@ public sealed class BoidSystem
 
                     Vector2 accel = Vector2.Zero;
                     float distError = distToEnemyCore - swarm.OrbitDistance;
-                    accel += dirToEnemyCore * (distError * OrbitSpringWeight);
+                    accel += dirToEnemyCore * (distError * OrbitSpringWeight * 1.8f);
                     Vector2 tangent = new Vector2(-dirToEnemyCore.Y, dirToEnemyCore.X);
                     accel += tangent * (swarm.OrbitSpeed * OrbitTangentialWeight);
+                    accel += enemyCoreVelocity * 1.95f;
 
+                    float maxEnemyOrbitSpd = MathF.Max(MaxOrbitSpeed, enemyCoreVelocity.Length() + 360.0f);
                     vel.Value = (vel.Value + accel * dt) * decayOrbit;
-                    if (vel.Value.LengthSquared() > MaxOrbitSpeed * MaxOrbitSpeed)
+                    if (vel.Value.LengthSquared() > maxEnemyOrbitSpd * maxEnemyOrbitSpd)
                     {
-                        vel.Value = vel.Value.Normalized() * MaxOrbitSpeed;
+                        vel.Value = vel.Value.Normalized() * maxEnemyOrbitSpd;
                     }
                     pos.Value += vel.Value * dt;
+
+                    // Jika Enemy Core sedang lari cepat (Escape Pod Eject) dan drone tertinggal > 160 px, tarik menempel!
+                    if (distToEnemyCore > swarm.OrbitDistance + 120.0f)
+                    {
+                        pos.Value = pos.Value.Lerp(enemyCorePos - dirToEnemyCore * swarm.OrbitDistance, MathF.Min(1.0f, 18.0f * dt));
+                    }
                     swarm.SpinAngle = vel.Value.Angle() + Mathf.Pi * 0.5f;
                     if (swarm.HitFlashTimer > 0.0f)
                     {
@@ -454,8 +477,7 @@ public sealed class BoidSystem
                 swarm.SpinAngle = vel.Value.Angle() + Mathf.Pi * 0.5f;
 
                 // 1. Midfield clash dengan Swarm Pemain yang Sedang Meluncur
-                // Defender di Ballistic Shield Giga Drill punya 5 HP (tidak kebal, bisa mati jika diserang terlalu banyak)
-                // Attacker biasa (Dart/Drill) yang diluncurkan langsung 1 hit hancur
+                // Defender di Ballistic Shield Giga Drill punya 5 HP, sedangkan semua drone proyektil biasa 1-hit mati
                 int launchHits = _launchedSpatialGrid.QueryNeighbors(pos.Value, 24.0f, _launchedHitBuffer);
                 if (launchHits > 0)
                 {
@@ -472,7 +494,7 @@ public sealed class BoidSystem
                                 {
                                     _launchedHitConsumed[lIdx] = true;
 
-                                    if (lSwarm.Role == SwarmRole.Guardian)
+                                    if (lSwarm.Role == SwarmRole.Guardian && isGigaDrillActive)
                                     {
                                         lSwarm.Health--;
                                         lSwarm.HitFlashTimer = 0.12f;
@@ -494,6 +516,7 @@ public sealed class BoidSystem
                                     }
                                     else
                                     {
+                                        // Drone pemain yang dilontarkan dan menabrak peluru musuh PASTI MATI
                                         lSwarm.State = SwarmState.Dead;
                                         ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: true));
                                     }
@@ -507,7 +530,6 @@ public sealed class BoidSystem
                 }
 
                 // 2. Tabrakan dengan Perisai Swarm Pengorbit Pemain (Ablative Swarm Armor)
-                // Deteksi tubrukan kontak presisi (22px) dengan knockback kinetik
                 int shieldHits = _playerOrbitShieldGrid.QueryNeighbors(pos.Value, 22.0f, _neighborBuffer);
                 if (shieldHits > 0)
                 {
@@ -574,8 +596,8 @@ public sealed class BoidSystem
                     }
                 }
 
-                // 4. Tabrakan langsung ke Core (hanya jika berhasil menembus celah swarm orbit)
-                if (distToCore < 26.0f)
+                // 4. Tabrakan langsung ke Player Core (menggunakan radius aktual Core)
+                if (distToCore <= effectivePlayerCoreHitRadius)
                 {
                     PlayerCoreHitsThisFrame++;
                     LastPlayerHitVelocity = vel.Value;
@@ -592,11 +614,15 @@ public sealed class BoidSystem
 
                 pos.Value += vel.Value * dt;
 
+                // Proyektil musuh yang menabrak batu asteroid PASTI MATI
                 for (int a = 0; a < nearbyCount; a++)
                 {
-                    if (_nearbyAsteroids[a].ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, impulseWeight: 0.0f))
+                    if (_nearbyAsteroids[a].ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, impulseWeight: 0.04f))
                     {
-                        break;
+                        _nearbyAsteroids[a].ApplyKineticHitAtWorldPos(pos.Value, 1.0f, out _, out _);
+                        ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
+                        swarm.State = SwarmState.Dead;
+                        return;
                     }
                 }
                 return;
@@ -725,10 +751,11 @@ public sealed class BoidSystem
                             accel += new Vector2(gradX, gradY) * SeparationWeight;
                         }
 
+                        float dynamicMaxOrbitSpd = MathF.Max(MaxOrbitSpeed, anchorVelocity.Length() + 320.0f);
                         vel.Value = (vel.Value + accel * dt) * decayOrbit;
-                        if (vel.Value.LengthSquared() > MaxOrbitSpeed * MaxOrbitSpeed)
+                        if (vel.Value.LengthSquared() > dynamicMaxOrbitSpd * dynamicMaxOrbitSpd)
                         {
-                            vel.Value = vel.Value.Normalized() * MaxOrbitSpeed;
+                            vel.Value = vel.Value.Normalized() * dynamicMaxOrbitSpd;
                         }
 
                         if (swarm.Role == SwarmRole.MiningDroid)
@@ -745,7 +772,7 @@ public sealed class BoidSystem
 
                 case SwarmState.ChargingDrill:
                     orbitCount++;
-                    break;
+                    return;
 
                 case SwarmState.BoostThruster:
                 case SwarmState.BoostBrake:
@@ -754,14 +781,21 @@ public sealed class BoidSystem
 
                 case SwarmState.Launched:
                     launchCount++;
+
+                    // Jika unit ini adalah bagian dari formasi Super Giga Drill yang sedang aktif,
+                    // seluruh posisi, rotasi, dan kolisi diatur oleh SwarmSimulation.UpdateActiveGigaDrill!
+                    if (isGigaDrillActive && (swarm.Role == SwarmRole.Guardian || (swarm.Role == SwarmRole.DrillDrone && swarm.FormationIndex >= 0)))
+                    {
+                        return;
+                    }
+
                     swarm.LifeTime += dt;
 
-                    // 1. Jika DartNeedle pemain ini sudah menabrak/mengorbankan diri pada musuh:
+                    // 1. Jika drone pemain yang dilontarkan ini sudah bertabrakan dengan peluru musuh -> PASTI MATI!
                     if (swarm.SpatialEntityId >= 0 && swarm.SpatialEntityId < _activeLaunchedCount && _launchedHitConsumed[swarm.SpatialEntityId])
                     {
-                        swarm.State = SwarmState.Returning;
-                        swarm.LifeTime = 0.0f;
-                        break;
+                        swarm.State = SwarmState.Dead;
+                        return;
                     }
 
                     // =================================================================
@@ -883,6 +917,7 @@ public sealed class BoidSystem
                     }
 
                     // 5. Cek tabrakan dengan Perisai Swarm Pengorbit Core Musuh (Ablative Swarm Armor Musuh)
+                    // Aturan mutlak: Drone APAPUN yang dilontarkan dan menabrak unit musuh PASTI MATI!
                     int enemyShieldHits = _enemyOrbitShieldGrid.QueryNeighbors(pos.Value, 22.0f, _neighborBuffer);
                     if (enemyShieldHits > 0)
                     {
@@ -898,35 +933,27 @@ public sealed class BoidSystem
 
                                 if (ApplyDamage(eoEnt, pos.Value, vel.Value))
                                 {
-                                    if (swarm.Role == SwarmRole.DartNeedle)
-                                    {
-                                        swarm.State = SwarmState.Returning;
-                                        swarm.LifeTime = 0.0f;
-                                    }
-                                    else
-                                    {
-                                        swarm.State = SwarmState.Dead;
-                                    }
-                                    break;
+                                    swarm.State = SwarmState.Dead;
+                                    return;
                                 }
                             }
                         }
-                        if (swarm.State == SwarmState.Returning || swarm.State == SwarmState.Dead) break;
                     }
 
-                    // 6. Cek tabrakan langsung ke Core Musuh (hanya jika berhasil menembus celah swarm orbit musuh)
+                    // 6. Cek tabrakan langsung ke Core Musuh (menggunakan radius aktual EnemyCore)
+                    // Aturan mutlak: Drone APAPUN yang menabrak Core Musuh PASTI MATI!
                     Vector2 toEnemyCore = enemyCorePos - pos.Value;
                     float distToEnemyCore = toEnemyCore.Length();
-                    if (distToEnemyCore < 36.0f)
+                    if (distToEnemyCore <= effectiveEnemyCoreHitRadius)
                     {
                         EnemyCoreHitsThisFrame++;
                         LastEnemyHitVelocity = vel.Value;
-                        swarm.State = SwarmState.Returning;
-                        swarm.LifeTime = 0.0f;
+                        swarm.State = SwarmState.Dead;
                         ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
-                        break;
+                        return;
                     }
 
+                    // 7. Hanya jika MISS (tidak menabrak apapun sampai durasi terbang habis), kembali ke Core!
                     if (swarm.LifeTime >= swarm.MaxLifeTime)
                     {
                         swarm.State = SwarmState.Returning;
@@ -993,7 +1020,7 @@ public sealed class BoidSystem
                 {
                     swarm.State = SwarmState.Returning;
                     Vector2 recallDir = diffCore / MathF.Max(0.001f, distCore);
-                    
+
                     // Kecepatan meluncur tinggi fase nano-energi langsung kembali ke Core
                     vel.Value = vel.Value.Lerp(recallDir * 1280.0f, dt * 7.5f);
                     vis.Color = new Color(2.8f, 3.6f, 4.5f, 0.96f); // Cahaya Neon Phase Return
@@ -1016,18 +1043,21 @@ public sealed class BoidSystem
                 return;
             }
 
-            // Cek kolisi terhadap asteroid terdekat + navigasi meluncur tangensial menghindari dinding
+            // Cek kolisi terhadap asteroid terdekat
             for (int a = 0; a < nearbyCount; a++)
             {
                 float impulseWeight = (swarm.State == SwarmState.Launched) ? 0.08f : 0.0f;
                 if (_nearbyAsteroids[a].ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, out Vector2 hitNormal, impulseWeight))
                 {
-                    if (swarm.State == SwarmState.Launched && swarm.Role != SwarmRole.DrillDrone)
+                    if (swarm.State == SwarmState.Launched)
                     {
-                        swarm.State = SwarmState.Returning;
-                        swarm.LifeTime = 0.0f;
+                        // Aturan mutlak: Drone APAPUN yang dilontarkan dan menabrak asteroid PASTI MATI!
+                        _nearbyAsteroids[a].ApplyKineticHitAtWorldPos(pos.Value, 1.0f, out _, out _);
+                        ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
+                        swarm.State = SwarmState.Dead;
+                        return;
                     }
-                    else if (swarm.OwnerId == 0) // Drone pemain (Orbiting atau Returning)
+                    else if (swarm.OwnerId == 0) // Drone pemain yang sedang Orbiting atau Returning
                     {
                         Vector2 toCore = anchorPos - pos.Value;
                         float distCore = toCore.Length();

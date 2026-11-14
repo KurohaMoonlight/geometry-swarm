@@ -10,10 +10,12 @@ namespace GeometrySwarm.Gameplay;
 /// - Ukuran HexRadius diperkecil menjadi 16.0 px (diameter ~28 px) sehingga mudah masuk ke dalam
 ///   terowongan yang digali oleh laser Mining Droid (terutama pada 15+ Miner / lebar >= 2 blok).
 /// - Menggunakan Zero-Lag Circle-to-Grid Voxel Collision terhadap sel 13 px Asteroid.
-/// - Mendukung Sacrificial Plasma Boost [SPACE] dengan batas kecepatan atas (BoostMaxSpeed).
+/// - Mendukung Sacrificial Plasma Boost [SPACE] serta Emergency Escape Pod Ejection berkecepatan tinggi.
 /// </summary>
 public partial class PlayerCore : CharacterBody2D
 {
+    public static PlayerCore? Instance { get; private set; }
+
     [Signal]
     public delegate void CoreDamageTakenEventHandler(float currentHealth, float maxHealth);
 
@@ -26,6 +28,7 @@ public partial class PlayerCore : CharacterBody2D
     [Export] public float Acceleration { get; set; } = 2200.0f;
     [Export] public float Friction { get; set; } = 0.91f;
     [Export] public float MaxSpeed { get; set; } = 420.0f;
+    [Export] public float EscapePodMaxSpeed { get; set; } = 660.0f;
     [Export] public float BoostMaxSpeed { get; set; } = 1050.0f;
 
     [Export] public float BaseHealthPerCell { get; set; } = 600.0f;
@@ -33,6 +36,8 @@ public partial class PlayerCore : CharacterBody2D
     public float Health { get; private set; } = 600.0f;
     public bool IsEscapePod { get; private set; } = false;
     public float InvulnerableTimer { get; private set; } = 0.0f;
+    public float EscapeBurstTimer { get; private set; } = 0.0f;
+    public Vector2 EscapeBurstDirection { get; private set; } = Vector2.Left;
     public float HitFlashTimer { get; private set; } = 0.0f;
 
     public bool IsBoosting { get; set; } = false;
@@ -42,6 +47,7 @@ public partial class PlayerCore : CharacterBody2D
 
     // Ukuran Hexagon diperkecil dari 24 px ke 16 px agar lincah bermanuver di dalam terowongan
     public const float HexRadius = 16.0f;
+    public float CoreCollisionRadius => _circleShape?.Radius ?? (HexRadius * 0.92f);
 
     private readonly HashSet<Vector2I> _occupiedAxials = new();
     private readonly List<Vector2> _hexCellOffsets = new();
@@ -133,6 +139,19 @@ public partial class PlayerCore : CharacterBody2D
             MaxDuration = 0.42f
         });
         QueueRedraw();
+    }
+
+    public override void _EnterTree()
+    {
+        Instance = this;
+    }
+
+    public override void _ExitTree()
+    {
+        if (Instance == this)
+        {
+            Instance = null;
+        }
     }
 
     public override void _Ready()
@@ -250,6 +269,7 @@ public partial class PlayerCore : CharacterBody2D
         if (IsEscapePod)
         {
             IsEscapePod = false;
+            EscapeBurstTimer = 0.0f;
         }
         Health = MathF.Min(MaxHealth, Health + BaseHealthPerCell);
         EmitSignal(SignalName.CoreDamageTaken, Health, MaxHealth);
@@ -297,9 +317,8 @@ public partial class PlayerCore : CharacterBody2D
 
     /// <summary>
     /// Protokol Penyelamatan Darurat (Escape Pod / Micro-Core Reboot):
-    /// Saat lambung kapal induk hancur, cluster sarang lebah meledak menjadi serpihan scrap,
-    /// dan satu sel inti (Micro-Core, 16px) terlontar cepat ke arah berlawanan sambil
-    /// segera memanggil 1 Emergency Mining Droid untuk memulai rekonstruksi dari nol!
+    /// Saat lambung kapal induk hancur, menyisakan 1 sel inti (Micro-Core, 16px) yang terlontar
+    /// kabur dengan sangat cepat menjauhi ancaman musuh sambil otomatis memproduksi 1 Miner!
     /// </summary>
     public void TriggerEmergencyEscape(Vector2 impactDir)
     {
@@ -322,13 +341,16 @@ public partial class PlayerCore : CharacterBody2D
         }
 
         Health = BaseHealthPerCell;
-        InvulnerableTimer = 2.5f;
+        InvulnerableTimer = 3.0f;
+        EscapeBurstTimer = 1.40f;
 
+        // Arah lontaran kabur: searah dorongan menjauh dari musuh (impactDir sudah mengarah dari musuh ke pemain)
         Vector2 escapeDir = impactDir.LengthSquared() > 0.01f
-            ? -impactDir.Normalized()
-            : new Vector2(GD.Randf() - 0.5f, GD.Randf() - 0.5f).Normalized();
+            ? impactDir.Normalized()
+            : new Vector2(-1.0f, (GD.Randf() - 0.5f)).Normalized();
 
-        Velocity = escapeDir * 720.0f;
+        EscapeBurstDirection = escapeDir;
+        Velocity = escapeDir * 1220.0f;
 
         EmitSignal(SignalName.EscapePodEjected, GlobalPosition, Velocity);
         QueueRedraw();
@@ -350,6 +372,11 @@ public partial class PlayerCore : CharacterBody2D
             if (InvulnerableTimer > 0.0f)
             {
                 InvulnerableTimer -= dt;
+                QueueRedraw();
+            }
+            if (EscapeBurstTimer > 0.0f)
+            {
+                EscapeBurstTimer -= dt;
                 QueueRedraw();
             }
             if (HitFlashTimer > 0.0f)
@@ -396,10 +423,22 @@ public partial class PlayerCore : CharacterBody2D
             if (Input.IsActionPressed("ui_down") || Input.IsKeyPressed(Key.S)) inputDir.Y += 1.0f;
             if (Input.IsActionPressed("ui_up") || Input.IsKeyPressed(Key.W)) inputDir.Y -= 1.0f;
 
+            float currentAccel = IsEscapePod ? (Acceleration * 1.45f) : Acceleration;
             if (inputDir.LengthSquared() > 0.01f)
             {
                 inputDir = inputDir.Normalized();
-                Velocity += inputDir * (Acceleration * dt);
+                Velocity += inputDir * (currentAccel * dt);
+                if (EscapeBurstTimer > 0.0f)
+                {
+                    // Pemain bisa ikut mengarahkan lontaran kabur darurat dengan tombol WASD
+                    EscapeBurstDirection = (EscapeBurstDirection + inputDir * 0.65f).Normalized();
+                }
+            }
+
+            // Dorongan roket darurat saat baru saja Eject sebagai Escape Pod (Lari Cepat!)
+            if (IsEscapePod && EscapeBurstTimer > 0.0f)
+            {
+                Velocity += EscapeBurstDirection * (1850.0f * dt);
             }
 
             // Dorongan Plasma Boost dari Dart [SPACE]
@@ -415,21 +454,26 @@ public partial class PlayerCore : CharacterBody2D
                 Velocity *= MathF.Pow(0.85f, dt * 60.0f);
             }
 
-            Velocity *= MathF.Pow(Friction, dt * 60.0f);
+            float activeFriction = (IsEscapePod && EscapeBurstTimer > 0.0f) ? 0.985f : Friction;
+            Velocity *= MathF.Pow(activeFriction, dt * 60.0f);
 
-            float activeMaxSpeed = IsBoosting ? BoostMaxSpeed : MaxSpeed;
+            float baseMaxSpd = IsEscapePod ? EscapePodMaxSpeed : MaxSpeed;
+            float activeMaxSpeed = (IsEscapePod && EscapeBurstTimer > 0.0f)
+                ? 1220.0f
+                : (IsBoosting ? BoostMaxSpeed : baseMaxSpd);
+
             float speedSq = Velocity.LengthSquared();
             if (speedSq > activeMaxSpeed * activeMaxSpeed)
             {
-                if (IsBoosting)
+                if (IsBoosting || (IsEscapePod && EscapeBurstTimer > 0.0f))
                 {
                     Velocity = Velocity.Normalized() * activeMaxSpeed;
                 }
                 else
                 {
-                    // Peredaman aerodinamis halus kembali ke MaxSpeed setelah lepas tombol Space
+                    // Peredaman aerodinamis halus kembali ke kecepatan normal setelah fase burst/boost selesai
                     float curSpeed = MathF.Sqrt(speedSq);
-                    float dampedSpeed = Mathf.Lerp(curSpeed, MaxSpeed, MathF.Min(1.0f, 8.5f * dt));
+                    float dampedSpeed = Mathf.Lerp(curSpeed, baseMaxSpd, MathF.Min(1.0f, 6.5f * dt));
                     Velocity = (Velocity / curSpeed) * dampedSpeed;
                 }
             }
@@ -493,6 +537,18 @@ public partial class PlayerCore : CharacterBody2D
             bool isHit = HitFlashTimer > 0.0f;
             Color activeLineColor = isHit ? new Color(4.8f, 4.8f, 4.2f, 1.0f) : CoreLineColor;
             Color activeAuraColor = isHit ? new Color(3.5f, 3.5f, 2.5f, 0.85f) : CoreAuraColor;
+
+            // Ekor Thruster Darurat saat Escape Pod melesat kabur cepat
+            if (IsEscapePod && Velocity.LengthSquared() > 2500.0f)
+            {
+                Vector2 localBack = (-Velocity.Normalized()).Rotated(-Rotation);
+                Vector2 localTan = new Vector2(-localBack.Y, localBack.X);
+                float jetLen = Mathf.Clamp(Velocity.Length() * 0.085f, 22.0f, 95.0f);
+                DrawLine(localBack * 12.0f, localBack * (12.0f + jetLen), new Color(1.2f, 3.8f, 4.8f, 0.85f), 5.0f);
+                DrawLine(localBack * 12.0f, localBack * (12.0f + jetLen * 0.72f), new Color(4.8f, 5.2f, 5.8f, 0.95f), 2.4f);
+                DrawLine(localBack * 14.0f + localTan * 5.5f, localBack * (12.0f + jetLen * 0.5f), new Color(3.8f, 2.6f, 0.8f, 0.70f), 1.8f);
+                DrawLine(localBack * 14.0f - localTan * 5.5f, localBack * (12.0f + jetLen * 0.5f), new Color(3.8f, 2.6f, 0.8f, 0.70f), 1.8f);
+            }
 
             // 1. Gambar semua sel hexagon aktif yang sudah mengkristal permanen
             for (int i = 0; i < _hexCellOffsets.Count; i++)

@@ -242,6 +242,52 @@ func apply_radial_impulse(world_pos: Vector2, strength: float, radius: float) ->
 				velocities[idx] += dir * (strength * smooth_f)
 				rift_heat[idx] = clampf(rift_heat[idx] + smooth_f * 0.75, 0.0, 2.0)
 
+## Efek Ledakan Supernova Spektakuler pada Grid saat Giga Drill Meledak di Permukaan Core!
+## Menciptakan robekan ruang-waktu (grid rupture + electric arcs) di pusat ledakan
+## serta gelombang kejut cincin ganda yang merentangkan jaring-jaring grid secara dramatis.
+func apply_supernova_core_detonation(tip_pos: Vector2, base_pos: Vector2, sacrificed_count: int) -> void:
+	if total_points == 0:
+		return
+		
+	var scale_mult: float = clampf(float(sacrificed_count) / 20.0, 0.85, 2.0)
+	var outer_radius: float = 420.0 * clampf(scale_mult, 0.9, 1.35)
+	var inner_rupture_radius: float = 210.0 * clampf(scale_mult, 0.9, 1.25)
+	var r2: float = outer_radius * outer_radius
+	
+	var bounds: Rect2i = _get_grid_bounds(tip_pos, outer_radius + 45.0)
+	_mark_active_bounds(bounds)
+	
+	var drill_dir: Vector2 = (tip_pos - base_pos).normalized() if tip_pos.distance_squared_to(base_pos) > 1.0 else Vector2.RIGHT
+	
+	for r in range(bounds.position.y, bounds.end.y):
+		var row_offset: int = r * cols
+		for c in range(bounds.position.x, bounds.end.x):
+			var idx: int = row_offset + c
+			var diff: Vector2 = positions[idx] - tip_pos
+			var dist2: float = diff.length_squared()
+			if dist2 < r2 and dist2 > 0.001:
+				var dist: float = sqrt(dist2)
+				var radial_dir: Vector2 = diff / dist
+				var tangent_dir: Vector2 = Vector2(-radial_dir.y, radial_dir.x)
+				var falloff: float = 1.0 - (dist / outer_radius)
+				var smooth_f: float = falloff * falloff * (3.0 - 2.0 * falloff)
+				
+				# Gelombang kejut cincin ganda + puntiran vorteks supernova
+				var ring_wave: float = 1.0 + 0.55 * sin((dist / outer_radius) * TAU * 2.0)
+				var blast_strength: float = (3400.0 * smooth_f * ring_wave) * scale_mult
+				var swirl_strength: float = (950.0 * smooth_f) * (1.0 if radial_dir.dot(drill_dir) >= 0.0 else -1.0)
+				
+				velocities[idx] += radial_dir * blast_strength + tangent_dir * swirl_strength
+				
+				# Di zona inti (< inner_rupture_radius), paksa regangan posisi langsung & rift_heat = 2.0
+				# agar jaring grid langsung robek (ruptured) dan memancarkan petir sian-emas!
+				if dist < inner_rupture_radius:
+					var inner_f: float = 1.0 - (dist / inner_rupture_radius)
+					positions[idx] += radial_dir * (cell_size * 0.95 * inner_f)
+					rift_heat[idx] = 2.0
+				else:
+					rift_heat[idx] = clampf(rift_heat[idx] + smooth_f * 1.85, 0.0, 2.0)
+
 ## Efek Megah Gelombang Kejut Kubah Parabola (Bow Shock) + Hisapan Venturi + Semburan Plasma Jet
 func apply_boost_jet_impulse(
 	nozzle_pos: Vector2,

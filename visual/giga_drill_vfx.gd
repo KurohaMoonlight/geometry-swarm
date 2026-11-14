@@ -7,7 +7,7 @@ extends Node2D
 ## 2. Efek Charging Spektakuler: Accretion vortex, branching lightning, tip solar corona
 ## 3. Efek Trail & Ion Beam Berskala: Panjang, ketebalan, shock diamond & pita plasma
 ##    skala otomatis membesar secara megah sesuai jumlah swarm yang terlibat!
-## 4. Efek Supersonic Bow Shock & Supernova Detonation saat pengorbanan swarm
+## 4. Efek Core-Ramming Overdrive & Supernova Detonation Spektakuler (maupun ledakan kawah kecil di asteroid)
 
 var swarm_sim: Node2D = null
 var player_core: Node2D = null
@@ -23,6 +23,9 @@ var detonation_rings: Array[Dictionary] = []
 # Riwayat pemecahan perisai hidung (Nose Cone AP Breach)
 var breach_rings: Array[Dictionary] = []
 var breach_shards: Array[Dictionary] = []
+
+# Flash inti supernova saat meledak di Core
+var supernova_flashes: Array[Dictionary] = []
 
 func _ready() -> void:
 	z_index = 6 # Tepat di atas MultiMesh swarm agar kilau HDR ion beam menyatu
@@ -47,10 +50,11 @@ func _process(delta: float) -> void:
 	# Update cincin kejut ledakan
 	_update_detonations(delta)
 	
-	# Update pecahan perisai AP
+	# Update pecahan perisai AP & flash supernova
 	_update_breach_fx(delta)
+	_update_supernova_flashes(delta)
 	
-	if is_charging or is_active or ion_particles.size() > 0 or detonation_rings.size() > 0 or breach_rings.size() > 0 or breach_shards.size() > 0:
+	if is_charging or is_active or ion_particles.size() > 0 or detonation_rings.size() > 0 or breach_rings.size() > 0 or breach_shards.size() > 0 or supernova_flashes.size() > 0:
 		queue_redraw()
 
 func trigger_launch_shake() -> void:
@@ -94,35 +98,139 @@ func trigger_nose_breach(breach_pos: Vector2, aim_dir: Vector2, count: int) -> v
 			"color": Color(2.8, 5.5, 7.0, 1.0) if randf() > 0.35 else Color(5.5, 5.5, 6.5, 1.0)
 		})
 
-func trigger_detonation(_tip_pos: Vector2, base_pos: Vector2, _count: int) -> void:
-	if arena and arena.has_method("trigger_shake"):
-		arena.trigger_shake(14.0)
+func trigger_detonation(tip_pos: Vector2, base_pos: Vector2, count: int) -> void:
+	# Kasus 1: Ledakan Kecil Pembuat Lubang saat Driller Habis Menggerus Asteroid (count < 0)
+	if count < 0:
+		if arena and arena.has_method("trigger_shake"):
+			arena.trigger_shake(8.0)
+		detonation_rings.append({
+			"pos": tip_pos,
+			"radius": 8.0,
+			"max_radius": 125.0,
+			"speed": 520.0,
+			"color": Color(4.8, 3.2, 1.1, 1.0),
+			"alpha": 1.0
+		})
+		detonation_rings.append({
+			"pos": tip_pos,
+			"radius": 3.0,
+			"max_radius": 85.0,
+			"speed": 380.0,
+			"color": Color(5.5, 5.0, 2.8, 1.0),
+			"alpha": 1.0
+		})
+		for _i in range(18):
+			var ang: float = randf() * TAU
+			var dir: Vector2 = Vector2(cos(ang), sin(ang))
+			var spd: float = randf_range(320.0, 820.0)
+			breach_shards.append({
+				"pos": tip_pos + dir * randf_range(2.0, 10.0),
+				"vel": dir * spd,
+				"len": randf_range(7.0, 16.0),
+				"life": randf_range(0.16, 0.30),
+				"max_life": 0.30,
+				"color": Color(4.8, 3.2, 1.1, 1.0) if randf() > 0.4 else Color(5.5, 5.2, 3.5, 1.0)
+			})
+		return
+
+	# Kasus 2: Ledakan Spektakuler Supernova saat Menghantam Core (count > 0)
+	if count > 0:
+		if arena and arena.has_method("trigger_shake"):
+			arena.trigger_shake(22.0)
+			
+		var scale_f: float = clampf(float(count) / 18.0, 1.0, 1.65)
 		
-	# 3 cincin ledakan bertingkat membesar sesuai kekuatan serangan
+		# Flash Bola Inti Supernova & Petir Radial
+		supernova_flashes.append({
+			"pos": tip_pos,
+			"radius": 42.0 * scale_f,
+			"max_radius": 240.0 * scale_f,
+			"life": 0.42,
+			"max_life": 0.42
+		})
+		
+		# 5 cincin gelombang kejut supernova bertingkat berpusat tepat di titik tumbukan Core!
+		detonation_rings.append({
+			"pos": tip_pos,
+			"radius": 18.0,
+			"max_radius": 420.0 * scale_f,
+			"speed": 1050.0,
+			"color": Color(5.8, 5.6, 4.2, 1.0),
+			"alpha": 1.0
+		})
+		detonation_rings.append({
+			"pos": tip_pos,
+			"radius": 12.0,
+			"max_radius": 340.0 * scale_f,
+			"speed": 820.0,
+			"color": Color(5.5, 3.8, 1.2, 1.0),
+			"alpha": 1.0
+		})
+		detonation_rings.append({
+			"pos": tip_pos,
+			"radius": 6.0,
+			"max_radius": 270.0 * scale_f,
+			"speed": 640.0,
+			"color": Color(2.6, 5.2, 6.8, 1.0),
+			"alpha": 1.0
+		})
+		detonation_rings.append({
+			"pos": tip_pos,
+			"radius": 2.0,
+			"max_radius": 195.0 * scale_f,
+			"speed": 460.0,
+			"color": Color(4.8, 1.2, 5.8, 1.0),
+			"alpha": 1.0
+		})
+		detonation_rings.append({
+			"pos": base_pos,
+			"radius": 8.0,
+			"max_radius": 220.0,
+			"speed": 580.0,
+			"color": Color(5.2, 2.6, 1.0, 1.0),
+			"alpha": 1.0
+		})
+		
+		# 56 Lontaran Pecahan Plasma Supernova 360 Derajat Berkecepatan Tinggi
+		for _i in range(56):
+			var ang: float = randf() * TAU
+			var dir: Vector2 = Vector2(cos(ang), sin(ang))
+			var spd: float = randf_range(550.0, 1850.0)
+			var roll: float = randf()
+			var s_col: Color = Color(5.8, 5.2, 2.5, 1.0) if roll < 0.4 else (Color(2.6, 5.2, 6.8, 1.0) if roll < 0.75 else Color(5.2, 1.4, 4.8, 1.0))
+			breach_shards.append({
+				"pos": tip_pos + dir * randf_range(4.0, 24.0),
+				"vel": dir * spd,
+				"len": randf_range(14.0, 36.0),
+				"life": randf_range(0.28, 0.58),
+				"max_life": 0.58,
+				"color": s_col
+			})
+		return
+
+	# Kasus 3: Habis Terbakar di Ruang Hampa (count == 0)
+	if arena and arena.has_method("trigger_shake"):
+		arena.trigger_shake(10.0)
 	detonation_rings.append({
-		"pos": base_pos,
-		"radius": 15.0,
-		"max_radius": 280.0,
-		"speed": 660.0,
-		"color": Color(5.5, 4.2, 1.5, 1.0),
+		"pos": tip_pos,
+		"radius": 10.0,
+		"max_radius": 180.0,
+		"speed": 520.0,
+		"color": Color(4.5, 3.2, 1.5, 1.0),
 		"alpha": 1.0
 	})
-	detonation_rings.append({
-		"pos": base_pos,
-		"radius": 5.0,
-		"max_radius": 220.0,
-		"speed": 480.0,
-		"color": Color(2.6, 5.0, 6.5, 1.0),
-		"alpha": 1.0
-	})
-	detonation_rings.append({
-		"pos": base_pos,
-		"radius": 0.0,
-		"max_radius": 140.0,
-		"speed": 340.0,
-		"color": Color(4.0, 1.2, 5.5, 1.0),
-		"alpha": 1.0
-	})
+
+func _update_supernova_flashes(delta: float) -> void:
+	var to_remove: Array[int] = []
+	for i in range(supernova_flashes.size()):
+		var fl = supernova_flashes[i]
+		fl["life"] -= delta
+		var p: float = 1.0 - clampf(fl["life"] / fl["max_life"], 0.0, 1.0)
+		fl["radius"] = lerpf(36.0, fl["max_radius"], pow(p, 0.6))
+		if fl["life"] <= 0.0:
+			to_remove.append(i)
+	for i in range(to_remove.size() - 1, -1, -1):
+		supernova_flashes.remove_at(to_remove[i])
 
 func _update_breach_fx(delta: float) -> void:
 	var to_remove_rings: Array[int] = []
@@ -376,10 +484,11 @@ func _draw() -> void:
 			draw_polyline(ribbon_pts, strand_col, 1.8, true)
 
 	# =========================================================================
-	# 3. EFEK SUPERSONIC BOW SHOCK BERTINGKAT SAAT MELUNCUR
+	# 3. EFEK SUPERSONIC BOW SHOCK & CORE-RAMMING OVERDRIVE SAAT MELUNCUR
 	# =========================================================================
 	if is_active:
 		var has_breached: bool = swarm_sim.get("HasDefenderNoseBreached") == true
+		var is_ramming_core: bool = swarm_sim.get("IsRammingEnemyCore") == true
 		var nose_len: float = float(swarm_sim.get("GigaDrillNoseLength"))
 		var active_apex: Vector2 = (tip_pos + aim_dir * nose_len) if (not has_breached and nose_len > 0.0) else tip_pos
 
@@ -395,6 +504,17 @@ func _draw() -> void:
 			var col: Color = Color(2.8, 5.5, 7.0, alpha) if (not has_breached) else Color(5.5, 4.8, 2.5, alpha)
 			draw_line(shock_pts[0], shock_pts[1], col, 2.2 - b * 0.5, true)
 			draw_line(shock_pts[0], shock_pts[2], col, 2.2 - b * 0.5, true)
+
+		# Jika sedang menempel & menggerus permukaan Core (0.5s Overdrive sebelum meledak),
+		# gambar cincin kompresi plasma & petir liar di titik kontak Core!
+		if is_ramming_core:
+			var pulse_r: float = 18.0 + 12.0 * absf(sin(spin_time * 3.5))
+			draw_circle(tip_pos, pulse_r * 0.65, Color(5.8, 5.2, 2.4, 0.85))
+			draw_arc(tip_pos, pulse_r * 1.35, 0, TAU, 24, Color(5.5, 3.2, 1.2, 0.92), 2.6, true)
+			for a in range(5):
+				var ang: float = spin_time * 2.2 + a * (TAU / 5.0)
+				var arc_end: Vector2 = tip_pos + Vector2(cos(ang), sin(ang)) * randf_range(28.0, 58.0)
+				_draw_electric_arc(tip_pos, arc_end, 4, 10.0, Color(5.8, 4.8, 1.8, 0.95), 1.8)
 
 		# Jika perisai hidung belum pecah, gambar rusuk kerucut kedua
 		if not has_breached and nose_len > 0.0:
@@ -414,20 +534,31 @@ func _draw() -> void:
 		draw_line(p["pos"], end_pt, col, 1.8, true)
 
 	# =========================================================================
-	# 5. CINCIN KEJUT SUPERNOVA DETONATION (SAAT SACRIFICE EXHAUST)
+	# 5. FLASH BOLA INTI SUPERNOVA & CINCIN KEJUT DETONATION
 	# =========================================================================
+	for fl in supernova_flashes:
+		var a: float = clampf(fl["life"] / fl["max_life"], 0.0, 1.0)
+		var pos_fl: Vector2 = fl["pos"]
+		var rad_fl: float = fl["radius"]
+		draw_circle(pos_fl, rad_fl * 0.55, Color(5.8, 5.6, 4.2, a * 0.85))
+		draw_arc(pos_fl, rad_fl, 0, TAU, 36, Color(2.8, 5.2, 6.8, a * 0.95), 4.2 * a, true)
+		for l in range(8):
+			var l_ang: float = l * (TAU / 8.0) + a * 3.5
+			var l_end: Vector2 = pos_fl + Vector2(cos(l_ang), sin(l_ang)) * (rad_fl * 1.15)
+			_draw_electric_arc(pos_fl, l_end, 5, 14.0 * a, Color(5.8, 4.8, 2.2, a), 1.8)
+
 	for ring in detonation_rings:
 		var c: Color = ring["color"]
 		c.a = ring["alpha"]
 		draw_arc(ring["pos"], ring["radius"], 0, TAU, 36, c, 3.4, true)
-		var ray_count: int = 14
+		var ray_count: int = 16
 		for r in range(ray_count):
 			var ang: float = r * TAU / ray_count
 			var r_dir: Vector2 = Vector2(cos(ang), sin(ang))
-			draw_line(ring["pos"] + r_dir * (ring["radius"] * 0.65), ring["pos"] + r_dir * ring["radius"], c, 2.0, true)
+			draw_line(ring["pos"] + r_dir * (ring["radius"] * 0.68), ring["pos"] + r_dir * ring["radius"], c, 2.0, true)
 
 	# =========================================================================
-	# 6. EFEK PECAHAN PERISAI AP (NOSE SHIELD BREACH FX)
+	# 6. EFEK PECAHAN PERISAI AP & SHRAPNEL SUPERNOVA
 	# =========================================================================
 	for ring in breach_rings:
 		var c: Color = ring["color"]
