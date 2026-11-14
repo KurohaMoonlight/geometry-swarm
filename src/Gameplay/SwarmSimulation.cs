@@ -243,12 +243,14 @@ public partial class SwarmSimulation : Node2D
     {
         public Vector2 Center;
         public float Radius;
+        public float StartRadius;
         public float MaxRadius;
         public float Life;
         public float MaxLife;
         public Color Color1;
         public Color Color2;
         public bool IsEnergy;
+        public bool IsInward;
     }
     private readonly List<AsteroidShockwaveRing> _asteroidShockwaves = new();
 
@@ -4226,7 +4228,10 @@ public partial class SwarmSimulation : Node2D
             var sw = _asteroidShockwaves[i];
             sw.Life -= dt;
             float progress = 1.0f - Mathf.Clamp(sw.Life / sw.MaxLife, 0.0f, 1.0f);
-            sw.Radius = Mathf.Lerp(12.0f, sw.MaxRadius, MathF.Sqrt(progress));
+            float startR = sw.StartRadius > 0.0f ? sw.StartRadius : 12.0f;
+            sw.Radius = sw.IsInward
+                ? Mathf.Lerp(startR, sw.MaxRadius, progress * progress)
+                : Mathf.Lerp(startR, sw.MaxRadius, MathF.Sqrt(progress));
             if (sw.Life <= 0.0f)
             {
                 _asteroidShockwaves.RemoveAt(i);
@@ -4368,9 +4373,14 @@ public partial class SwarmSimulation : Node2D
             // D. GELOMBANG KEJUT ROBEKAN GRID LATAR BELAKANG (SUPERNOVA GRID RUPTURE)
             EmitSignal(SignalName.SwarmClashImpulse, position, 3800.0f, 750.0f);
         }
+        else
+        {
+            // Gelombang kejut runtuhnya cangkang asteroid batu saat 100% mineral tuntas dipanen
+            EmitSignal(SignalName.SwarmClashImpulse, position, 1950.0f, 410.0f);
+        }
 
         // 2. Serpihan bongkahan asteroid terbang berputar 360 derajat (Destruction Shards)
-        int shardCount = isEnergy ? GD.RandRange(26, 36) : GD.RandRange(18, 24);
+        int shardCount = isEnergy ? GD.RandRange(28, 38) : GD.RandRange(26, 36);
         for (int i = 0; i < shardCount; i++)
         {
             float angle = (float)i / shardCount * Mathf.Tau + (GD.Randf() - 0.5f) * 0.45f;
@@ -4430,6 +4440,70 @@ public partial class SwarmSimulation : Node2D
             });
         }
 
+        QueueRedraw();
+    }
+
+    public void TriggerAetherStarRebirthFx(Vector2 position, float asteroidRadius)
+    {
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = position,
+            Radius = 12.0f,
+            StartRadius = 12.0f,
+            MaxRadius = asteroidRadius * 4.2f,
+            Life = 0.78f,
+            MaxLife = 0.78f,
+            Color1 = new Color(3.8f, 3.2f, 1.25f, 0.96f),
+            Color2 = new Color(0.45f, 2.55f, 3.85f, 0.90f),
+            IsEnergy = true,
+            IsInward = false
+        });
+
+        EmitSignal(SignalName.SwarmClashImpulse, position, 2650.0f, 540.0f);
+        QueueRedraw();
+    }
+
+    public void TriggerAetherSeedCompressFx(Vector2 position)
+    {
+        // 1. Cincin gelombang ruang-waktu menyusut kuat ke dalam titik tunggal (Ruang terkompress sangat gila)
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = position,
+            Radius = 340.0f,
+            StartRadius = 340.0f,
+            MaxRadius = 6.0f,
+            Life = 0.35f,
+            MaxLife = 0.35f,
+            Color1 = new Color(0.45f, 2.85f, 4.2f, 0.96f),
+            Color2 = new Color(3.8f, 3.2f, 1.25f, 0.92f),
+            IsEnergy = true,
+            IsInward = true
+        });
+
+        // Impuls negatif super kuat: menyedot simpul grid latar belakang melesak ke titik tengah seed
+        EmitSignal(SignalName.SwarmClashImpulse, position, -3400.0f, 560.0f);
+        QueueRedraw();
+    }
+
+    public void TriggerAetherSeedExpandFx(Vector2 position)
+    {
+        // 2. Gelombang kejut ruang melebar hebat saat seed muncul kembali dari sub-space
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = position,
+            Radius = 14.0f,
+            StartRadius = 14.0f,
+            MaxRadius = 480.0f,
+            Life = 0.52f,
+            MaxLife = 0.52f,
+            Color1 = new Color(3.8f, 3.2f, 1.25f, 0.98f),
+            Color2 = new Color(0.45f, 2.55f, 3.85f, 0.92f),
+            IsEnergy = true,
+            IsInward = false
+        });
+
+        // Impuls positif dahsyat: meledakkan grid latar belakang melebar keluar secara spektakuler
+        EmitSignal(SignalName.SwarmClashImpulse, position, 3800.0f, 640.0f);
         QueueRedraw();
     }
 
@@ -4599,37 +4673,48 @@ public partial class SwarmSimulation : Node2D
 
                 if (_laserActiveHitBoxes.Count > 0)
                 {
-                    Color hotOrange = new Color(2.8f, 0.95f, 0.15f, 0.90f);
-                    Color yellowIncandescent = new Color(4.8f, 4.3f, 1.35f, 1.0f);
-
-                    for (int i = 0; i < _laserActiveHitBoxes.Count; i++)
+                    if (_isMiningEnergyAsteroid)
                     {
-                        var box = _laserActiveHitBoxes[i];
-                        float h = Mathf.Clamp(box.heat, 0.0f, 1.0f);
-                        Color impactColor = hotOrange.Lerp(yellowIncandescent, h);
-
-                        DrawSetTransform(box.worldCenter, _laserHitAsteroidRotation, Vector2.One);
-                        Rect2 targetBox = new Rect2(
-                            new Vector2(-Asteroid.VoxelSize * 0.5f, -Asteroid.VoxelSize * 0.5f),
-                            new Vector2(Asteroid.VoxelSize, Asteroid.VoxelSize)
-                        );
-                        DrawRect(targetBox, new Color(impactColor.R, impactColor.G, impactColor.B, 0.25f + h * 0.55f), true);
-
-                        if (Asteroid.TryGetResourceType(box.type, out ResourceType rType))
-                        {
-                            Color resNeon = Asteroid.GetResourceColor(rType) * 1.7f;
-                            resNeon.A = 1.0f;
-                            DrawRect(targetBox.Grow(1.2f), resNeon, false, 2.2f);
-                        }
-                        else
-                        {
-                            DrawRect(targetBox, impactColor, false, 1.5f);
-                        }
+                        // Untuk Bintang Aether: Efek kontak plasma berupa pendaran sirkular fusi tinggi (bebas garis kotak!)
+                        float flareR = 5.0f + _currentLaserBlockSpan * 2.2f;
+                        Color flareAether = new Color(4.2f, 3.6f, 1.35f, 0.95f);
+                        DrawCircle(_laserImpactPoint, flareR * 1.5f, new Color(0.45f, 2.5f, 3.8f, 0.45f));
+                        DrawCircle(_laserImpactPoint, flareR, flareAether);
                     }
-                    DrawSetTransform(Vector2.Zero, 0.0f, Vector2.One);
+                    else
+                    {
+                        Color hotOrange = new Color(2.8f, 0.95f, 0.15f, 0.90f);
+                        Color yellowIncandescent = new Color(4.8f, 4.3f, 1.35f, 1.0f);
 
-                    float spotRadius = 2.4f + _currentLaserBlockSpan * 1.4f;
-                    DrawCircle(_laserImpactPoint, spotRadius, yellowIncandescent);
+                        for (int i = 0; i < _laserActiveHitBoxes.Count; i++)
+                        {
+                            var box = _laserActiveHitBoxes[i];
+                            float h = Mathf.Clamp(box.heat, 0.0f, 1.0f);
+                            Color impactColor = hotOrange.Lerp(yellowIncandescent, h);
+
+                            DrawSetTransform(box.worldCenter, _laserHitAsteroidRotation, Vector2.One);
+                            Rect2 targetBox = new Rect2(
+                                new Vector2(-Asteroid.VoxelSize * 0.5f, -Asteroid.VoxelSize * 0.5f),
+                                new Vector2(Asteroid.VoxelSize, Asteroid.VoxelSize)
+                            );
+                            DrawRect(targetBox, new Color(impactColor.R, impactColor.G, impactColor.B, 0.25f + h * 0.55f), true);
+
+                            if (Asteroid.TryGetResourceType(box.type, out ResourceType rType))
+                            {
+                                Color resNeon = Asteroid.GetResourceColor(rType) * 1.7f;
+                                resNeon.A = 1.0f;
+                                DrawRect(targetBox.Grow(1.2f), resNeon, false, 2.2f);
+                            }
+                            else
+                            {
+                                DrawRect(targetBox, impactColor, false, 1.5f);
+                            }
+                        }
+                        DrawSetTransform(Vector2.Zero, 0.0f, Vector2.One);
+
+                        float spotRadius = 2.4f + _currentLaserBlockSpan * 1.4f;
+                        DrawCircle(_laserImpactPoint, spotRadius, yellowIncandescent);
+                    }
                 }
                 else
                 {

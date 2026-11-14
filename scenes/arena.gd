@@ -6,11 +6,11 @@ const GridRendererClass = preload("res://visual/grid_renderer.gd")
 const GigaDrillVFXClass = preload("res://visual/giga_drill_vfx.gd")
 
 ## Arena Controller (Dioptimalkan untuk 60+ FPS Stabil)
-## - Grid belakang di-snap ke koordinat dunia (kelipatan cell_size) sehingga TIDAK ikut bergeser
-##   saat kapal bergerak.
-## - Di belakang grid terdapat 3 lapis partikel bintang parallax yang sangat ringan.
-## - Mendukung efek riak & gelombang kejut grid megah saat Sacrificial Dart Boost [SPACE] aktif,
-##   serta efek robekan ruang-waktu (Supernova Grid Rupture) saat Giga Drill meledak di Core.
+## - Grid belakang menggunakan palet Soft Luminous Neon yang di-snap ke koordinat dunia.
+## - Di belakang grid terdapat 3 lapis partikel bintang parallax yang ikut terdistorsi gravitasi
+##   secara Optik (Einstein Starlight Deflection) dan secara Fisik (Spacetime Infall).
+## - Menghubungkan sumur gravitasi Bintang Mini & Aether Seed (Spacetime Infall) secara fisik
+##   ke GridPhysics sehingga jaring ruang-waktu menekuk, memilin, dan melengkung tajam ke pusat massa.
 
 @onready var grid_renderer: GridRendererClass = $GridRenderer
 @onready var world_env: WorldEnvironment = $WorldEnvironment
@@ -39,7 +39,7 @@ func _ready() -> void:
 	if swarm_sim:
 		player_core = swarm_sim.get_node_or_null("PlayerCore")
 		if player_core:
-			player_core.global_position = Vector2.ZERO
+			player_core.global_position = Vector2(1100.0, 0.0)
 			
 		giga_vfx = GigaDrillVFXClass.new()
 		add_child(giga_vfx)
@@ -101,7 +101,6 @@ func _on_giga_drill_nose_breached(breach_pos: Vector2, aim_dir: Vector2, count: 
 
 func _on_boost_dart_sacrificed(nozzle_pos: Vector2, aim_dir: Vector2, power_ratio: float) -> void:
 	if grid_physics:
-		# Hentakan ledakan pengorbanan Dart di ruang bakar nozzle + gelombang kejut ke belakang
 		grid_physics.apply_radial_impulse(nozzle_pos, 920.0 + 780.0 * power_ratio, 215.0)
 		grid_physics.apply_radial_impulse(nozzle_pos - aim_dir * 75.0, 680.0 * power_ratio, 170.0)
 	trigger_shake(2.2 + 3.2 * power_ratio)
@@ -109,15 +108,19 @@ func _on_boost_dart_sacrificed(nozzle_pos: Vector2, aim_dir: Vector2, power_rati
 func _on_swarm_clash_impulse(pos: Vector2, power: float, radius: float) -> void:
 	if grid_physics:
 		grid_physics.apply_radial_impulse(pos, power, radius)
+	if absf(power) >= 2500.0:
+		trigger_shake(clampf(absf(power) * 0.0032, 3.5, 15.0))
 
 func _on_cosmic_rift_infall(rift_pos: Vector2, power: float, radius: float) -> void:
 	if grid_physics:
 		grid_physics.apply_radial_impulse(rift_pos, -power, radius)
+	var shake_val: float = clampf(power * 0.0035, 1.2, 11.0)
+	trigger_shake(shake_val)
 
 func _on_cosmic_rift_erupted(rift_pos: Vector2, power: float, radius: float) -> void:
 	if grid_physics:
 		grid_physics.apply_radial_impulse(rift_pos, power, radius)
-	trigger_shake(8.5)
+	trigger_shake(12.0)
 
 func _process(delta: float) -> void:
 	if screen_shake_intensity > 0.05:
@@ -135,6 +138,45 @@ func _process(delta: float) -> void:
 			grid_dirty = true
 		if grid_renderer.update_view(player_core.global_position, delta):
 			grid_dirty = true
+
+	# 0.5. Sinkronisasi Sumur Gravitasi Bintang Mini & Aether Seed (Spacetime Infall) ke Grid & Parallax Starfield
+	if asteroid_field:
+		var g_pos_raw = asteroid_field.get("GravityWellPositions")
+		var g_rad_raw = asteroid_field.get("GravityWellRadii")
+		var g_str_raw = asteroid_field.get("GravityWellStrengths")
+		var g_inf_raw = asteroid_field.get("GravityWellInfallRatios")
+		var g_pull_raw = asteroid_field.get("GravityWellPullAccels")
+		var g_swirl_raw = asteroid_field.get("GravityWellSwirlAccels")
+		var g_heat_raw = asteroid_field.get("GravityWellHeatRates")
+		
+		if g_pos_raw != null and g_rad_raw != null and g_str_raw != null and g_inf_raw != null:
+			var g_positions: PackedVector2Array = g_pos_raw
+			var g_radii: PackedFloat32Array = g_rad_raw
+			var g_strengths: PackedFloat32Array = g_str_raw
+			var g_infalls: PackedFloat32Array = g_inf_raw
+			
+			if grid_renderer.update_gravity_sources(g_positions, g_radii, g_strengths, g_infalls):
+				grid_dirty = true
+				
+			if g_pull_raw != null and g_swirl_raw != null and g_heat_raw != null:
+				var g_pulls: PackedFloat32Array = g_pull_raw
+				var g_swirls: PackedFloat32Array = g_swirl_raw
+				var g_heats: PackedFloat32Array = g_heat_raw
+				var count: int = mini(g_positions.size(), mini(g_radii.size(), g_pulls.size()))
+				var cam_center: Vector2 = player_core.global_position if player_core else Vector2.ZERO
+				var max_active_dist_sq: float = 2800.0 * 2800.0
+				
+				for i in range(count):
+					var well_pos: Vector2 = g_positions[i]
+					if well_pos.distance_squared_to(cam_center) <= max_active_dist_sq:
+						grid_physics.apply_gravity_well_pull(
+							well_pos,
+							g_pulls[i],
+							g_radii[i] * 0.88,
+							g_swirls[i],
+							g_heats[i],
+							delta
+						)
 
 	# 1. Gerakan Kapal Induk: Grid belakang bergetar tipis tepat di bawah Core
 	if player_core and "velocity" in player_core:

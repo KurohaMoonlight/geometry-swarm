@@ -64,13 +64,29 @@ Peta kosmik seluas $12.000 \times 12.000\text{ px}$ dibagi ke dalam 3 Sabuk Aste
 * **Mekanik Penambangan, Siphoning, & Supernova Overload**:
   1. **Aliran Plasma Siphoning (*Helical Plasma Siphon Stream*)**:
      * Saat Mining Laser mengenai bintang, muncul **pilinan pita plasma heliks ganda** dan partikel energi putih-emas/sian yang mengalir cepat **mundur dari bintang ke kapal penambang**.
-  2. **Durasi Penambangan Terkalibrasi**:
-     * Butuh waktu paparan laser kontinu selama **$5\text{ s/d }7\text{ detik}$** untuk memicu destabilisasi fusi (overheating perlahan mendingin jika tembakan terputus).
+  2. **Durasi Penambangan Terkalibrasi & Penyerapan Permukaan**:
+     * Permukaan korona plasma bintang selalu menahan berkas laser secara padat (*Surface Impact Collision*, laser tidak pernah melubangi atau menembus ke belakang).
+     * Butuh waktu paparan laser kontinu selama **$15\text{ detik}$** untuk memicu destabilisasi fusi hingga meledak Supernova (panas mendingin perlahan jika tembakan terputus untuk bermanuver).
   3. **Supernova Detonation & Hujan Harta Karun Aether**:
      * Saat mencapai titik kritis ($1.0$), bintang mengalami *Gravitational Collapse* dan meledak dalam **Supernova Masif**:
        * **Dorongan Kinetik Ekstrem (*Massive Knockback*)**: Melempar kapal pemain, drone swarm, dan asteroid di sekitar hingga ratusan pixel ke belakang.
        * **Robekan Grid Latar Belakang (*Grid Rupture Shockwave*)**: Memicu gelombang kejut daya $3800$ pada fisika grid arena, merobek garis-garis grid menjadi percikan api kosmik.
        * **Harta Karun Aether**: Melontarkan **$24\text{ s/d }32$ keping Kristal Aether & Quartz** menyebar ke seluruh angkasa!
+
+* **Siklus Reinkarnasi Abadi Bintang Aether (*Aether Seed Cycle*)**:
+  1. **Tahap 1: Dormant Seed ($10\text{ detik}$)**:
+     * Setelah Supernova, meninggalkan satu biji energi berpendar kecil (*Aether Seed*) yang diam di titik nol ledakan selama 10 detik, membiarkan pemain leluasa mengumpulkan kristal Aether.
+  2. **Tahap 2: Fast Cosmic Drift & Spacetime Fold Teleportation ($20\text{ detik}$)**:
+     * **Gerak Cepat Meluncur**: Meluncur dengan kecepatan tinggi ($540\text{ px/s}$) melintasi sabuk asteroid mencari koordinat baru yang aman selama 20 detik.
+     * **Teleportasi Lipat Ruang Acak (*Quantum Spacetime Fold*)**: Setiap beberapa detik, seed melipat ruang:
+       * **Spacetime Implosion**: Ruang-waktu di sekitarnya terkompresi sangat kuat (impuls grid negatif $-3400$, cincin gelombang menyusut ke titik tunggal).
+       * **Sub-space Vanish**: Biji lenyap seketika ke dalam lipatan sub-space dan melompat $520\text{--}980\text{ px}$ ke koordinat baru secara acak.
+       * **Spacetime Expansion**: Muncul kembali di koordinat baru dengan ledakan pelebaran ruang hebat (impuls grid positif $+3800$, shockwave mengembang masif, dan layar bergetar).
+       * **Lanjut Meluncur**: Biji mekar kembali dan melanjutkan penerbangan cepatnya.
+  3. **Tahap 3: Spacetime Infall & Rebirth ($30\text{ detik}$)**:
+     * Tiba di lokasi baru dan berhenti.
+     * Menghisap energi ruang-waktu dan partikel cahaya kosmik secara agresif selama 30 detik.
+     * Mengembang perlahan dari biji kecil, mekar secara spektakuler, memancarkan shockwave kelahiran kembali, dan kembali menjadi Bintang Aether penuh!
 
 ---
 
@@ -89,12 +105,28 @@ Sebuah asteroid tidak lenyap secara instan dalam 1 frame, melainkan mengalami se
    * **Pelepasan Harta Karun (*Loot Ejection*)**: Seluruh sisa mineral yang masih terperangkap di dalam perut batu terlontar keluar menjadi kepingan kristal berharga yang melayang bebas untuk dikoleksi pemain.
    * **Pemekaran Anak Asteroid**: Asteroid batu raksasa ($R > 350\text{ px}$) pecah menjadi 2 anak asteroid yang terlontar berlawanan arah.
 
-### C. Portal Kosmik di Inner Belt (*Tri-Pillar Void Gates*)
-* **Peran**: Mesin regenerasi asteroid tak terbatas (*Infinite Asteroid Engine*).
+### D. Dualitas Black Hole & White Hole di Sabuk Dalam (*Tri-Pillar Celestial Gates*)
+* **Peran**: Mesin regenerasi asteroid kosmik abadi (*Infinite Asteroid Engine*).
 * **Posisi**: 3 portal simetris di Sabuk Dalam ($R = 1.550\text{ px}$) yang berotasi orbit lambat ($\sim 8.7$ menit per putaran).
-* **Mekanik Ejection**:
-  * Secara berkala ($42\text{ - }58\text{ detik}$), jika total asteroid aktif di arena berkurang di bawah target ($< 32$), salah satu portal akan mengalami instabilitas gravitasi (*Gravitational Ejection*).
-  * Menghisap grid arena ke dalam (*Infall Priming*, 3.2s), memicu shockwave ledakan (*Rupture*, 0.85s), lalu melontarkan asteroid baru dengan lintasan **Spiral Archimedes** ($185\text{ - }245\text{ px/s}$ radial + $65\text{ - }105\text{ px/s}$ tangensial) menuju Sabuk Tengah dan Luar.
+* **Dualitas Siklus Black Hole & White Hole**:
+  1. **Fase Black Hole (Dormant)**:
+     * Lubang hitam pekat mutlak (diameter $\sim 92\text{ px}$) yang secara total menutup/menelan grid arena dan parallax bintang di belakangnya.
+     * Dikelilingi cincin **Hawking Radiation Photon Sphere** yang ultra-tipis, tajam, dan elegan (pendaran cyan kuantum dan violet) dengan 28 fluktuasi partikel kuantum virtual yang berkedip halus di bibir horizon peristiwa.
+  2. **Fase Infall (Supercharged Gravitational Inversion, $3.8\text{ detik}$)**:
+     * **Getaran Hisap Eskalatif**: Mengirimkan pulsa gravitasi hisap beruntun ke grid arena ($750 \to 3800$ impulse) dengan frekuensi meningkat ($0.18\text{s} \to 0.09\text{s}$), memicu getaran kamera dahsyat (*escalating camera tremor*).
+     * **Akselerasi Spin Relativistik**: Kecepatan putaran fluktuasi kuantum melesat dari $1.5\times$ hingga $28.0\times$.
+     * **Retakan Ruang-Waktu Event Horizon**: Piringan hitam mengalami retakan fraktur petir berpijar putih-panas (`IncandescentCrackColor`) yang menjalar dan membakar piringan hitam dari dalam.
+     * **Lengan Spiral Akresi Kuantum**: 14 lengan spiral logaritmik melengkung terhisap masuk ke dalam lubang hitam.
+     * **Supercritical Pre-Eruption Pinch ($p \in [0.86, 0.98]$)**: Tepat sebelum meledak, horizon peristiwa memampat ekstrem dari $46\text{ px} \to 14\text{ px}$ memusatkan energi singularitas ke satu titik padat mutlak.
+  3. **Fase White Hole & Kelahiran Asteroid ala Apple Genie Effect ($1.35\text{ detik}$)**:
+     * Bertransformasi menjadi **White Hole** supernova-scale (blinding white-silver).
+     * Memicu shockwave radial ganda dahsyat daya $4600$ ke grid arena dan 20 berkas laser relativistik memancar 360°.
+     * **Animasi Kelahiran Apple Genie Effect ($1.65\text{ detik}$)**:
+       * **Tali Pusar Plasma Terompet (*Genie Umbilical Funnel*)**: Corong plasma aetherik mengalirkan massa dari mulut White Hole ke pantat asteroid yang sedang melesat keluar, dilengkapi inti putih-perak ultra-panas dan filamen medan magnetik.
+       * **Non-Uniform Taffy Stretch**: Badan asteroid ditarik membujur memanjang ($1.55\times$) sambil diperas sangat tipis di leher lubang ($0.06\times$), lalu menggelembung mekar seperti balon ($1.24\times$).
+       * **Pelepasan & Getaran Elastis (*Cord Snap & Settle*)**: Pada $p = 0.75$, tali pusar putus dengan percikan plasma, memicu getaran harmonik elastis (*damped harmonic wobble*) sebelum mendingin dan memadat menjadi batuan kokoh.
+  4. **Fase Cooling ($2.6\text{ detik}$)**:
+     * White Hole mendingin kembali dan meredup menjadi Black Hole yang sunyi dan dingin.
 
 ---
 

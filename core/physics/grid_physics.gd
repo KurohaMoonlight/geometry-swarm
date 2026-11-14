@@ -2,16 +2,14 @@ class_name GridPhysics
 extends RefCounted
 
 ## GridPhysics - Dioptimalkan dengan Active Bounds, Dirty Sleep, & World-Space Cell Snapping
-## - Saat tidak ada gangguan aktif, simulasi otomatis masuk mode tidur (is_sleeping = true) -> 0 ms CPU.
-## - Saat ada riakan kecil, Sacrificial Dart Boost, atau Giga Drill, simulasi HANYA menghitung titik
-##   di dalam kotak area aktif (active_bounds), bukan seluruh ribuan titik grid di layar.
-## - Pergeseran kamera menggunakan pencocokan kelipatan cell_size (snap) sehingga grid latar belakang
-##   tetap diam di ruang angkasa saat kapal bergerak dan hanya bergeser mikro jika benar-benar disentuh.
+## - Mendukung Corong Gravitasi Materi Eksotis Super-Berat (Exotic Matter Singularity Funnel)
+##   yang menarik simpul-simpul grid melesak dalam dan terpilin menuju pusat massa Bintang Mini
+##   maupun Aether Seed saat Spacetime Infall.
 
 var anchor_stiffness: float = 28.0
 var damping: float = 0.92
 var neighbor_relaxation: float = 0.34
-var max_displacement: float = 165.0
+var max_displacement: float = 280.0
 
 var cell_size: float = 68.0
 var cols: int = 0
@@ -194,7 +192,7 @@ func step(delta: float) -> bool:
 	active_max_r = mini(rows - 1, next_max_r + 1)
 	return true
 
-## Riakan sangat halus & kecil tepat di bawah kapal saat bergerak (tidak menggeser seluruh grid)
+## Riakan sangat halus & kecil tepat di bawah kapal saat bergerak
 func apply_wake_impulse(world_pos: Vector2, move_velocity: Vector2, radius: float) -> void:
 	if total_points == 0 or radius <= 0.0 or move_velocity.length_squared() < 2500.0:
 		return
@@ -242,9 +240,64 @@ func apply_radial_impulse(world_pos: Vector2, strength: float, radius: float) ->
 				velocities[idx] += dir * (strength * smooth_f)
 				rift_heat[idx] = clampf(rift_heat[idx] + smooth_f * 0.75, 0.0, 2.0)
 
+## Corong Gravitasi Materi Eksotis Super-Berat (Exotic Matter Singularity Funnel).
+## Menarik simpul-simpul grid melesak dalam hingga mendekati horizon bintang dan memilinnya
+## (frame-dragging) tanpa memutus jaring-jaring grid (rift_heat dijaga <= 0.28).
+func apply_gravity_well_pull(
+	world_pos: Vector2,
+	pull_strength: float,
+	radius: float,
+	swirl_strength: float,
+	heat_amount: float,
+	delta: float
+) -> void:
+	if total_points == 0 or radius <= 0.0 or pull_strength <= 0.01:
+		return
+		
+	var bounds: Rect2i = _get_grid_bounds(world_pos, radius)
+	if bounds.size.x <= 0 or bounds.size.y <= 0:
+		return
+	_mark_active_bounds(bounds)
+	
+	var dt: float = minf(delta, 0.033)
+	var r2: float = radius * radius
+	# Normalisasi faktor kekuatan (1.0 = bintang normal penuh, >1.3 = Infall / Overload)
+	var power_norm: float = clampf(pull_strength / 1100.0, 0.15, 2.2)
+	var swirl_norm: float = clampf(swirl_strength / 320.0, 0.0, 2.2)
+	var funnel_snap: float = clampf(dt * 18.0, 0.08, 0.65)
+	
+	for r in range(bounds.position.y, bounds.end.y):
+		var row_offset: int = r * cols
+		for c in range(bounds.position.x, bounds.end.x):
+			var idx: int = row_offset + c
+			var base_p: Vector2 = base_positions[idx]
+			var rel_from_center: Vector2 = base_p - world_pos
+			var dist2: float = rel_from_center.length_squared()
+			if dist2 < r2 and dist2 > 0.25:
+				var dist: float = sqrt(dist2)
+				var norm_d: float = clampf(dist / radius, 0.0, 1.0)
+				var falloff: float = 1.0 - norm_d
+				
+				# Kurva corong materi eksotis: semakin dekat ke inti bintang, ruang-waktu makin melesak tajam!
+				var deep_funnel: float = pow(falloff, 1.45)
+				var collapse_ratio: float = clampf(deep_funnel * 0.78 * power_norm, 0.0, 0.86)
+				var target_dist: float = maxf(14.0, dist * (1.0 - collapse_ratio))
+				
+				# Frame-dragging (pilinan ruang-waktu di sekitar massa eksotis yang berputar)
+				var twist_angle: float = falloff * falloff * 0.58 * swirl_norm
+				var radial_out: Vector2 = rel_from_center / dist
+				var twisted_dir: Vector2 = radial_out.rotated(twist_angle)
+				
+				var funnel_target_pos: Vector2 = world_pos + twisted_dir * target_dist
+				positions[idx] = positions[idx].lerp(funnel_target_pos, funnel_snap)
+				velocities[idx] = (funnel_target_pos - positions[idx]) * 14.0
+				
+				# Nyalakan pendaran neon ungu-magenta (dibatasi <= 0.28 agar garis tidak robek/putus)
+				if heat_amount > 0.001:
+					var target_heat: float = clampf(deep_funnel * 0.28 * power_norm, 0.0, 0.28)
+					rift_heat[idx] = maxf(rift_heat[idx], target_heat)
+
 ## Efek Ledakan Supernova Spektakuler pada Grid saat Giga Drill Meledak di Permukaan Core!
-## Menciptakan robekan ruang-waktu (grid rupture + electric arcs) di pusat ledakan
-## serta gelombang kejut cincin ganda yang merentangkan jaring-jaring grid secara dramatis.
 func apply_supernova_core_detonation(tip_pos: Vector2, base_pos: Vector2, sacrificed_count: int) -> void:
 	if total_points == 0:
 		return
@@ -272,15 +325,12 @@ func apply_supernova_core_detonation(tip_pos: Vector2, base_pos: Vector2, sacrif
 				var falloff: float = 1.0 - (dist / outer_radius)
 				var smooth_f: float = falloff * falloff * (3.0 - 2.0 * falloff)
 				
-				# Gelombang kejut cincin ganda + puntiran vorteks supernova
 				var ring_wave: float = 1.0 + 0.55 * sin((dist / outer_radius) * TAU * 2.0)
 				var blast_strength: float = (3400.0 * smooth_f * ring_wave) * scale_mult
 				var swirl_strength: float = (950.0 * smooth_f) * (1.0 if radial_dir.dot(drill_dir) >= 0.0 else -1.0)
 				
 				velocities[idx] += radial_dir * blast_strength + tangent_dir * swirl_strength
 				
-				# Di zona inti (< inner_rupture_radius), paksa regangan posisi langsung & rift_heat = 2.0
-				# agar jaring grid langsung robek (ruptured) dan memancarkan petir sian-emas!
 				if dist < inner_rupture_radius:
 					var inner_f: float = 1.0 - (dist / inner_rupture_radius)
 					positions[idx] += radial_dir * (cell_size * 0.95 * inner_f)
@@ -321,8 +371,6 @@ func apply_boost_jet_impulse(
 			var abs_lat: float = absf(lateral)
 			var side_sign: float = 1.0 if lateral >= 0.0 else -1.0
 			
-			# 1. Gelombang Kejut Kubah Parabola Depan (Parabolic Mach Cone Bow Shockwave)
-			#    Membelah grid ruang angkasa ke samping mengikuti kubah parabola swarm di depan Core!
 			if axial >= -25.0 and axial <= bow_len:
 				var parabola_curve_x: float = bow_len * 0.72 - 0.0052 * (lateral * lateral)
 				var dist_to_front: float = absf(axial - parabola_curve_x)
@@ -338,7 +386,6 @@ func apply_boost_jet_impulse(
 					velocities[idx] += bow_normal * (1450.0 * shock_intensity * shimmer * dt)
 					rift_heat[idx] = clampf(rift_heat[idx] + shock_intensity * shimmer * dt * 19.0, 0.0, 1.95)
 			
-			# 2. Hisapan Venturi Pinch di Leher Ruang Bakar Nozzle (Tepat di belakang Core)
 			if axial >= -75.0 and axial <= 20.0 and abs_lat < 120.0:
 				var neck_ax: float = 1.0 - clampf(absf(axial + 24.0) / 52.0, 0.0, 1.0)
 				var neck_lat: float = 1.0 - (abs_lat / 120.0)
@@ -346,7 +393,6 @@ func apply_boost_jet_impulse(
 				velocities[idx] += (-tangent * side_sign * 780.0 - dir * 420.0) * (pinch_f * dt)
 				rift_heat[idx] = clampf(rift_heat[idx] + pinch_f * dt * 14.0, 0.0, 1.8)
 			
-			# 3. Semburan Utama Plasma Jet Thrust & Cincin Mach Shock Diamonds di Buritan (-aim_dir)
 			if axial < 10.0 and axial >= -exhaust_len:
 				var back_dist: float = maxf(0.0, -axial)
 				var back_ratio: float = clampf(back_dist / exhaust_len, 0.0, 1.0)
@@ -357,7 +403,6 @@ func apply_boost_jet_impulse(
 					var axial_f: float = 1.0 - back_ratio
 					var intensity: float = lat_f * lat_f * axial_f * power_ratio
 					
-					# Gelombang berdiri Mach Shock Diamonds & turbulensi heliks plasma
 					var mach_diamond: float = 1.0 + 0.68 * sin(back_dist * 0.14 - pulse_time * 2.6)
 					var vortex_swirl: float = cos(back_dist * 0.09 - pulse_time * 1.9) * side_sign * 0.38
 					var side_spread: float = (lateral / maxf(1.0, plume_half_w)) * 0.65 + vortex_swirl
@@ -451,7 +496,6 @@ func apply_giga_drill_spacetime_and_exhaust(
 						rift_heat[idx] = clampf(rift_heat[idx] + jet_intensity * shock_diamond * dt * 22.0, 0.0, 2.0)
 
 ## Menggeser jendela grid HANYA dalam kelipatan utuh cell_size saat kamera berpindah jauh.
-## Dengan kelipatan cell_size, garis-garis grid tetap 100% DIAM di tempatnya di ruang dunia!
 func sync_window_to_center(world_center: Vector2, half_grid_size: Vector2) -> bool:
 	if total_points == 0:
 		return false

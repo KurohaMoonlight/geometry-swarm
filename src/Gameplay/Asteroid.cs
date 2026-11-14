@@ -18,14 +18,21 @@ public enum ResourceType : byte
 }
 
 /// <summary>
-/// Asteroid prosedural raksasa berbasis Grid Voxel 13 px:
-/// - Asteroid batu memiliki jumlah deposit resource acak (2-8 kantung) dan mengandung 1-2 jenis resource berbeda.
-/// - Setiap tile voxel memiliki HP masif terhadap benturan/bor kinetik non-laser (NonLaserTileMaxHp = 45.0f),
-///   sehingga hanya Mining Laser yang dapat memotong lorong asteroid secara cepat dan efisien.
-/// - Jika pengeboran/laser sudah sampai ke blok resource (atau membuka batu di sebelahnya menjadi Empty),
-///   tepi blok resource 13 px yang terekspos otomatis menyala terang (HDR Neon Vein Edge Glow).
-/// - Asteroid khusus Energy Crystal (IsEnergyAsteroid) memiliki bentuk geometri Bintang Kristal Runcing
-///   (Star-Crystal 10-12 sudut tajam) yang terus berdenyut menyala-nyala sepanjang waktu.
+/// Asteroid prosedural raksasa berbasis Grid Voxel 13 px & Entitas Kosmik Bintang Aether:
+/// - Asteroid Batu Biasa:
+///   * Memiliki deposit mineral acak (1-2 jenis resource).
+///   * Saat seluruh deposit mineral di dalam asteroid habis ditambang (0 resource tersisa),
+///     asteroid otomatis runtuh/hancur dengan animasi katastropik (tremor hebat + retakan jaring laba-laba menyala),
+///     meledak menjadi puing kosmik, dan membuka ruang kosong di arena (100% tuntas dipanen).
+/// - Bintang Aether (IsEnergyAsteroid):
+///   * Memiliki siklus reinkarnasi kosmik abadi:
+///     1. Dormant Seed (10 Detik): Setelah meledak Supernova & melontarkan kristal Aether, menyisakan
+///        Biji Energi Kecil (Aether Seed) yang berpendar lembut dan diam di titik nol selama 10 detik.
+///     2. Cosmic Drift / Migrasi (20 Detik): Meluncur pelan melintasi ruang angkasa selama 20 detik
+///        mencari koordinat baru yang aman di sabuk asteroid.
+///     3. Spacetime Infall & Rebirth (30 Detik): Berhenti di lokasi baru, menyedot energi ruang-waktu,
+///        menarik grid arena & partikel cahaya secara agresif selama 30 detik, mengembang, mekar,
+///        dan terlahir kembali menjadi Bintang Aether baru!
 /// </summary>
 public partial class Asteroid : RigidBody2D
 {
@@ -42,6 +49,29 @@ public partial class Asteroid : RigidBody2D
     /// Mining Laser tetap menggunakan ambang panas 1.0f (efisiensi penuh 100%).
     /// </summary>
     public const float NonLaserTileMaxHp = 45.0f;
+
+    /// <summary>
+    /// Durasi 3 Tahap Siklus Reinkarnasi Bintang Aether.
+    /// </summary>
+    public const float DormantSeedDuration = 10.0f;
+    public const float CosmicDriftDuration = 20.0f;
+    public const float SpacetimeInfallDuration = 30.0f;
+
+    public enum AetherSeedStage : byte
+    {
+        ActiveStar = 0,
+        DormantSeed = 1,
+        CosmicDrift = 2,
+        SpacetimeInfall = 3
+    }
+
+    public enum SeedTeleportState : byte
+    {
+        None = 0,
+        Compressing = 1,
+        Folded = 2,
+        Expanding = 3
+    }
 
     public enum VoxelType : byte
     {
@@ -72,6 +102,17 @@ public partial class Asteroid : RigidBody2D
         public Vector2 B;
         public int CheckGridX;
         public int CheckGridY;
+    }
+
+    private struct InfallPhotonParticle
+    {
+        public float Angle;
+        public float Distance;
+        public float MaxDistance;
+        public float RadialSpeed;
+        public float AngularSpeed;
+        public float Size;
+        public Color Color;
     }
 
     public struct CrystalSpireData
@@ -106,11 +147,18 @@ public partial class Asteroid : RigidBody2D
     [Export] public SwarmRole AsteroidType { get; set; } = SwarmRole.DartNeedle;
     [Export] public bool IsEnergyAsteroid { get; set; } = false;
     [Export] public bool IsScanned { get; set; } = false;
+    [Export] public bool IsBirthAnimationActive { get; set; } = false;
+    public Vector2 BirthRiftOrigin { get; set; } = Vector2.Zero;
+    public Vector2 BirthEjectDirection { get; set; } = Vector2.Right;
 
     // 1 atau 2 jenis resource berbeda di dalam asteroid ini
     public ResourceType PrimaryResource { get; set; } = ResourceType.Ferrite;
     public ResourceType SecondaryResource { get; set; } = ResourceType.Quartz;
     public bool HasSecondaryResource { get; set; } = false;
+
+    // Status Siklus Reinkarnasi Bintang Aether
+    public AetherSeedStage SeedStage { get; private set; } = AetherSeedStage.ActiveStar;
+    public bool IsInSeedCycle => IsEnergyAsteroid && SeedStage != AetherSeedStage.ActiveStar;
 
     // Cache transformasi murni di C# (Zero P/Invoke overhead)
     public Vector2 CachedPosition { get; private set; }
@@ -118,7 +166,7 @@ public partial class Asteroid : RigidBody2D
     public float CachedCos { get; private set; } = 1.0f;
     public float CachedSin { get; private set; } = 0.0f;
     public Vector2 CachedLinearVelocity { get; private set; }
-    public bool IsActiveInTree => !_isDestroyed;
+    public bool IsActiveInTree => !_isDestroyed && !IsInSeedCycle;
 
     public Color ResourceGlowColor => GetResourceColor(IsEnergyAsteroid ? ResourceType.Aether : PrimaryResource);
     private Color _unscannedBorderColor;
@@ -153,6 +201,8 @@ public partial class Asteroid : RigidBody2D
 
     private int _initialSolidVoxelCount = 0;
     private int _remainingSolidVoxelCount = 0;
+    private int _initialResourceVoxelCount = 0;
+    private int _remainingResourceVoxelCount = 0;
     private int _carvedVoxelCount = 0;
     private float _energyPulseTimer = 0.0f;
     private float _energyRedrawTimer = 0.0f;
@@ -162,6 +212,34 @@ public partial class Asteroid : RigidBody2D
     private float _crystalCoreRadius = 0.0f;
     private int _totalCoreVoxels = 0;
     private int _remainingCoreVoxels = 0;
+
+    // Variabel Siklus Reinkarnasi Aether Seed (Dormant -> Drift -> Spacetime Infall -> Rebirth)
+    private float _seedStageTimer = 0.0f;
+    private Vector2 _seedDriftStartPos = Vector2.Zero;
+    private Vector2 _seedDriftTargetPos = Vector2.Zero;
+    private Vector2 _seedDriftPerpDir = Vector2.Up;
+    private float _seedDriftArcAmplitude = 180.0f;
+    private readonly List<Vector2> _seedDriftTrailWorld = new(32);
+    private float _seedTrailSampleTimer = 0.0f;
+    private const int InfallPhotonCount = 28;
+    private readonly InfallPhotonParticle[] _infallPhotons = new InfallPhotonParticle[InfallPhotonCount];
+
+    // Mekanika Teleportasi Lipat Ruang (Spacetime Fold & Warp Leap)
+    private SeedTeleportState _seedTeleportState = SeedTeleportState.None;
+    private float _seedTeleportStateTimer = 0.0f;
+    private float _seedTeleportNextCooldown = 2.0f;
+    private Vector2 _seedTeleportDeparturePos = Vector2.Zero;
+    private Vector2 _seedTeleportTargetPos = Vector2.Zero;
+    private const float SeedTeleportCompressDuration = 0.32f;
+    private const float SeedTeleportFoldDuration = 0.10f;
+    private const float SeedTeleportExpandDuration = 0.36f;
+
+    // Animasi Kelahiran Asteroid dari White Hole (Efek Jin Aladdin / Genie Effect)
+    private float _birthAnimTimer = 0.0f;
+    private const float BirthAnimDuration = 1.65f;
+    private float _birthGlow = 0.0f;
+    private float _birthLongitudinalScale = 1.0f;
+    private float _birthLateralScale = 1.0f;
 
     // Komponen Visual Bintang Mini & Gravitational Lensing (Shader Anomali Singularitas)
     private BackBufferCopy? _energyBackBuffer;
@@ -178,7 +256,7 @@ public partial class Asteroid : RigidBody2D
     private bool _isDestroyed = false;
     private bool _isDestroying = false;
     private float _destructionTimer = 0.0f;
-    private const float DestructionDuration = 0.52f;
+    private float _currentDestructionDuration = 0.72f;
     private readonly List<Vector2> _catastrophicFractureLines = new();
 
     public static Color GetResourceColor(ResourceType resType)
@@ -228,6 +306,99 @@ public partial class Asteroid : RigidBody2D
                 return true;
             default:
                 resType = ResourceType.Ferrite;
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Mengekspor parameter sumur gravitasi aktif (untuk Bintang Aether aktif maupun Seed pada tahap Spacetime Infall / Drift)
+    /// agar GridPhysics dan Parallax Starfield di GridRenderer ikut terdistorsi secara fisik & optik.
+    /// </summary>
+    public bool TryGetGravityWellParameters(
+        out Vector2 worldPos,
+        out float influenceRadius,
+        out float normalizedStrength,
+        out float infallRatio,
+        out float gridPullAccel,
+        out float gridSwirlAccel,
+        out float gridHeatRate)
+    {
+        worldPos = CachedPosition;
+        influenceRadius = 0.0f;
+        normalizedStrength = 0.0f;
+        infallRatio = 0.0f;
+        gridPullAccel = 0.0f;
+        gridSwirlAccel = 0.0f;
+        gridHeatRate = 0.0f;
+
+        if (_isDestroyed || !IsEnergyAsteroid) return false;
+
+        switch (SeedStage)
+        {
+            case AetherSeedStage.ActiveStar:
+            {
+                float coreRatio = _totalCoreVoxels > 0
+                    ? Mathf.Clamp((float)_remainingCoreVoxels / _totalCoreVoxels, 0.35f, 1.0f)
+                    : 1.0f;
+                float instab = _isDestroying ? 1.0f : Mathf.Clamp(_energyAccumulatedHeat, 0.0f, 1.0f);
+
+                // Massa materi eksotis super-berat: jangkauan luas & hisapan corong ruang-waktu sangat dalam
+                influenceRadius = Radius * (5.6f + instab * 1.4f);
+                normalizedStrength = (1.35f + instab * 0.65f) * coreRatio;
+                infallRatio = 0.65f + instab * 0.35f;
+                gridPullAccel = (1350.0f + instab * 850.0f) * coreRatio;
+                gridSwirlAccel = (380.0f + instab * 360.0f) * coreRatio;
+                gridHeatRate = 0.26f + instab * 0.45f;
+                return true;
+            }
+
+            case AetherSeedStage.DormantSeed:
+                // Selama 10 detik pertama (Dormant Seed), biji energi tenang tanpa tarikan gravitasi berbahaya
+                return false;
+
+            case AetherSeedStage.CosmicDrift:
+            {
+                if (_seedTeleportState == SeedTeleportState.Folded) return false;
+
+                if (_seedTeleportState == SeedTeleportState.Compressing)
+                {
+                    // Saat ruang terkompresi sangat gila, gravitasi sedot meningkat ekstrem
+                    influenceRadius = 450.0f;
+                    normalizedStrength = 1.95f;
+                    infallRatio = 0.98f;
+                    gridPullAccel = 2200.0f;
+                    gridSwirlAccel = 580.0f;
+                    gridHeatRate = 0.48f;
+                    return true;
+                }
+
+                // Saat bermigrasi cepat, menimbulkan riak gravitasi gesit di sepanjang lintasan
+                influenceRadius = 240.0f;
+                normalizedStrength = 0.35f;
+                infallRatio = 0.15f;
+                gridPullAccel = 340.0f;
+                gridSwirlAccel = 120.0f;
+                gridHeatRate = 0.10f;
+                return true;
+            }
+
+            case AetherSeedStage.SpacetimeInfall:
+            {
+                // Selama 30 detik Spacetime Infall, sedotan ruang-waktu meningkat agresif hingga terlahir kembali!
+                float p = Mathf.Clamp(_seedStageTimer / SpacetimeInfallDuration, 0.0f, 1.0f);
+                float smoothP = p * p * (3.0f - 2.0f * p);
+                float pulse = 1.0f + 0.14f * MathF.Sin(_energyPulseTimer * (3.0f + p * 8.0f));
+
+                influenceRadius = Mathf.Lerp(260.0f, Radius * 5.6f, smoothP);
+                normalizedStrength = Mathf.Lerp(0.50f, 1.75f, smoothP) * pulse;
+                infallRatio = Mathf.Lerp(0.28f, 1.0f, smoothP);
+                gridPullAccel = Mathf.Lerp(540.0f, 1780.0f, smoothP) * pulse;
+                gridSwirlAccel = Mathf.Lerp(190.0f, 560.0f, smoothP);
+                gridHeatRate = Mathf.Lerp(0.18f, 0.72f, smoothP);
+                return true;
+            }
+
+            default:
                 return false;
         }
     }
@@ -282,9 +453,22 @@ public partial class Asteroid : RigidBody2D
 
         CurrentHealth = MaxHealth;
 
+        if (IsBirthAnimationActive)
+        {
+            _birthGlow = 1.0f;
+            _birthAnimTimer = 0.0f;
+            _birthLongitudinalScale = 0.12f;
+            _birthLateralScale = 0.06f;
+            if (_collisionShape != null)
+            {
+                _collisionShape.SetDeferred(CollisionShape2D.PropertyName.Disabled, true);
+            }
+        }
+
         if (IsEnergyAsteroid)
         {
             SetupEnergyStarVisual();
+            InitializeInfallPhotons();
         }
     }
 
@@ -295,20 +479,13 @@ public partial class Asteroid : RigidBody2D
             var shader = GD.Load<Shader>("res://visual/mini_star_singularity.gdshader");
             if (shader == null) return;
 
-            // Kotak visual dibuat cukup luas (4.2x radius) agar distorsi gravitasi pudar mulus tanpa garis kotak
-            float boxSize = OuterBoundRadius * 4.2f;
-
-            _energyBackBuffer = new BackBufferCopy
-            {
-                CopyMode = BackBufferCopy.CopyModeEnum.Rect,
-                Rect = new Rect2(-boxSize * 0.5f, -boxSize * 0.5f, boxSize, boxSize)
-            };
-            AddChild(_energyBackBuffer);
+            // Kotak visual dibuat transparan murni tanpa BackBufferCopy agar grid & bintang di belakang tembus sempurna
+            float boxSize = OuterBoundRadius * 4.4f;
 
             _energyStarMaterial = new ShaderMaterial { Shader = shader };
             _energyStarMaterial.SetShaderParameter("star_radius", 0.16f);
-            _energyStarMaterial.SetShaderParameter("lensing_strength", 0.08f);
-            _energyStarMaterial.SetShaderParameter("lensing_radius", 0.38f);
+            _energyStarMaterial.SetShaderParameter("lensing_strength", 0.16f);
+            _energyStarMaterial.SetShaderParameter("lensing_radius", 0.42f);
             _energyStarMaterial.SetShaderParameter("instability", 0.0f);
 
             _energyStarRect = new ColorRect
@@ -324,6 +501,34 @@ public partial class Asteroid : RigidBody2D
         catch (Exception ex)
         {
             GD.PrintErr($"[Asteroid.SetupEnergyStarVisual] {ex}");
+        }
+    }
+
+    private void InitializeInfallPhotons()
+    {
+        var rng = new RandomNumberGenerator();
+        rng.Randomize();
+
+        Color[] photonPalette = new Color[]
+        {
+            new(3.8f, 3.2f, 1.15f, 0.95f), // Aether White-Gold
+            new(0.45f, 2.8f, 3.9f, 0.95f), // Electric Cyan
+            new(2.2f, 1.4f, 3.6f, 0.90f)   // Cosmic Indigo-Violet
+        };
+
+        for (int i = 0; i < InfallPhotonCount; i++)
+        {
+            float maxD = rng.RandfRange(240.0f, 480.0f);
+            _infallPhotons[i] = new InfallPhotonParticle
+            {
+                Angle = rng.Randf() * Mathf.Tau,
+                Distance = rng.RandfRange(28.0f, maxD),
+                MaxDistance = maxD,
+                RadialSpeed = rng.RandfRange(95.0f, 210.0f),
+                AngularSpeed = rng.RandfRange(1.2f, 2.8f) * (i % 2 == 0 ? 1.0f : -1.0f),
+                Size = rng.RandfRange(2.0f, 3.6f),
+                Color = photonPalette[i % photonPalette.Length]
+            };
         }
     }
 
@@ -374,14 +579,12 @@ public partial class Asteroid : RigidBody2D
             SecondaryResource = ResourceType.Quartz;
             HasSecondaryResource = rng.Randf() < 0.45f;
 
-            // Asteroid Khusus Floating Crystal Geode: Inti Aether emas-putih, kristal cyan, dan obsidian transparan
             _unscannedBorderColor = new Color(4.5f, 3.8f, 1.4f, 0.98f);
             _tunnelWallBorderColor = new Color(1.2f, 3.4f, 4.6f, 0.95f);
             _rockBodyColor = new Color(0.025f, 0.05f, 0.10f, 0.95f);
         }
         else
         {
-            // Tentukan Resource Pertama (Primary) dan peluang 65% memiliki Resource Kedua (Secondary) yang berbeda
             PrimaryResource = AsteroidType switch
             {
                 SwarmRole.DartNeedle => ResourceType.Ferrite,
@@ -407,8 +610,8 @@ public partial class Asteroid : RigidBody2D
                 SecondaryResource = PrimaryResource;
             }
 
-            _unscannedBorderColor = new Color(0.18f, 0.16f, 0.22f, 0.85f);
-            _tunnelWallBorderColor = new Color(0.24f, 0.20f, 0.30f, 0.78f);
+            _unscannedBorderColor = new Color(0.22f, 0.24f, 0.34f, 0.88f);
+            _tunnelWallBorderColor = new Color(0.28f, 0.26f, 0.38f, 0.82f);
             _rockBodyColor = new Color(0.032f, 0.028f, 0.045f, 0.98f);
         }
     }
@@ -421,14 +624,10 @@ public partial class Asteroid : RigidBody2D
 
         if (IsEnergyAsteroid)
         {
-            // BENTUK KHUSUS CLUSTER PRISMA KRISTAL VEKTOR (OPSI A):
-            // 14-16 prisma kristal poligonal berfaset tajam (Diamond & Hexagonal Prisms)
             int spireCount = rng.RandiRange(14, 16);
             _crystalSpires = new CrystalSpireData[spireCount];
-            // Inti singularitas Aether dibuat kompak & terlindung di dalam rongga geode pusat
             _crystalCoreRadius = Radius * rng.RandfRange(0.14f, 0.18f);
 
-            // Hanya pilih 2 sampai 3 pilar yang memiliki urat kristal Optic Quartz
             HashSet<int> quartzSpireIndices = new();
             int quartzCount = rng.RandiRange(2, 3);
             while (quartzSpireIndices.Count < quartzCount)
@@ -581,10 +780,12 @@ public partial class Asteroid : RigidBody2D
         }
 
         _remainingSolidVoxelCount = _initialSolidVoxelCount;
+        _carvedVoxelCount = 0;
     }
 
     /// <summary>
-    /// Membangkitkan kantung-kantung resource dengan jumlah ACAK dan 1-2 jenis resource berbeda.
+    /// Membangkitkan kantung-kantung resource dengan jumlah ACAK dan 1-2 jenis resource berbeda,
+    /// serta menghitung total voxel resource agar asteroid batu otomatis hancur saat 100% mineral habis dipanen.
     /// </summary>
     private void GenerateResourceVoxelPatches()
     {
@@ -596,10 +797,8 @@ public partial class Asteroid : RigidBody2D
 
         if (IsEnergyAsteroid)
         {
-            // BENTUK VOXEL PRISMA KRISTAL VEKTOR (OPSI A):
-            // Spires sebagian besar adalah BATU OBSIDIAN GELAP (VoxelType.Rock).
-            // Hanya Inti Singularitas Tengah yang mengandung Aether murni, dan hanya 2-3 urat pilar yang mengandung Optic Quartz!
             int totalSolid = 0;
+            int totalRes = 0;
             _totalCoreVoxels = 0;
             _remainingCoreVoxels = 0;
             float coreAetherRadius = _crystalCoreRadius * 0.82f;
@@ -620,12 +819,12 @@ public partial class Asteroid : RigidBody2D
                         _initialSolidMask[idx] = true;
                         totalSolid++;
 
-                        // Hanya bagian terdalam inti yang merupakan Aether murni (~14-18 tile saja)
                         if (distSq <= coreAetherRadiusSq)
                         {
                             _voxels[idx] = VoxelType.ResourceAether;
                             _totalCoreVoxels++;
                             _remainingCoreVoxels++;
+                            totalRes++;
                         }
                         else
                         {
@@ -634,7 +833,6 @@ public partial class Asteroid : RigidBody2D
                         continue;
                     }
 
-                    // 2. Cek apakah sel berada di dalam salah satu pilar kristal
                     bool inSpire = false;
 
                     for (int s = 0; s < _crystalSpires.Length; s++)
@@ -648,13 +846,13 @@ public partial class Asteroid : RigidBody2D
                             spire.RemainingVoxels++;
                             totalSolid++;
 
-                            // Hanya pilar yang memiliki urat mineral, dan HANYA di simpul kristal rMid, yang menjadi Optic Quartz!
                             if (spire.HasResourceVein)
                             {
                                 float dist = MathF.Sqrt(distSq);
                                 if (dist >= spire.RadiusMid * 0.80f && dist <= spire.RadiusMid * 1.20f)
                                 {
                                     _voxels[idx] = VoxelType.ResourceQuartz;
+                                    totalRes++;
                                 }
                                 else
                                 {
@@ -663,7 +861,6 @@ public partial class Asteroid : RigidBody2D
                             }
                             else
                             {
-                                // Pilar kristal obsidian padat biasa (Batu)
                                 _voxels[idx] = VoxelType.Rock;
                             }
                             break;
@@ -672,7 +869,6 @@ public partial class Asteroid : RigidBody2D
 
                     if (!inSpire)
                     {
-                        // Celah hampa udara murni di antara pilar kristal
                         _voxels[idx] = VoxelType.Empty;
                         _initialSolidMask[idx] = false;
                     }
@@ -681,6 +877,8 @@ public partial class Asteroid : RigidBody2D
 
             _initialSolidVoxelCount = totalSolid;
             _remainingSolidVoxelCount = totalSolid;
+            _initialResourceVoxelCount = totalRes;
+            _remainingResourceVoxelCount = totalRes;
             return;
         }
 
@@ -705,10 +903,35 @@ public partial class Asteroid : RigidBody2D
             Vector2I pocketGrid = LocalToGrid(pocketCenter);
 
             int clusterRadius = rng.RandiRange(2, 5);
-            // Jika memiliki 2 resource berbeda, separuh kantung menggunakan SecondaryResource
             VoxelType chosenVox = (HasSecondaryResource && (p % 2 == 1)) ? secondaryVox : primaryVox;
             PlaceResourceCluster(pocketGrid, clusterRadius, chosenVox, rng);
         }
+
+        // Hitung total voxel resource yang berhasil ditanam di dalam asteroid batu
+        int resourceVoxelTotal = 0;
+        for (int i = 0; i < _voxels.Length; i++)
+        {
+            if (TryGetResourceType(_voxels[i], out _))
+            {
+                resourceVoxelTotal++;
+            }
+        }
+
+        // Jaminan pengaman: jika karena acakan belum ada voxel resource yang tertanam, tanam 1 kantung inti di tengah
+        if (resourceVoxelTotal == 0)
+        {
+            PlaceResourceCluster(new Vector2I(centerCell, centerCell), 3, primaryVox, rng);
+            for (int i = 0; i < _voxels.Length; i++)
+            {
+                if (TryGetResourceType(_voxels[i], out _))
+                {
+                    resourceVoxelTotal++;
+                }
+            }
+        }
+
+        _initialResourceVoxelCount = resourceVoxelTotal;
+        _remainingResourceVoxelCount = resourceVoxelTotal;
     }
 
     private void PlaceResourceCluster(Vector2I centerGrid, int clusterRadius, VoxelType targetVoxelType, RandomNumberGenerator rng)
@@ -757,7 +980,6 @@ public partial class Asteroid : RigidBody2D
                 Vector2 inwardDir = mid.LengthSquared() > 1.0f ? -mid.Normalized() : Vector2.Zero;
                 Vector2I chosenGrid = LocalToGrid(mid + inwardDir * (VoxelSize * 0.65f));
 
-                // Cari sel voxel padat terluar yang benar-benar menopang segmen garis tepi ini
                 for (int probe = 1; probe <= 6; probe++)
                 {
                     Vector2 probePt = mid + inwardDir * (VoxelSize * (0.35f * probe));
@@ -890,8 +1112,6 @@ public partial class Asteroid : RigidBody2D
                 exposedResPts[t] = new List<Vector2>(32);
             }
 
-            // Fungsi lokal: sel Empty hanya dianggap dinding lorong jika aslinya berada di dalam asteroid!
-            // Ruang angkasa hampa di luar asteroid tidak akan digambar garis dinding kisi-kisi (tepian luar tetap mulus poligon!)
             bool IsCarvedEmpty(int nGx, int nGy)
             {
                 if (nGx < 0 || nGx >= GridSide || nGy < 0 || nGy >= GridSide) return false;
@@ -917,7 +1137,6 @@ public partial class Asteroid : RigidBody2D
                     bool isRes = TryGetResourceType(vox, out ResourceType rType);
                     List<Vector2> targetList = isRes ? exposedResPts[(int)rType] : wallPts;
 
-                    // Garis dinding galian interior di dalam asteroid
                     if (gx > 0 && IsCarvedEmpty(gx - 1, gy))
                     {
                         targetList.Add(new Vector2(x0, y0));
@@ -939,8 +1158,6 @@ public partial class Asteroid : RigidBody2D
                         targetList.Add(new Vector2(x1, y1));
                     }
 
-                    // Tambahan: jika blok Resource sudah tersentuh lorong galian di salah satu sisinya,
-                    // nyalakan juga seluruh bingkai luar klaster resource di sekitar titik kontak!
                     if (isRes)
                     {
                         bool touchesEmpty =
@@ -989,8 +1206,6 @@ public partial class Asteroid : RigidBody2D
                 int cgx = seg.CheckGridX;
                 int cgy = seg.CheckGridY;
 
-                // Jika voxel penopang pinggir atau tetangga langsungnya sudah terkikis (IsCarvedEmpty),
-                // buka garis kontur luar agar coakan dari pinggir langsung terlihat terbuka!
                 bool edgeBroken = IsCarvedEmpty(cgx, cgy)
                     || IsCarvedEmpty(cgx - 1, cgy)
                     || IsCarvedEmpty(cgx + 1, cgy)
@@ -1050,12 +1265,70 @@ public partial class Asteroid : RigidBody2D
             float dt = (float)delta;
             bool needsRedraw = false;
 
-            // Animasi Retakan Overload & Getaran Katastropik saat Asteroid Sedang Hancur
+            // Animasi Kelahiran Asteroid dari White Hole: EFEK JIN ALADDIN / MAC OS GENIE EFFECT
+            if (IsBirthAnimationActive)
+            {
+                _birthAnimTimer += dt;
+                float p = Mathf.Clamp(_birthAnimTimer / BirthAnimDuration, 0.0f, 1.0f);
+
+                // Genie Effect Non-Uniform Taffy Stretch:
+                // Sambil ditarik keluar sepanjang sumbu lontaran:
+                // 1. Sumbu Membujur (Longitudinal): ditarik memanjang ke depan seperti asap lampu jin (hingga 1.55x)
+                // 2. Sumbu Melintang (Lateral): diperas sangat tipis di leher lubang (0.06x -> 0.48x),
+                //    kemudian menggelembung mekar seperti balon saat keluar dari White Hole (hingga 1.24x),
+                //    lalu tali plasma putus pada p=0.75 dan asteroid membal (elastic harmonic wobble) ke bentuk stabil.
+                if (p < 0.45f)
+                {
+                    float t1 = p / 0.45f;
+                    _birthLongitudinalScale = Mathf.Lerp(0.12f, 1.55f, MathF.Sqrt(t1));
+                    _birthLateralScale = Mathf.Lerp(0.06f, 0.48f, t1 * t1);
+                }
+                else if (p < 0.75f)
+                {
+                    float t2 = (p - 0.45f) / 0.30f;
+                    _birthLongitudinalScale = Mathf.Lerp(1.55f, 1.05f, t2);
+                    _birthLateralScale = Mathf.Lerp(0.48f, 1.24f, MathF.Sqrt(t2));
+                }
+                else
+                {
+                    // Tali pusar putus: getaran elastis damped harmonic settling
+                    float t3 = (p - 0.75f) / 0.25f;
+                    float wobble = MathF.Sin(t3 * Mathf.Tau * 1.5f) * MathF.Exp(-t3 * 3.2f) * 0.16f;
+                    _birthLongitudinalScale = Mathf.Lerp(1.05f, 1.0f, t3) - wobble;
+                    _birthLateralScale = Mathf.Lerp(1.24f, 1.0f, t3) + wobble;
+                }
+
+                _birthGlow = 1.0f - p;
+
+                if (_birthAnimTimer >= BirthAnimDuration)
+                {
+                    IsBirthAnimationActive = false;
+                    _birthGlow = 0.0f;
+                    _birthLongitudinalScale = 1.0f;
+                    _birthLateralScale = 1.0f;
+                    if (_collisionShape != null)
+                    {
+                        _collisionShape.SetDeferred(CollisionShape2D.PropertyName.Disabled, false);
+                    }
+                }
+                needsRedraw = true;
+            }
+
+            // =========================================================================
+            // SIKLUS REINKARNASI BINTANG AETHER (DORMANT SEED -> COSMIC DRIFT -> SPACETIME INFALL)
+            // =========================================================================
+            if (IsInSeedCycle)
+            {
+                UpdateAetherSeedLifecycle(dt);
+                return;
+            }
+
+            // Animasi Retakan Katastropik & Getaran Tremor saat Asteroid Sedang Hancur
             if (_isDestroying)
             {
                 _destructionTimer -= dt;
-                float progress = 1.0f - Mathf.Clamp(_destructionTimer / DestructionDuration, 0.0f, 1.0f);
-                float shakeMag = Mathf.Lerp(2.5f, 14.0f, progress * progress);
+                float progress = 1.0f - Mathf.Clamp(_destructionTimer / MathF.Max(0.01f, _currentDestructionDuration), 0.0f, 1.0f);
+                float shakeMag = Mathf.Lerp(3.5f, 18.0f, progress * progress);
                 CachedPosition += new Vector2((GD.Randf() - 0.5f) * shakeMag, (GD.Randf() - 0.5f) * shakeMag);
                 QueueRedraw();
 
@@ -1077,8 +1350,7 @@ public partial class Asteroid : RigidBody2D
                 LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 5.0f, dt * 2.0f);
             }
 
-            // Perlindungan Batas Sektor (12.000 x 12.000 px) & Area Kapal Induk Pemain (Pusat 0,0):
-            // Jika asteroid mendekati dinding batas luar, belokkan kembali ke arah dalam secara halus
+            // Perlindungan Batas Sektor (12.000 x 12.000 px) & Area Kapal Induk Pemain (Pusat 0,0)
             float maxBoundary = 5700.0f - OuterBoundRadius;
             Vector2 pos = GlobalPosition;
             if (MathF.Abs(pos.X) > maxBoundary || MathF.Abs(pos.Y) > maxBoundary)
@@ -1086,7 +1358,6 @@ public partial class Asteroid : RigidBody2D
                 Vector2 toCenter = (-pos).Normalized();
                 LinearVelocity = LinearVelocity.Lerp(toCenter * 8.0f, dt * 1.5f);
             }
-            // Jika mendekati area awal kapal induk di (0,0), dorong perlahan menjauh agar base tetap lapang
             float distToPlayerSpawn = pos.Length();
             if (distToPlayerSpawn < 950.0f)
             {
@@ -1094,30 +1365,39 @@ public partial class Asteroid : RigidBody2D
                 LinearVelocity = LinearVelocity.Lerp(awayFromCenter * 10.0f, dt * 2.0f);
             }
 
-            // Asteroid Energy: Update Visual Shader Bintang Mini & Gravitational Lensing
+            // Asteroid Energy (ActiveStar): Update Visual Shader Bintang Mini & Gravitational Lensing
             if (IsEnergyAsteroid)
             {
                 _energyPulseTimer += dt * 3.2f;
 
                 if (_energyStarMaterial != null)
                 {
-                    // 1. Susutkan radius bintang seiring menipisnya cadangan energi Aether di pusat (0.16 -> 0.04)
                     float remainingRatio = _totalCoreVoxels > 0
                         ? (float)_remainingCoreVoxels / _totalCoreVoxels
                         : (float)_remainingSolidVoxelCount / Math.Max(1, _initialSolidVoxelCount);
 
                     float normalizedRadius = Mathf.Lerp(0.04f, 0.16f, remainingRatio);
                     _energyStarMaterial.SetShaderParameter("star_radius", normalizedRadius);
+                    _energyStarMaterial.SetShaderParameter("lensing_strength", 0.12f);
 
-                    // 2. Pendinginan termal jika laser/drill tidak mengenai bintang di frame ini
-                    if (!_energyWasHitThisFrame)
+                    if (_energyWasHitThisFrame)
                     {
-                        _energyAccumulatedHeat = Mathf.MoveToward(_energyAccumulatedHeat, 0.0f, dt * 0.10f);
+                        // Dikalibrasi tepat 15 detik tembakan laser terus menerus (1.0f / 15.0f per detik)
+                        _energyAccumulatedHeat = Mathf.Min(1.0f, _energyAccumulatedHeat + (dt / 15.0f));
+
+                        if (_energyAccumulatedHeat >= 1.0f && !_isDestroying)
+                        {
+                            StartDestructionSequence();
+                        }
+                    }
+                    else
+                    {
+                        // Pendinginan bertahap saat tembakan terputus (memberi toleransi saat pemain bermanuver)
+                        _energyAccumulatedHeat = Mathf.MoveToward(_energyAccumulatedHeat, 0.0f, dt * 0.035f);
                         _energyLaserCavitation = Mathf.MoveToward(_energyLaserCavitation, 0.0f, dt * 2.8f);
                     }
                     _energyWasHitThisFrame = false;
 
-                    // 3. Efek instabilitas getaran & distorsi (saat overheating atau sedang meledak)
                     float currentInstability = _isDestroying
                         ? 1.0f
                         : Mathf.Clamp(_energyAccumulatedHeat, 0.0f, 1.0f);
@@ -1126,11 +1406,10 @@ public partial class Asteroid : RigidBody2D
                     _energyStarMaterial.SetShaderParameter("hit_angle", _energyLaserHitAngle);
                     _energyStarMaterial.SetShaderParameter("hit_cavitation", _energyLaserCavitation);
 
-                    // 4. MEDAN GRAVITASI MAUT (Gravitational Hazard & Event Horizon Pull)
+                    // MEDAN GRAVITASI MAUT (Gravitational Hazard & Event Horizon Pull)
                     float gravityRadius = Radius * 4.5f;
                     float eventHorizonRadius = Radius * 0.42f;
 
-                    // Tarik Kapal Induk Pemain
                     if (PlayerCore.Instance != null && IsInstanceValid(PlayerCore.Instance))
                     {
                         float playerDist = CachedPosition.DistanceTo(PlayerCore.Instance.GlobalPosition);
@@ -1141,7 +1420,6 @@ public partial class Asteroid : RigidBody2D
                             float pullForce = Mathf.Lerp(60.0f, 520.0f, pullRatio * pullRatio);
                             PlayerCore.Instance.Velocity += pullDir * (pullForce * dt);
 
-                            // EVENT HORIZON: Jika tersedot sampai ke pusat bintang -> INSTANT DEATH!
                             if (playerDist < eventHorizonRadius)
                             {
                                 PlayerCore.Instance.TakeDamage(99999.0f, -pullDir);
@@ -1149,11 +1427,10 @@ public partial class Asteroid : RigidBody2D
                         }
                     }
 
-                    // Tarik & Telan Asteroid Lain yang Lewat
                     for (int a = 0; a < ActiveAsteroids.Count; a++)
                     {
                         var other = ActiveAsteroids[a];
-                        if (other == this || other._isDestroyed || !IsInstanceValid(other)) continue;
+                        if (other == this || other._isDestroyed || other.IsInSeedCycle || !IsInstanceValid(other)) continue;
                         float aDist = CachedPosition.DistanceTo(other.CachedPosition);
                         if (aDist < gravityRadius + other.OuterBoundRadius)
                         {
@@ -1161,7 +1438,6 @@ public partial class Asteroid : RigidBody2D
                             float f = Mathf.Lerp(40.0f, 320.0f, 1.0f - (aDist / (gravityRadius + other.OuterBoundRadius)));
                             other.LinearVelocity += toStar * (f * dt);
 
-                            // Jika asteroid lain terseret masuk ke inti bintang -> hancur & lenyap ditelan singularitas
                             if (aDist < eventHorizonRadius + other.OuterBoundRadius * 0.35f)
                             {
                                 other.DestroyAsteroid();
@@ -1182,14 +1458,12 @@ public partial class Asteroid : RigidBody2D
                     }
                 }
 
-                // Viewport distance culling: hanya redraw jika berada di dalam jangkauan pandang kamera
                 Vector2 playerPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
                 float distSq = GlobalPosition.DistanceSquaredTo(playerPos);
                 float cullDist = OuterBoundRadius + 2200.0f;
 
                 if (distSq <= cullDist * cullDist)
                 {
-                    // Throttle redraw efek denyut energi ke ~30 FPS untuk menghemat canvas draw call
                     _energyRedrawTimer += dt;
                     if (_energyRedrawTimer >= 0.033f)
                     {
@@ -1235,10 +1509,445 @@ public partial class Asteroid : RigidBody2D
         }
     }
 
+    // =========================================================================
+    // LOGIKA 3 TAHAP SIKLUS REINKARNASI BINTANG AETHER
+    // =========================================================================
+
+    private void EnterDormantSeedStage()
+    {
+        SeedStage = AetherSeedStage.DormantSeed;
+        _seedStageTimer = 0.0f;
+        _isDestroying = false;
+        _isDestroyed = false;
+
+        // Kosongkan voxel & matikan kolisi selama fase Seed agar kapal & drone bebas memanen Aether
+        _remainingSolidVoxelCount = 0;
+        _remainingCoreVoxels = 0;
+        _remainingResourceVoxelCount = 0;
+        _activeHeatedIndices.Clear();
+        _heatedThisFrame.Clear();
+        _seedDriftTrailWorld.Clear();
+
+        LinearVelocity = Vector2.Zero;
+        AngularVelocity = 0.0f;
+        GlobalRotation = 0.0f;
+        UpdateCachedTransform();
+
+        if (_collisionShape != null)
+        {
+            _collisionShape.SetDeferred(CollisionShape2D.PropertyName.Disabled, true);
+        }
+
+        if (_energyStarMaterial != null)
+        {
+            // Biji energi kecil yang berpendar lembut di titik nol ledakan
+            _energyStarMaterial.SetShaderParameter("star_radius", 0.026f);
+            _energyStarMaterial.SetShaderParameter("lensing_strength", 0.018f);
+            _energyStarMaterial.SetShaderParameter("instability", 0.0f);
+            _energyStarMaterial.SetShaderParameter("hit_cavitation", 0.0f);
+        }
+
+        QueueRedraw();
+    }
+
+    private void EnterCosmicDriftStage()
+    {
+        SeedStage = AetherSeedStage.CosmicDrift;
+        _seedStageTimer = 0.0f;
+        _seedTrailSampleTimer = 0.0f;
+        _seedDriftStartPos = GlobalPosition;
+        _seedDriftTargetPos = PickSafeRebirthCoordinate(_seedDriftStartPos);
+
+        Vector2 travelVec = _seedDriftTargetPos - _seedDriftStartPos;
+        Vector2 travelDir = travelVec.LengthSquared() > 1.0f ? travelVec.Normalized() : Vector2.Right;
+        _seedDriftPerpDir = new Vector2(-travelDir.Y, travelDir.X);
+        _seedDriftArcAmplitude = (GD.Randf() > 0.5f ? 1.0f : -1.0f) * (float)GD.RandRange(140.0, 260.0);
+
+        _seedDriftTrailWorld.Clear();
+        _seedDriftTrailWorld.Add(_seedDriftStartPos);
+
+        _seedTeleportState = SeedTeleportState.None;
+        _seedTeleportStateTimer = 0.0f;
+        _seedTeleportNextCooldown = (float)GD.RandRange(1.8, 2.5);
+
+        if (_energyStarRect != null) _energyStarRect.Visible = true;
+
+        if (_energyStarMaterial != null)
+        {
+            _energyStarMaterial.SetShaderParameter("star_radius", 0.032f);
+            _energyStarMaterial.SetShaderParameter("lensing_strength", 0.028f);
+            _energyStarMaterial.SetShaderParameter("instability", 0.05f);
+        }
+
+        QueueRedraw();
+    }
+
+    private void EnterSpacetimeInfallStage()
+    {
+        SeedStage = AetherSeedStage.SpacetimeInfall;
+        _seedStageTimer = 0.0f;
+        _seedTeleportState = SeedTeleportState.None;
+        if (_energyStarRect != null) _energyStarRect.Visible = true;
+        GlobalPosition = _seedDriftTargetPos;
+        LinearVelocity = Vector2.Zero;
+        AngularVelocity = 0.0f;
+        UpdateCachedTransform();
+        _seedDriftTrailWorld.Clear();
+        InitializeInfallPhotons();
+        QueueRedraw();
+    }
+
+    private Vector2 PickSafeRebirthCoordinate(Vector2 originPos)
+    {
+        var rng = new RandomNumberGenerator();
+        rng.Randomize();
+
+        Vector2 bestCandidate = originPos + new Vector2(1800.0f, 0.0f);
+        float bestClearance = -1.0f;
+
+        for (int attempt = 0; attempt < 64; attempt++)
+        {
+            // Pilih jarak migrasi 1.400 - 3.100 px di dalam sabuk asteroid (jarak pusat 1.450 - 5.100 px)
+            float moveAngle = rng.Randf() * Mathf.Tau;
+            float moveDist = rng.RandfRange(1450.0f, 3050.0f);
+            Vector2 cand = originPos + new Vector2(MathF.Cos(moveAngle), MathF.Sin(moveAngle)) * moveDist;
+
+            float radialDist = cand.Length();
+            if (radialDist < 1450.0f || radialDist > 5100.0f)
+            {
+                float clampedR = Mathf.Clamp(radialDist, 1650.0f, 4800.0f);
+                float beltAngle = cand.LengthSquared() > 1.0f ? cand.Angle() : rng.Randf() * Mathf.Tau;
+                cand = new Vector2(MathF.Cos(beltAngle), MathF.Sin(beltAngle)) * clampedR;
+            }
+
+            // Jaga jarak dari 3 Cosmic Rift di R ~ 1550 px
+            if (MathF.Abs(cand.Length() - AsteroidFieldManager.RiftOrbitRadius) < 340.0f)
+            {
+                cand = cand.Normalized() * (AsteroidFieldManager.RiftOrbitRadius + 480.0f);
+            }
+
+            float minDistToOthers = float.MaxValue;
+            for (int i = 0; i < ActiveAsteroids.Count; i++)
+            {
+                var other = ActiveAsteroids[i];
+                if (other == this || other._isDestroyed || !IsInstanceValid(other)) continue;
+                float d = cand.DistanceTo(other.CachedPosition) - (other.OuterBoundRadius + OuterBoundRadius + 240.0f);
+                if (d < minDistToOthers) minDistToOthers = d;
+            }
+
+            if (minDistToOthers > bestClearance)
+            {
+                bestClearance = minDistToOthers;
+                bestCandidate = cand;
+                if (minDistToOthers >= 120.0f)
+                {
+                    break;
+                }
+            }
+        }
+
+        return bestCandidate;
+    }
+
+    private void UpdateAetherSeedLifecycle(float dt)
+    {
+        _energyPulseTimer += dt * 3.4f;
+        _seedStageTimer += dt;
+        LinearVelocity = Vector2.Zero;
+        AngularVelocity = 0.0f;
+
+        switch (SeedStage)
+        {
+            case AetherSeedStage.DormantSeed:
+            {
+                // Tahap 1 (10 Detik): Diam di titik nol ledakan sambil berpendar lembut
+                if (_energyStarMaterial != null)
+                {
+                    float gentleBreath = 0.025f + 0.004f * MathF.Sin(_energyPulseTimer * 1.8f);
+                    _energyStarMaterial.SetShaderParameter("star_radius", gentleBreath);
+                    _energyStarMaterial.SetShaderParameter("lensing_strength", 0.016f);
+                    _energyStarMaterial.SetShaderParameter("instability", 0.0f);
+                }
+
+                if (_seedStageTimer >= DormantSeedDuration)
+                {
+                    EnterCosmicDriftStage();
+                }
+                break;
+            }
+
+            case AetherSeedStage.CosmicDrift:
+            {
+                // Tahap 2: Meluncur cepat melintasi angkasa mencari koordinat baru & sesekali teleportasi melipat ruang
+                switch (_seedTeleportState)
+                {
+                    case SeedTeleportState.None:
+                    {
+                        // 1. GERAK CEPAT MELUNCUR MENUJU TARGET (Fast Cosmic Glide)
+                        Vector2 toTarget = _seedDriftTargetPos - GlobalPosition;
+                        float distToTarget = toTarget.Length();
+
+                        if (distToTarget <= 48.0f || _seedStageTimer >= CosmicDriftDuration)
+                        {
+                            GlobalPosition = _seedDriftTargetPos;
+                            UpdateCachedTransform();
+                            EnterSpacetimeInfallStage();
+                            break;
+                        }
+
+                        Vector2 moveDir = toTarget / distToTarget;
+                        Vector2 perpDir = new Vector2(-moveDir.Y, moveDir.X);
+                        float wobble = MathF.Sin(_seedStageTimer * 5.2f) * 150.0f;
+                        float speed = 540.0f; // Bergerak sangat cepat & gesit!
+
+                        Vector2 stepVel = moveDir * speed + perpDir * wobble;
+                        GlobalPosition += stepVel * dt;
+                        UpdateCachedTransform();
+
+                        // Catat jejak pendaran ekor bintang
+                        _seedTrailSampleTimer += dt;
+                        if (_seedTrailSampleTimer >= 0.06f)
+                        {
+                            _seedTrailSampleTimer = 0.0f;
+                            _seedDriftTrailWorld.Add(CachedPosition);
+                            if (_seedDriftTrailWorld.Count > 36)
+                            {
+                                _seedDriftTrailWorld.RemoveAt(0);
+                            }
+                        }
+
+                        if (_energyStarMaterial != null)
+                        {
+                            if (_energyStarRect != null && !_energyStarRect.Visible) _energyStarRect.Visible = true;
+                            float driftPulse = 0.030f + 0.005f * MathF.Sin(_energyPulseTimer * 3.2f);
+                            _energyStarMaterial.SetShaderParameter("star_radius", driftPulse);
+                            _energyStarMaterial.SetShaderParameter("lensing_strength", 0.028f);
+                            _energyStarMaterial.SetShaderParameter("instability", 0.06f);
+                        }
+
+                        // Pengecekan pemicu Teleportasi Spacetime Lipat Ruang
+                        _seedTeleportNextCooldown -= dt;
+                        if (_seedTeleportNextCooldown <= 0.0f && distToTarget > 220.0f)
+                        {
+                            // Masuk ke fase 1: Kompresi Ruang-Waktu Ekstrem!
+                            _seedTeleportState = SeedTeleportState.Compressing;
+                            _seedTeleportStateTimer = 0.0f;
+                            _seedTeleportDeparturePos = GlobalPosition;
+
+                            SwarmSimulation.Instance?.TriggerAetherSeedCompressFx(_seedTeleportDeparturePos);
+                        }
+                        break;
+                    }
+
+                    case SeedTeleportState.Compressing:
+                    {
+                        // 2. RUANG TERKOMPRES SANGAT GILA MENUJU TITIK TUNGGAL (Extreme Singularity Collapse)
+                        _seedTeleportStateTimer += dt;
+                        float compProgress = Mathf.Clamp(_seedTeleportStateTimer / SeedTeleportCompressDuration, 0.0f, 1.0f);
+
+                        if (_energyStarMaterial != null)
+                        {
+                            float compRadius = Mathf.Lerp(0.032f, 0.003f, compProgress * compProgress);
+                            float compLensing = Mathf.Lerp(0.028f, 0.36f, compProgress);
+                            _energyStarMaterial.SetShaderParameter("star_radius", compRadius);
+                            _energyStarMaterial.SetShaderParameter("lensing_strength", compLensing);
+                            _energyStarMaterial.SetShaderParameter("instability", 0.95f);
+                        }
+
+                        if (_seedTeleportStateTimer >= SeedTeleportCompressDuration)
+                        {
+                            // Masuk ke fase 2: Lipat Ruang & Lenyap Seketika!
+                            _seedTeleportState = SeedTeleportState.Folded;
+                            _seedTeleportStateTimer = 0.0f;
+
+                            if (_energyStarRect != null) _energyStarRect.Visible = false;
+
+                            // Tentukan titik kemunculan baru secara dinamis & acak di jalur sabuk asteroid
+                            Vector2 toDest = _seedDriftTargetPos - GlobalPosition;
+                            float distDest = toDest.Length();
+
+                            Vector2 newJumpPos;
+                            if (distDest <= 680.0f)
+                            {
+                                newJumpPos = _seedDriftTargetPos;
+                            }
+                            else
+                            {
+                                Vector2 fwd = toDest / distDest;
+                                Vector2 side = new Vector2(-fwd.Y, fwd.X);
+                                float jumpDist = (float)GD.RandRange(540.0, MathF.Min(distDest * 0.85f, 980.0f));
+                                float lateralOffset = (GD.Randf() - 0.5f) * 500.0f;
+                                newJumpPos = GlobalPosition + fwd * jumpDist + side * lateralOffset;
+
+                                // Jaga radius koordinat dalam sabuk aman arena (1550 - 4900 px)
+                                float rDist = newJumpPos.Length();
+                                if (rDist < 1550.0f || rDist > 4900.0f)
+                                {
+                                    float clR = Mathf.Clamp(rDist, 1650.0f, 4800.0f);
+                                    newJumpPos = newJumpPos.Normalized() * clR;
+                                }
+                            }
+
+                            _seedTeleportTargetPos = newJumpPos;
+                            GlobalPosition = _seedTeleportTargetPos;
+                            UpdateCachedTransform();
+                            _seedDriftTrailWorld.Clear();
+                        }
+                        break;
+                    }
+
+                    case SeedTeleportState.Folded:
+                    {
+                        // 3. SEED BENAR-BENAR LENYAP DI RUANG SUB-SPACE
+                        _seedTeleportStateTimer += dt;
+                        if (_seedTeleportStateTimer >= SeedTeleportFoldDuration)
+                        {
+                            // Masuk ke fase 3: Muncul kembali & Ruang Melebar Sangat Hebat!
+                            _seedTeleportState = SeedTeleportState.Expanding;
+                            _seedTeleportStateTimer = 0.0f;
+
+                            if (_energyStarRect != null) _energyStarRect.Visible = true;
+                            SwarmSimulation.Instance?.TriggerAetherSeedExpandFx(GlobalPosition);
+                        }
+                        break;
+                    }
+
+                    case SeedTeleportState.Expanding:
+                    {
+                        // 4. RUANG MELEBAR SANGAT BESAR & SEED MEKAR KEMBALI
+                        _seedTeleportStateTimer += dt;
+                        float expProgress = Mathf.Clamp(_seedTeleportStateTimer / SeedTeleportExpandDuration, 0.0f, 1.0f);
+
+                        if (_energyStarMaterial != null)
+                        {
+                            float expRadius = Mathf.Lerp(0.092f, 0.032f, MathF.Sqrt(expProgress));
+                            float expLensing = Mathf.Lerp(0.26f, 0.028f, expProgress);
+                            _energyStarMaterial.SetShaderParameter("star_radius", expRadius);
+                            _energyStarMaterial.SetShaderParameter("lensing_strength", expLensing);
+                            _energyStarMaterial.SetShaderParameter("instability", 0.5f * (1.0f - expProgress));
+                        }
+
+                        if (_seedTeleportStateTimer >= SeedTeleportExpandDuration)
+                        {
+                            // Selesai teleportasi: Lanjut jalan menuju target!
+                            _seedTeleportState = SeedTeleportState.None;
+                            _seedTeleportStateTimer = 0.0f;
+                            _seedTeleportNextCooldown = (float)GD.RandRange(1.8, 2.7);
+                        }
+                        break;
+                    }
+                }
+                break;
+            }
+
+            case AetherSeedStage.SpacetimeInfall:
+            {
+                // Tahap 3 (30 Detik): Spacetime Infall & Rebirth - Menyedot ruang-waktu, partikel cahaya, & mekar kembali!
+                GlobalPosition = _seedDriftTargetPos;
+                UpdateCachedTransform();
+
+                float p = Mathf.Clamp(_seedStageTimer / SpacetimeInfallDuration, 0.0f, 1.0f);
+                float smoothP = p * p * (3.0f - 2.0f * p);
+
+                if (_energyStarMaterial != null)
+                {
+                    // Biji mengembang bertahap dari 0.032 menjadi ukuran penuh Bintang Aether (0.16)
+                    float growingRadius = Mathf.Lerp(0.032f, 0.16f, smoothP);
+                    float growingLensing = Mathf.Lerp(0.035f, 0.165f, smoothP);
+                    float birthInstability = Mathf.Lerp(0.08f, 0.45f, p * p);
+
+                    _energyStarMaterial.SetShaderParameter("star_radius", growingRadius);
+                    _energyStarMaterial.SetShaderParameter("lensing_strength", growingLensing);
+                    _energyStarMaterial.SetShaderParameter("instability", birthInstability);
+                }
+
+                // Simulasi partikel cahaya kosmik yang tersedot masuk ke dalam biji (Spacetime Infall Stream)
+                float speedMult = Mathf.Lerp(0.85f, 2.65f, smoothP);
+                for (int i = 0; i < InfallPhotonCount; i++)
+                {
+                    ref var ph = ref _infallPhotons[i];
+                    ph.Angle += ph.AngularSpeed * dt * speedMult;
+                    ph.Distance -= ph.RadialSpeed * dt * speedMult;
+
+                    if (ph.Distance <= 10.0f)
+                    {
+                        ph.Distance = ph.MaxDistance * (0.75f + 0.25f * p);
+                    }
+                }
+
+                if (_seedStageTimer >= SpacetimeInfallDuration)
+                {
+                    ReincarnateAsNewAetherStar();
+                    return;
+                }
+                break;
+            }
+        }
+
+        QueueRedraw();
+    }
+
+    private void ReincarnateAsNewAetherStar()
+    {
+        SeedStage = AetherSeedStage.ActiveStar;
+        _seedStageTimer = 0.0f;
+        _isDestroying = false;
+        _isDestroyed = false;
+        _energyAccumulatedHeat = 0.0f;
+        _energyLaserCavitation = 0.0f;
+        _seedDriftTrailWorld.Clear();
+
+        // Bangun kembali geometri kristal & inti Aether baru yang utuh di koordinat reinkarnasi
+        UpdateCachedTransform();
+        ConfigureResourceCompositionAndColors();
+        GenerateProceduralGeometry();
+        InitializeVoxelGrid();
+        GenerateResourceVoxelPatches();
+        BuildPerimeterSegments();
+        RebuildAllRowSpans();
+        RebuildBatchedRenderGeometry();
+
+        CurrentHealth = MaxHealth;
+
+        if (_circleShape != null)
+        {
+            _circleShape.Radius = OuterBoundRadius;
+        }
+        if (_collisionShape != null)
+        {
+            _collisionShape.SetDeferred(CollisionShape2D.PropertyName.Disabled, false);
+        }
+
+        if (_energyStarMaterial != null)
+        {
+            _energyStarMaterial.SetShaderParameter("star_radius", 0.16f);
+            _energyStarMaterial.SetShaderParameter("lensing_strength", 0.12f);
+            _energyStarMaterial.SetShaderParameter("instability", 0.0f);
+            _energyStarMaterial.SetShaderParameter("hit_cavitation", 0.0f);
+        }
+
+        // Berikan kecepatan hanyut kosmik pelan pada bintang yang baru lahir
+        float angle = GD.Randf() * Mathf.Tau;
+        float speed = (float)GD.RandRange(5.0, 12.0);
+        LinearVelocity = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * speed;
+        AngularVelocity = (float)GD.RandRange(-0.06, 0.06);
+
+        // Gelombang kejut kelahiran kembali Bintang Aether pada grid & arena
+        SwarmSimulation.Instance?.TriggerAetherStarRebirthFx(CachedPosition, Radius);
+        QueueRedraw();
+    }
+
     public override void _Draw()
     {
         try
         {
+            // Render visual khusus selama 3 Tahap Siklus Reinkarnasi Aether Seed
+            if (IsInSeedCycle)
+            {
+                DrawAetherSeedLifecycle();
+                return;
+            }
+
             if (PolygonVertices.Length < 3) return;
 
             // RENDER KHUSUS ASTEROID ENERGY (MINI STAR SINGULARITY SHADER / FALLBACK VECTOR)
@@ -1258,6 +1967,27 @@ public partial class Asteroid : RigidBody2D
                 RebuildBatchedRenderGeometry();
             }
 
+            // Genie Effect Transform Matrix:
+            // Mentransformasikan seluruh geometri tubuh asteroid (batu, vein, dinding terowongan, outline)
+            // dengan distorsi non-uniform taffy stretch (seperti efek lampu Aladdin / macOS Genie)
+            // tanpa mengubah skala RigidBody2D fisik Godot!
+            bool isGenieActive = IsBirthAnimationActive && (_birthLongitudinalScale != 1.0f || _birthLateralScale != 1.0f);
+            if (isGenieActive)
+            {
+                float localAngle = BirthEjectDirection.Angle() - CachedRotation;
+                Transform2D rotTo = new Transform2D(-localAngle, Vector2.Zero);
+                Transform2D scaleMat = Transform2D.Identity.Scaled(new Vector2(_birthLongitudinalScale, _birthLateralScale));
+                Transform2D rotBack = new Transform2D(localAngle, Vector2.Zero);
+
+                // Sedikit pergeseran titik tumpu maju agar ujung depan asteroid memimpin keluar
+                Vector2 localDir = BirthEjectDirection.Rotated(-CachedRotation);
+                float p = Mathf.Clamp(_birthAnimTimer / BirthAnimDuration, 0.0f, 1.0f);
+                float leadOffset = (1.0f - _birthLongitudinalScale) * Radius * 0.25f * (1.0f - p);
+                Transform2D leadShift = Transform2D.Identity.Translated(localDir * leadOffset);
+
+                DrawSetTransformMatrix(leadShift * rotBack * scaleMat * rotTo);
+            }
+
             // 1. Gambar Badan Asteroid Batu Biasa
             if (_carvedVoxelCount == 0)
             {
@@ -1271,7 +2001,7 @@ public partial class Asteroid : RigidBody2D
                 }
             }
 
-            // 2. Gambar Patch Resource (Terkalibrasi Spektrometri Scanner: X-Ray Baru di 60+ Scanner!)
+            // 2. Gambar Patch Resource
             float scanRatio;
             if (CurrentScannerCount <= 0)
             {
@@ -1317,7 +2047,7 @@ public partial class Asteroid : RigidBody2D
                 DrawMultiline(_batchedWallLines, _tunnelWallBorderColor, 1.2f, false);
             }
 
-            // 4. TEPI BATU RESOURCE MENYALA SAAT DRILLING SUDAH SAMPAI RESOURCE!
+            // 4. TEPI BATU RESOURCE MENYALA SAAT DRILLING SUPAI RESOURCE
             if (_carvedVoxelCount > 0)
             {
                 for (int t = 0; t < ResourceCount; t++)
@@ -1376,8 +2106,6 @@ public partial class Asteroid : RigidBody2D
             }
 
             // 6. Garis Kontur Luar Asteroid
-            // Garis tepi terluar asteroid batu 100% permanen warna batu gelap angkasa.
-            // Scanner tidak membuat asteroid menyala seperti bohlam, hanya mendeteksi mineral di dalam!
             Color outlineColor = _unscannedBorderColor;
             float borderWidth = 2.2f;
 
@@ -1390,14 +2118,37 @@ public partial class Asteroid : RigidBody2D
                 DrawMultiline(_batchedPerimeterLines, outlineColor, borderWidth, false);
             }
 
-            // 7. Render Efek Animasi Retakan Overload saat Asteroid Sedang Hancur
+            // 7. Render Animasi Retakan Jaring Laba-Laba (Spiderweb Catastrophic Fracture) saat Asteroid Runtuh
             if (_isDestroying && _catastrophicFractureLines.Count >= 2)
             {
-                float progress = 1.0f - Mathf.Clamp(_destructionTimer / DestructionDuration, 0.0f, 1.0f);
-                float flash = 0.55f + 0.45f * MathF.Sin(_destructionTimer * 48.0f);
-                Color fractureColor = new Color(3.8f, 3.4f, 2.2f, 0.90f * flash);
-                DrawMultiline(_catastrophicFractureLines.ToArray(), fractureColor, 2.8f + progress * 2.0f, false);
-                DrawCircle(Vector2.Zero, Radius * progress * 0.65f, new Color(fractureColor.R, fractureColor.G, fractureColor.B, 0.28f * (1.0f - progress)));
+                float progress = 1.0f - Mathf.Clamp(_destructionTimer / MathF.Max(0.01f, _currentDestructionDuration), 0.0f, 1.0f);
+                float flash = 0.60f + 0.40f * MathF.Sin(_destructionTimer * 52.0f);
+                Color resCol = ResourceGlowColor;
+                Color fractureColor = resCol.Lerp(new Color(4.8f, 4.2f, 2.2f, 1.0f), 0.55f + progress * 0.35f);
+                fractureColor.A = 0.92f * flash;
+
+                DrawMultiline(_catastrophicFractureLines.ToArray(), fractureColor, 2.6f + progress * 2.4f, false);
+                DrawCircle(Vector2.Zero, Radius * progress * 0.68f, new Color(fractureColor.R, fractureColor.G, fractureColor.B, 0.28f * (1.0f - progress)));
+            }
+
+            // 8. Render Pendaran Panas Super-Heated saat Asteroid Baru Lahir dari White Hole
+            if (_birthGlow > 0.01f)
+            {
+                Color birthThermal = new Color(5.5f, 4.8f, 3.2f, _birthGlow * 0.85f);
+                DrawCircle(Vector2.Zero, Radius * 0.96f, birthThermal);
+                DrawArc(Vector2.Zero, Radius * 1.05f, 0.0f, Mathf.Tau, 48, new Color(5.5f, 5.2f, 4.8f, _birthGlow), 3.5f, false);
+            }
+
+            // Reset matrix transform kembali ke koordinat lokal normal untuk rendering tali pusar
+            if (isGenieActive)
+            {
+                DrawSetTransformMatrix(Transform2D.Identity);
+            }
+
+            // 9. TALI PUSAR PLASMA KELAHIRAN JIN (Genie Umbilical Funnel)
+            if (IsBirthAnimationActive && _birthAnimTimer < BirthAnimDuration * 0.78f)
+            {
+                DrawGenieUmbilicalFunnel();
             }
         }
         catch (Exception ex)
@@ -1406,9 +2157,200 @@ public partial class Asteroid : RigidBody2D
         }
     }
 
+    private void DrawGenieUmbilicalFunnel()
+    {
+        float p = Mathf.Clamp(_birthAnimTimer / (BirthAnimDuration * 0.78f), 0.0f, 1.0f);
+        float funnelAlpha = 1.0f - p;
+        if (funnelAlpha <= 0.01f) return;
+
+        Vector2 riftLocal = FastWorldToLocal(BirthRiftOrigin);
+        Vector2 localEjectDir = BirthEjectDirection.Rotated(-CachedRotation);
+
+        // Pangkal belakang asteroid (tempat menempelnya corong jin)
+        Vector2 asteroidBase = -localEjectDir * (Radius * _birthLongitudinalScale * 0.75f);
+        Vector2 spine = asteroidBase - riftLocal;
+        float spineLen = spine.Length();
+        if (spineLen < 6.0f) return;
+
+        Vector2 spineDir = spine / spineLen;
+        Vector2 spinePerp = new Vector2(-spineDir.Y, spineDir.X);
+
+        // Lebar corong: sempit di mulut white hole, melebar di pangkal asteroid (efek terompet/lampu jin)
+        float mouthWidth = Mathf.Lerp(24.0f, 12.0f, p);
+        float baseWidth = Radius * 2.0f * _birthLateralScale * 0.65f;
+
+        const int SliceCount = 8;
+        Vector2[] polyPts = new Vector2[(SliceCount + 1) * 2];
+        Vector2[] corePolyPts = new Vector2[(SliceCount + 1) * 2];
+
+        for (int i = 0; i <= SliceCount; i++)
+        {
+            float u = (float)i / SliceCount; // 0 di white hole, 1 di asteroid base
+            Vector2 ptCenter = riftLocal.Lerp(asteroidBase, u);
+            // Non-linear cubic flare: ramping di pangkal lubang, melebar cepat mendekati asteroid
+            float flare = u * u * (3.0f - 2.0f * u);
+            float currentWidth = Mathf.Lerp(mouthWidth, baseWidth, flare);
+
+            Vector2 offset = spinePerp * (currentWidth * 0.5f);
+            polyPts[i] = ptCenter + offset;
+            polyPts[(SliceCount + 1) * 2 - 1 - i] = ptCenter - offset;
+
+            Vector2 coreOffset = spinePerp * (currentWidth * 0.22f);
+            corePolyPts[i] = ptCenter + coreOffset;
+            corePolyPts[(SliceCount + 1) * 2 - 1 - i] = ptCenter - coreOffset;
+        }
+
+        // 1. Lapisan plasma luar: warna magma aetherik keemasan/cyan
+        Color sheathColor = new Color(3.6f, 2.2f, 0.8f, funnelAlpha * 0.75f);
+        DrawColoredPolygon(polyPts, sheathColor);
+
+        // 2. Lapisan inti putih-perak ultra panas di tengah corong
+        Color coreColor = new Color(5.5f, 5.2f, 4.6f, funnelAlpha * 0.95f);
+        DrawColoredPolygon(corePolyPts, coreColor);
+
+        // 3. Garis filament tegangan ruang-waktu di tepi corong
+        Color filamentCol = new Color(0.75f, 2.8f, 4.5f, funnelAlpha * 0.85f);
+        for (int i = 0; i < SliceCount; i++)
+        {
+            DrawLine(polyPts[i], polyPts[i + 1], filamentCol, 1.8f);
+            int idxR1 = (SliceCount + 1) * 2 - 1 - i;
+            int idxR2 = idxR1 - 1;
+            DrawLine(polyPts[idxR1], polyPts[idxR2], filamentCol, 1.8f);
+        }
+
+        // 4. Percikan plasma saat tali meregang mendekati batas putus
+        if (p > 0.45f)
+        {
+            float sparkRatio = (p - 0.45f) / 0.55f;
+            int sparkCount = 6;
+            for (int s = 0; s < sparkCount; s++)
+            {
+                float su = 0.30f + 0.60f * ((s * 0.17f + p * 1.8f) % 1.0f);
+                Vector2 sPos = riftLocal.Lerp(asteroidBase, su) + spinePerp * (MathF.Sin(s * 3.1f + p * 12.0f) * 14.0f * (1.0f - su));
+                DrawCircle(sPos, 2.4f * (1.0f - sparkRatio * 0.4f), new Color(5.0f, 4.5f, 2.5f, funnelAlpha));
+            }
+        }
+    }
+
+    private void DrawAetherSeedLifecycle()
+    {
+        float pulse = 0.88f + 0.12f * MathF.Sin(_energyPulseTimer * 2.6f);
+        Color seedGold = new Color(3.8f, 3.2f, 1.25f, 0.92f);
+        Color seedCyan = new Color(0.45f, 2.65f, 3.85f, 0.85f);
+
+        if (SeedStage == AetherSeedStage.DormantSeed)
+        {
+            // Tahap 1: Dormant Seed (10s) - Pendaran lembut dan tenang di titik nol ledakan
+            float haloR = 32.0f * pulse;
+            DrawCircle(Vector2.Zero, haloR * 1.45f, new Color(0.4f, 1.8f, 2.8f, 0.14f));
+            DrawCircle(Vector2.Zero, haloR, new Color(2.6f, 2.1f, 0.8f, 0.24f));
+            DrawArc(Vector2.Zero, 22.0f * pulse, 0.0f, Mathf.Tau, 32, new Color(seedCyan.R, seedCyan.G, seedCyan.B, 0.55f), 1.6f, true);
+            DrawCircle(Vector2.Zero, 8.5f * pulse, seedGold);
+        }
+        else if (SeedStage == AetherSeedStage.CosmicDrift)
+        {
+            // Tahap 2: Cosmic Drift - Gerak cepat & Lipat Ruang (Teleportasi Sub-Space)
+            if (_seedTeleportState == SeedTeleportState.Folded)
+            {
+                // Saat melipat ruang (Folded), biji benar-benar lenyap!
+                return;
+            }
+
+            if (_seedTeleportState == SeedTeleportState.Compressing)
+            {
+                // Efek visual ruang terkompresi sangat gila: pusaran garis foton menyusut ke titik singularitas
+                float compRatio = Mathf.Clamp(_seedTeleportStateTimer / SeedTeleportCompressDuration, 0.0f, 1.0f);
+                float compR = Mathf.Lerp(42.0f, 3.5f, compRatio);
+                DrawCircle(Vector2.Zero, compR, new Color(3.8f, 3.2f, 1.25f, 0.95f * (1.0f - compRatio * 0.45f)));
+
+                int rayCount = 8;
+                for (int r = 0; r < rayCount; r++)
+                {
+                    float angle = (float)r / rayCount * Mathf.Tau + compRatio * 8.5f;
+                    Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+                    Vector2 pOuter = dir * (compR * 3.6f);
+                    Vector2 pInner = dir * compR;
+                    DrawLine(pOuter, pInner, new Color(0.45f, 2.85f, 4.2f, 0.85f * compRatio), 2.2f);
+                }
+                return;
+            }
+
+            if (_seedTeleportState == SeedTeleportState.Expanding)
+            {
+                // Efek visual ruang melebar hebat saat muncul kembali dari sub-space
+                float expRatio = Mathf.Clamp(_seedTeleportStateTimer / SeedTeleportExpandDuration, 0.0f, 1.0f);
+                float bloomR = Mathf.Lerp(64.0f, 14.0f, MathF.Sqrt(expRatio));
+                float alpha = (1.0f - expRatio);
+                DrawCircle(Vector2.Zero, bloomR * 1.55f, new Color(0.45f, 2.5f, 3.8f, 0.35f * alpha));
+                DrawCircle(Vector2.Zero, bloomR, new Color(3.8f, 3.2f, 1.25f, 0.75f * alpha));
+                DrawArc(Vector2.Zero, bloomR * 2.1f, 0.0f, Mathf.Tau, 32, new Color(3.8f, 3.2f, 1.25f, alpha), 2.4f, true);
+            }
+
+            // Jejak pendaran ekor bintang meluncur cepat
+            if (_seedDriftTrailWorld.Count >= 2)
+            {
+                for (int i = 0; i < _seedDriftTrailWorld.Count - 1; i++)
+                {
+                    float t = (float)(i + 1) / _seedDriftTrailWorld.Count;
+                    Vector2 pA = FastWorldToLocal(_seedDriftTrailWorld[i]);
+                    Vector2 pB = FastWorldToLocal(_seedDriftTrailWorld[i + 1]);
+                    Color trailCol = new Color(0.45f, 2.35f, 3.55f, t * 0.55f);
+                    DrawLine(pA, pB, trailCol, 1.5f + t * 2.2f);
+                }
+            }
+
+            float haloR = 36.0f * pulse;
+            DrawCircle(Vector2.Zero, haloR, new Color(0.45f, 2.2f, 3.4f, 0.26f));
+            DrawArc(Vector2.Zero, 24.0f * pulse, _energyPulseTimer, _energyPulseTimer + Mathf.Pi * 1.35f, 24, seedCyan, 2.0f, true);
+            DrawArc(Vector2.Zero, 18.0f * pulse, -_energyPulseTimer * 1.2f, -_energyPulseTimer * 1.2f + Mathf.Pi * 1.35f, 24, seedGold, 1.8f, true);
+            DrawCircle(Vector2.Zero, 10.0f * pulse, seedGold);
+        }
+        else if (SeedStage == AetherSeedStage.SpacetimeInfall)
+        {
+            // Tahap 3: Spacetime Infall & Rebirth (30s) - Partikel cahaya angkasa tersedot agresif ke arah biji!
+            float p = Mathf.Clamp(_seedStageTimer / SpacetimeInfallDuration, 0.0f, 1.0f);
+            float smoothP = p * p * (3.0f - 2.0f * p);
+
+            // 1. Cincin gelombang ruang-waktu yang menyusut tersedot ke dalam pusat biji
+            int ringCount = 3;
+            for (int r = 0; r < ringCount; r++)
+            {
+                float ringPhase = ((_energyPulseTimer * (0.45f + p * 0.65f)) + (float)r / ringCount) % 1.0f;
+                float invPhase = 1.0f - ringPhase;
+                float maxInfallR = Mathf.Lerp(180.0f, 380.0f, smoothP);
+                float curR = Mathf.Lerp(16.0f, maxInfallR, invPhase);
+                float alpha = MathF.Sin(ringPhase * Mathf.Pi) * (0.32f + 0.45f * smoothP);
+                Color ringCol = (r % 2 == 0)
+                    ? new Color(0.45f, 2.45f, 3.65f, alpha)
+                    : new Color(3.6f, 2.9f, 1.1f, alpha);
+                DrawArc(Vector2.Zero, curR, 0.0f, Mathf.Tau, 40, ringCol, 1.8f + smoothP * 1.6f, true);
+            }
+
+            // 2. Partikel cahaya angkasa (Infall Photons) yang tersedot melengkung ke arah biji
+            for (int i = 0; i < InfallPhotonCount; i++)
+            {
+                var ph = _infallPhotons[i];
+                Vector2 dir = new Vector2(MathF.Cos(ph.Angle), MathF.Sin(ph.Angle));
+                Vector2 tang = new Vector2(-dir.Y, dir.X);
+                Vector2 headPos = dir * (ph.Distance * 0.82f);
+                float streakLen = Mathf.Lerp(14.0f, 42.0f, smoothP) * (1.0f - Mathf.Clamp(ph.Distance / ph.MaxDistance, 0.0f, 0.85f));
+                Vector2 tailPos = headPos + (dir * streakLen) - (tang * (streakLen * 0.38f));
+
+                Color streakCol = ph.Color;
+                streakCol.A = Mathf.Clamp((1.0f - ph.Distance / ph.MaxDistance) * (0.55f + 0.45f * smoothP), 0.12f, 0.98f);
+                DrawLine(tailPos, headPos, streakCol, ph.Size * (0.75f + 0.5f * smoothP));
+                DrawCircle(headPos, ph.Size * 0.65f, seedGold);
+            }
+
+            // 3. Biji mengembang dan mekar di pusat pusaran
+            float bloomR = Mathf.Lerp(12.0f, _crystalCoreRadius * 1.05f, smoothP) * pulse;
+            DrawCircle(Vector2.Zero, bloomR * 1.55f, new Color(0.45f, 2.2f, 3.5f, 0.22f + 0.25f * smoothP));
+            DrawCircle(Vector2.Zero, bloomR, new Color(3.8f, 3.2f, 1.25f, 0.75f + 0.20f * smoothP));
+        }
+    }
+
     private void DrawEnergyCrystalSpireCluster()
     {
-        // 1. Gambar Inti Plasma Aether Singularity Lembut & Dinamis Mengikuti Erosi Core
         float coreRatio = _totalCoreVoxels > 0
             ? Mathf.Clamp((float)_remainingCoreVoxels / _totalCoreVoxels, 0.0f, 1.0f)
             : 1.0f;
@@ -1418,16 +2360,11 @@ public partial class Asteroid : RigidBody2D
             float pulse = 0.90f + 0.10f * MathF.Sin(_energyPulseTimer * 2.8f);
             float coreR = _crystalCoreRadius * coreRatio * pulse;
 
-            // Pendaran terluar
             DrawCircle(Vector2.Zero, coreR * 1.35f, new Color(1.8f, 1.1f, 0.25f, 0.16f * coreRatio));
-            // Korona hangat
             DrawCircle(Vector2.Zero, coreR * 1.05f, new Color(2.4f, 1.8f, 0.55f, 0.35f * coreRatio));
-            // Bola plasma inti
             DrawCircle(Vector2.Zero, coreR * 0.72f, new Color(2.8f, 2.4f, 1.2f, 0.78f * coreRatio));
-            // Bintang fokus pusat
             DrawCircle(Vector2.Zero, coreR * 0.35f, new Color(3.5f, 3.2f, 2.2f, 0.95f * coreRatio));
 
-            // 2. Busur Listrik Mikro Harmonik Menuju Spires
             int arcCount = 5;
             float arcStep = Mathf.Tau / arcCount;
             Color arcColor = new Color(1.2f, 2.8f, 3.8f, 0.75f * coreRatio);
@@ -1453,13 +2390,12 @@ public partial class Asteroid : RigidBody2D
             }
         }
 
-        // 3. Render Pilar-Pilar Prisma Kristal Poligonal Berfaset 3D (Opsi A) dengan Erosi Progresif
         Color heatGlowColor = new Color(4.8f, 4.2f, 2.2f, 0.95f);
 
         for (int i = 0; i < _crystalSpires.Length; i++)
         {
             ref var spire = ref _crystalSpires[i];
-            if (spire.TotalVoxels > 0 && spire.RemainingVoxels <= 0) continue; // Hancur tertambang!
+            if (spire.TotalVoxels > 0 && spire.RemainingVoxels <= 0) continue;
 
             float healthRatio = spire.TotalVoxels > 0
                 ? Mathf.Clamp((float)spire.RemainingVoxels / spire.TotalVoxels, 0.0f, 1.0f)
@@ -1470,7 +2406,6 @@ public partial class Asteroid : RigidBody2D
             bool isHeated = spire.Heat > 0.01f;
             float vibe = isHeated ? MathF.Sin(_energyPulseTimer * 48.0f + i * 4.3f) * (spire.Heat * 2.6f) : 0.0f;
 
-            // EROSI PROGRESIF: Ujung (tip), bahu kristal (midLeft, midRight), dan ridge surut menuju baseCenter
             float effectiveRatio = MathF.Max(0.06f, healthRatio);
             Vector2 curTip = spire.BaseCenter.Lerp(spire.Tip, effectiveRatio) + spire.Perp * vibe;
             Vector2 curMidLeft = spire.BaseLeft.Lerp(spire.MidLeft, effectiveRatio);
@@ -1482,7 +2417,6 @@ public partial class Asteroid : RigidBody2D
             Vector2[] outline = new Vector2[] { spire.BaseLeft, curMidLeft, curTip, curMidRight, spire.BaseRight };
             Vector2[] ridge = new Vector2[] { spire.BaseCenter, curRidge, curTip };
 
-            // Spires sebagian besar adalah BATU OBSIDIAN GELAP ASTRAL (Vitreous Obsidian Crystal Matrix)
             Color litFacet = new Color(0.10f, 0.14f, 0.24f, 0.85f * healthRatio);
             Color shadedFacet = new Color(0.05f, 0.08f, 0.15f, 0.90f * healthRatio);
             Color outlineCol = new Color(0.40f, 0.60f, 0.90f, 0.88f * healthRatio);
@@ -1499,7 +2433,6 @@ public partial class Asteroid : RigidBody2D
             DrawPolyline(outline, outlineCol, 1.6f, false);
             DrawPolyline(ridge, ridgeCol, 1.3f, false);
 
-            // Jika pilar ini menyimpan urat kristal Optic Quartz, gambar urat kristal bercahaya sian di sepanjang punggungnya!
             if (spire.HasResourceVein)
             {
                 Color veinCol = new Color(0.8f, 3.4f, 4.6f, 0.95f * healthRatio);
@@ -1507,7 +2440,6 @@ public partial class Asteroid : RigidBody2D
                 DrawCircle(curRidge, 3.2f, new Color(1.2f, 3.8f, 5.0f, 0.90f * healthRatio));
             }
 
-            // Garis retakan fraktur saat kristal mulai tergerus (healthRatio < 0.80)
             if (healthRatio < 0.80f)
             {
                 Color crackCol = new Color(4.8f, 4.4f, 2.8f, (1.0f - healthRatio) * 0.90f);
@@ -1526,10 +2458,9 @@ public partial class Asteroid : RigidBody2D
             }
         }
 
-        // 4. Render Efek Animasi Retakan Overload saat Asteroid Sedang Hancur
         if (_isDestroying && _catastrophicFractureLines.Count >= 2)
         {
-            float progress = 1.0f - Mathf.Clamp(_destructionTimer / DestructionDuration, 0.0f, 1.0f);
+            float progress = 1.0f - Mathf.Clamp(_destructionTimer / MathF.Max(0.01f, _currentDestructionDuration), 0.0f, 1.0f);
             float flash = 0.55f + 0.45f * MathF.Sin(_destructionTimer * 48.0f);
             Color fractureColor = new Color(5.5f, 4.8f, 1.8f, 0.95f * flash);
             DrawMultiline(_catastrophicFractureLines.ToArray(), fractureColor, 2.8f + progress * 2.0f, false);
@@ -1584,7 +2515,7 @@ public partial class Asteroid : RigidBody2D
     public bool RaycastVoxel(Vector2 worldStart, Vector2 worldDir, float maxDist, out VoxelRayHit hit)
     {
         hit = default;
-        if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
+        if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
 
         Vector2 dirNorm = worldDir.Normalized();
         Vector2 toCenter = CachedPosition - worldStart;
@@ -1600,7 +2531,31 @@ public partial class Asteroid : RigidBody2D
         Vector2 localDir = FastRotateToLocal(dirNorm);
 
         float halfChord = MathF.Sqrt(MathF.Max(0.0f, boundSq - perpDistSq));
-        float tEnter = MathF.Max(0.0f, proj - halfChord - VoxelSize);
+        float tEnter = MathF.Max(0.0f, proj - halfChord);
+        if (tEnter > maxDist) return false;
+
+        // BINTANG AETHER: Bola plasma fusi murni. Laser selalu membentur permukaan luar bintang
+        // (tidak pernah melubangi terowongan kosong / tembus ke belakang!)
+        if (IsEnergyAsteroid)
+        {
+            Vector2 worldImpact = worldStart + dirNorm * tEnter;
+            Vector2 localImpact = FastWorldToLocal(worldImpact);
+            Vector2I gPos = LocalToGrid(localImpact);
+
+            hit = new VoxelRayHit
+            {
+                Hit = true,
+                Distance = tEnter,
+                GridX = Math.Clamp(gPos.X, 0, GridSide - 1),
+                GridY = Math.Clamp(gPos.Y, 0, GridSide - 1),
+                WorldCellCenter = worldImpact,
+                WorldHitPoint = worldImpact,
+                Type = VoxelType.ResourceAether,
+                CurrentHeat = _energyAccumulatedHeat
+            };
+            return true;
+        }
+
         float tExit = MathF.Min(maxDist, proj + halfChord + VoxelSize);
         if (tExit < tEnter) return false;
 
@@ -1684,7 +2639,30 @@ public partial class Asteroid : RigidBody2D
         worldCellCenter = CachedPosition;
         currentHeat = 0.0f;
 
-        if (_isDestroyed || !IsValidGridCoord(gx, gy)) return false;
+        if (_isDestroyed || IsInSeedCycle) return false;
+
+        // BINTANG AETHER: Menyerap radiasi laser fusi secara terpusat (tidak pernah dilubangi menjadi Empty!)
+        if (IsEnergyAsteroid)
+        {
+            Vector2 impactWorld = IsValidGridCoord(gx, gy)
+                ? FastLocalToWorld(GridToLocalCenter(gx, gy))
+                : CachedPosition;
+            worldCellCenter = impactWorld;
+
+            // Hit angle menghadap arah datangnya tembakan laser (arah mundur dari worldRayDir)
+            _energyLaserHitAngle = (-worldRayDir).Angle();
+            _energyLaserCavitation = Mathf.Min(1.0f, _energyLaserCavitation + 0.35f);
+            _energyWasHitThisFrame = true;
+
+            // Efek dorongan momentum radiasi foton laser pada bintang
+            ApplyImpulse(worldRayDir * (heatDelta * 1.2f), worldCellCenter - CachedPosition);
+
+            currentHeat = _energyAccumulatedHeat;
+            QueueRedraw();
+            return false; // Voxel fusi plasma murni tidak dilubangi/dikosongkan!
+        }
+
+        if (!IsValidGridCoord(gx, gy)) return false;
 
         int idx = gy * GridSide + gx;
         VoxelType currentType = _voxels[idx];
@@ -1701,24 +2679,6 @@ public partial class Asteroid : RigidBody2D
         _voxelHeat[idx] += heatDelta;
         currentHeat = Mathf.Clamp(_voxelHeat[idx], 0.0f, 1.0f);
 
-        if (IsEnergyAsteroid)
-        {
-            RegisterEnergySpireHeat(gx, gy, heatDelta);
-            Vector2 localHit = worldCellCenter - CachedPosition;
-            _energyLaserHitAngle = localHit.Angle();
-            _energyLaserCavitation = Mathf.Min(1.0f, _energyLaserCavitation + heatDelta * 4.0f);
-            // Akumulasi panas fusi diperlambat: butuh ~5-7 detik tembakan laser terus menerus untuk memicu Supernova
-            _energyAccumulatedHeat = Mathf.Min(1.0f, _energyAccumulatedHeat + heatDelta * 0.040f);
-            _energyWasHitThisFrame = true;
-
-            // Jika laser terus menerus membakar bintang mini hingga instabilitas mencapai 1.0,
-            // memicu reaksi fusi kritis gravitasi runtuh -> SUPERNOVA DETONATION!
-            if (_energyAccumulatedHeat >= 1.0f && !_isDestroying)
-            {
-                StartDestructionSequence();
-            }
-        }
-
         ApplyImpulse(worldRayDir * (heatDelta * 1.2f), worldCellCenter - CachedPosition);
         QueueRedraw();
 
@@ -1731,6 +2691,10 @@ public partial class Asteroid : RigidBody2D
             _activeHeatedIndices.Remove(idx);
 
             _remainingSolidVoxelCount = Math.Max(0, _remainingSolidVoxelCount - 1);
+            if (TryGetResourceType(currentType, out _))
+            {
+                _remainingResourceVoxelCount = Math.Max(0, _remainingResourceVoxelCount - 1);
+            }
             _carvedVoxelCount++;
 
             if (IsEnergyAsteroid)
@@ -1747,14 +2711,10 @@ public partial class Asteroid : RigidBody2D
         return false;
     }
 
-    /// <summary>
-    /// Mengecek apakah terdapat voxel padat (bukan Empty) di dalam radius tertentu dari titik dunia.
-    /// Digunakan agar Super Giga Drill hanya berinteraksi dengan batu aktual, bukan ruang kosong.
-    /// </summary>
     public bool HasSolidVoxelsInRadius(Vector2 worldCenter, float checkRadius, out Vector2 closestVoxelWorldCenter)
     {
         closestVoxelWorldCenter = worldCenter;
-        if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
+        if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
 
         float maxBound = OuterBoundRadius + checkRadius;
         float diffX = worldCenter.X - CachedPosition.X;
@@ -1801,15 +2761,11 @@ public partial class Asteroid : RigidBody2D
         return found;
     }
 
-    /// <summary>
-    /// Memberikan damage benturan kinetik tunggal pada 1 tile voxel terdekat (misal saat drone tunggal menabrak batu).
-    /// Karena tiap tile memiliki NonLaserTileMaxHp = 45.0f, satu drone hanya menggores tipis (~1/45 HP tile).
-    /// </summary>
     public bool ApplyKineticHitAtWorldPos(Vector2 worldHitPos, float kineticDamage, out VoxelType brokenType, out Vector2 brokenWorldCenter)
     {
         brokenType = VoxelType.Empty;
         brokenWorldCenter = worldHitPos;
-        if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
+        if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
 
         Vector2 localPt = FastWorldToLocal(worldHitPos);
         Vector2I centerGrid = LocalToGrid(localPt);
@@ -1846,8 +2802,18 @@ public partial class Asteroid : RigidBody2D
         {
             _energyLaserHitAngle = localPt.Angle();
             _energyLaserCavitation = Mathf.Min(1.0f, _energyLaserCavitation + 0.25f);
-            _energyAccumulatedHeat = Mathf.Min(1.0f, _energyAccumulatedHeat + 0.05f);
+            _energyAccumulatedHeat = Mathf.Min(1.0f, _energyAccumulatedHeat + 0.02f);
             _energyWasHitThisFrame = true;
+
+            if (_energyAccumulatedHeat >= 1.0f && !_isDestroying)
+            {
+                StartDestructionSequence();
+            }
+
+            brokenType = VoxelType.ResourceAether;
+            brokenWorldCenter = worldHitPos;
+            QueueRedraw();
+            return false;
         }
 
         int idx = bestGy * GridSide + bestGx;
@@ -1872,6 +2838,10 @@ public partial class Asteroid : RigidBody2D
             _activeHeatedIndices.Remove(idx);
 
             _remainingSolidVoxelCount = Math.Max(0, _remainingSolidVoxelCount - 1);
+            if (TryGetResourceType(brokenType, out _))
+            {
+                _remainingResourceVoxelCount = Math.Max(0, _remainingResourceVoxelCount - 1);
+            }
             _carvedVoxelCount++;
             if (IsEnergyAsteroid)
             {
@@ -1885,11 +2855,6 @@ public partial class Asteroid : RigidBody2D
         return false;
     }
 
-    /// <summary>
-    /// Menggerus tile asteroid secara bertahap dengan Super Giga Drill melawan HP tile masif (NonLaserTileMaxHp = 45.0f).
-    /// Tidak langsung menghancurkan tile dalam 1 frame, melainkan memanaskan dan mengikis perlahan
-    /// sementara mata bor terus berputar dan aus.
-    /// </summary>
     public int ApplyDrillGrindAtRadius(
         Vector2 worldCenter,
         float grindRadius,
@@ -1897,7 +2862,7 @@ public partial class Asteroid : RigidBody2D
         float dt,
         List<(Vector2 worldCenter, VoxelType type)>? destroyedVoxels = null)
     {
-        if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return 0;
+        if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return 0;
 
         Vector2 localCenter = FastWorldToLocal(worldCenter);
         if (localCenter.Length() > OuterBoundRadius + grindRadius) return 0;
@@ -1906,8 +2871,14 @@ public partial class Asteroid : RigidBody2D
         {
             _energyLaserHitAngle = localCenter.Angle();
             _energyLaserCavitation = Mathf.Min(1.0f, _energyLaserCavitation + 0.35f);
-            _energyAccumulatedHeat = Mathf.Min(1.0f, _energyAccumulatedHeat + dt * 0.4f);
+            _energyAccumulatedHeat = Mathf.Min(1.0f, _energyAccumulatedHeat + dt / 15.0f);
             _energyWasHitThisFrame = true;
+
+            if (_energyAccumulatedHeat >= 1.0f && !_isDestroying)
+            {
+                StartDestructionSequence();
+            }
+            return 1;
         }
 
         int minGx = Math.Clamp((int)MathF.Floor((localCenter.X - grindRadius - GridOriginLocal.X) * InvVoxelSize), 0, GridSide - 1);
@@ -1963,6 +2934,10 @@ public partial class Asteroid : RigidBody2D
                         _activeHeatedIndices.Remove(idx);
 
                         _remainingSolidVoxelCount = Math.Max(0, _remainingSolidVoxelCount - 1);
+                        if (TryGetResourceType(currentType, out _))
+                        {
+                            _remainingResourceVoxelCount = Math.Max(0, _remainingResourceVoxelCount - 1);
+                        }
                         _carvedVoxelCount++;
                         brokenNow++;
 
@@ -2018,7 +2993,7 @@ public partial class Asteroid : RigidBody2D
         float impulseWeight = 0.0f)
     {
         hitNormal = Vector2.Zero;
-        if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
+        if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
 
         float maxBound = OuterBoundRadius + radius;
         float diffX = worldPos.X - CachedPosition.X;
@@ -2140,7 +3115,7 @@ public partial class Asteroid : RigidBody2D
 
     public int CarveVoxelCircle(Vector2 worldCenter, float carveRadius, List<(Vector2 worldCenter, VoxelType type)>? destroyedVoxels = null)
     {
-        if (_isDestroyed || GridSide == 0 || _remainingSolidVoxelCount <= 0) return 0;
+        if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return 0;
 
         Vector2 localCenter = FastWorldToLocal(worldCenter);
         if (localCenter.Length() > OuterBoundRadius + carveRadius) return 0;
@@ -2178,6 +3153,10 @@ public partial class Asteroid : RigidBody2D
                     _voxelKineticDamage[idx] = 0.0f;
                     _activeHeatedIndices.Remove(idx);
                     _remainingSolidVoxelCount = Math.Max(0, _remainingSolidVoxelCount - 1);
+                    if (TryGetResourceType(currentType, out _))
+                    {
+                        _remainingResourceVoxelCount = Math.Max(0, _remainingResourceVoxelCount - 1);
+                    }
                     _carvedVoxelCount++;
                     carvedNow++;
 
@@ -2209,6 +3188,7 @@ public partial class Asteroid : RigidBody2D
 
     public void ApplyHitImpulse(Vector2 hitWorldPos, Vector2 impulse, float damage)
     {
+        if (IsInSeedCycle) return;
         Vector2 offset = hitWorldPos - CachedPosition;
         ApplyImpulse(impulse, offset);
         CurrentHealth -= damage;
@@ -2221,6 +3201,21 @@ public partial class Asteroid : RigidBody2D
 
     public void ApplyDrillBreach(Vector2 drillPos, Vector2 drillVel, float force, float drillRadius = 36.0f)
     {
+        if (IsInSeedCycle) return;
+
+        if (IsEnergyAsteroid)
+        {
+            _energyWasHitThisFrame = true;
+            _energyAccumulatedHeat = Mathf.Min(1.0f, _energyAccumulatedHeat + 0.04f);
+            if (_energyAccumulatedHeat >= 1.0f && !_isDestroying)
+            {
+                StartDestructionSequence();
+            }
+            Vector2 push = drillVel.LengthSquared() > 1.0f ? drillVel.Normalized() : Vector2.Right;
+            ApplyCentralImpulse(push * (force * 0.15f));
+            return;
+        }
+
         CarveVoxelCircle(drillPos, drillRadius);
 
         Vector2 pushDir = drillVel.LengthSquared() > 1.0f ? drillVel.Normalized() : Vector2.Right;
@@ -2230,11 +3225,27 @@ public partial class Asteroid : RigidBody2D
         ApplyTorqueImpulse(spinDir * force * Radius * 0.05f);
     }
 
+    /// <summary>
+    /// Mengecek apakah seluruh mineral di dalam asteroid sudah habis ditambang (0 resource tersisa)
+    /// atau struktur batu sudah runtuh.
+    /// </summary>
     private void CheckDestructionThreshold()
     {
-        bool shouldDestroy = IsEnergyAsteroid
-            ? (_remainingCoreVoxels <= 0 || _remainingSolidVoxelCount <= Math.Max(6, (int)(_initialSolidVoxelCount * 0.28f)))
-            : (_remainingSolidVoxelCount <= Math.Max(6, (int)(_initialSolidVoxelCount * 0.22f)));
+        if (IsInSeedCycle) return;
+
+        bool shouldDestroy;
+        if (IsEnergyAsteroid)
+        {
+            shouldDestroy = (_remainingCoreVoxels <= 0)
+                || (_remainingSolidVoxelCount <= Math.Max(6, (int)(_initialSolidVoxelCount * 0.28f)));
+        }
+        else
+        {
+            // Asteroid biasa otomatis runtuh & meledak saat seluruh urat mineral di dalamnya habis (0 resource tersisa)
+            bool allMineralsHarvested = (_initialResourceVoxelCount > 0 && _remainingResourceVoxelCount <= 0);
+            bool structuralCollapse = (_remainingSolidVoxelCount <= Math.Max(6, (int)(_initialSolidVoxelCount * 0.22f)));
+            shouldDestroy = allMineralsHarvested || structuralCollapse;
+        }
 
         if (shouldDestroy)
         {
@@ -2249,9 +3260,10 @@ public partial class Asteroid : RigidBody2D
 
     public void StartDestructionSequence()
     {
-        if (_isDestroyed || _isDestroying) return;
+        if (_isDestroyed || _isDestroying || IsInSeedCycle) return;
         _isDestroying = true;
-        _destructionTimer = DestructionDuration;
+        _currentDestructionDuration = IsEnergyAsteroid ? 0.54f : 0.76f;
+        _destructionTimer = _currentDestructionDuration;
 
         // Nonaktifkan kolisi fisika agar kapal & armada swarm tidak terbentur saat animasi ledakan berlangsung
         if (_collisionShape != null)
@@ -2259,23 +3271,42 @@ public partial class Asteroid : RigidBody2D
             _collisionShape.SetDeferred(CollisionShape2D.PropertyName.Disabled, true);
         }
 
-        // Bentuk pola retakan fraktur katastropik yang menyilang dari pusat ke tepi
+        // Bentuk pola retakan jaring laba-laba katastropik (Radial + Concentric Web Rings) yang menyala melintasi batu
         _catastrophicFractureLines.Clear();
         int crackBranches = IsEnergyAsteroid ? 12 : 16;
+        const int rings = 4;
+        Vector2[,] webNodes = new Vector2[crackBranches, rings + 1];
+
         for (int b = 0; b < crackBranches; b++)
         {
-            float angle = (float)b / crackBranches * Mathf.Tau + (GD.Randf() - 0.5f) * 0.35f;
-            Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
-            Vector2 cur = dir * (Radius * 0.08f);
+            float baseAngle = (float)b / crackBranches * Mathf.Tau + (GD.Randf() - 0.5f) * 0.24f;
+            Vector2 dir = new Vector2(MathF.Cos(baseAngle), MathF.Sin(baseAngle));
+            Vector2 perp = new Vector2(-dir.Y, dir.X);
 
-            int segs = GD.RandRange(3, 5);
-            for (int s = 1; s <= segs; s++)
+            webNodes[b, 0] = dir * (Radius * 0.06f);
+            for (int s = 1; s <= rings; s++)
             {
-                float t = (float)s / segs;
-                Vector2 next = dir * (Radius * t * (float)GD.RandRange(0.85f, 1.05f)) + new Vector2(-dir.Y, dir.X) * ((GD.Randf() - 0.5f) * 22.0f);
-                _catastrophicFractureLines.Add(cur);
-                _catastrophicFractureLines.Add(next);
-                cur = next;
+                float t = (float)s / rings;
+                float rDist = Radius * t * (float)GD.RandRange(0.84, 1.02);
+                float jitter = (GD.Randf() - 0.5f) * (Radius * 0.08f);
+                webNodes[b, s] = dir * rDist + perp * jitter;
+
+                _catastrophicFractureLines.Add(webNodes[b, s - 1]);
+                _catastrophicFractureLines.Add(webNodes[b, s]);
+            }
+        }
+
+        // Hubungkan cabang-cabang radial dengan cincin jaring laba-laba konsentris
+        for (int s = 1; s < rings; s++)
+        {
+            for (int b = 0; b < crackBranches; b++)
+            {
+                int nextB = (b + 1) % crackBranches;
+                if (s == 2 || (b + s) % 2 == 0)
+                {
+                    _catastrophicFractureLines.Add(webNodes[b, s]);
+                    _catastrophicFractureLines.Add(webNodes[nextB, s]);
+                }
             }
         }
 
@@ -2285,41 +3316,21 @@ public partial class Asteroid : RigidBody2D
     public void FinalizeDestruction()
     {
         if (_isDestroyed) return;
-        _isDestroyed = true;
 
         EmitSignal(SignalName.AsteroidDestroyed, CachedPosition, Radius, ResourceGlowColor, IsEnergyAsteroid);
 
         // Panggil efek ledakan spektakuler di SwarmSimulation (Shockwave Ring + Flying Shards + Loot Ejection)
         SwarmSimulation.Instance?.TriggerAsteroidDestructionFx(CachedPosition, Radius, ResourceGlowColor, IsEnergyAsteroid);
 
-        // Jika asteroid batu berukuran besar (Radius > 350 px), pecah menjadi 2 anak asteroid lebih kecil
-        if (!IsEnergyAsteroid && Radius > 350.0f && GetParent() != null)
+        // JIKA INI ADALAH BINTANG AETHER: Jangan dihapus! Masuk ke Tahap 1 Siklus Reinkarnasi (Dormant Seed 10 Detik)
+        if (IsEnergyAsteroid)
         {
-            int fragmentCount = 2;
-            float subRadius = Radius * 0.44f;
-
-            for (int i = 0; i < fragmentCount; i++)
-            {
-                float angle = ((float)i / fragmentCount * Mathf.Tau) + (GD.Randf() - 0.5f) * 0.6f;
-                Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * (Radius * 0.45f);
-
-                var frag = new Asteroid
-                {
-                    GlobalPosition = CachedPosition + offset,
-                    Radius = subRadius,
-                    MaxHealth = subRadius * 4.0f,
-                    AsteroidType = AsteroidType,
-                    IsEnergyAsteroid = false
-                };
-
-                float blastSpeed = (float)GD.RandRange(70.0, 160.0);
-                frag.LinearVelocity = CachedLinearVelocity + offset.Normalized() * blastSpeed;
-                frag.AngularVelocity = (GD.Randf() - 0.5f) * 1.5f;
-
-                GetParent().CallDeferred("add_child", frag);
-            }
+            EnterDormantSeedStage();
+            return;
         }
 
+        // Asteroid batu biasa: hancur berkeping-keping menjadi puing kosmik dan membuka ruang kosong di arena!
+        _isDestroyed = true;
         QueueFree();
     }
 
