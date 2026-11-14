@@ -91,6 +91,15 @@ public sealed class BoidSystem
     public float Damping { get; set; } = 0.94f;
     public float MaxOrbitSpeed { get; set; } = 500.0f;
 
+    // Parameter 3D Tilted Orbital Ring (Berputar relatif terhadap arah kursor)
+    public float RingTiltAspect { get; set; } = 0.25f;
+    public float RingCantAngle { get; set; } = 0.20f;
+    public float RingSpringStiffness { get; set; } = 16.5f;
+    private float _ringCursorAngle = 0.0f;
+    private bool _ringAngleInitialized = false;
+    private float _enemyRingAimAngle = 0.0f;
+    private bool _enemyRingAngleInitialized = false;
+
     public const int SectorCount = 12;
     public const float SectorArc = Mathf.Tau / SectorCount;
     public float ShieldRadius { get; set; } = 88.0f;
@@ -144,11 +153,67 @@ public sealed class BoidSystem
         bool isGigaDrillActive = false,
         float playerCoreRadius = 26.0f,
         float enemyCoreRadius = 42.0f,
-        Vector2 enemyCoreVelocity = default)
+        Vector2 enemyCoreVelocity = default,
+        Vector2 enemyAimDirection = default)
     {
         float dt = MathF.Min(delta, 0.033f);
         _organicWaveTime += dt;
         _sectorRebalanceTimer += dt;
+
+        // Perbarui orientasi sumbu Cincin 3D agar berputar mulus terhadap arah kursor
+        Vector2 toCursorAim = cursorThreatPos - anchorPos;
+        if (toCursorAim.LengthSquared() > 4.0f)
+        {
+            float targetCursorAngle = toCursorAim.Angle();
+            if (!_ringAngleInitialized)
+            {
+                _ringCursorAngle = targetCursorAngle;
+                _ringAngleInitialized = true;
+            }
+            else
+            {
+                _ringCursorAngle = Mathf.LerpAngle(_ringCursorAngle, targetCursorAngle, MathF.Min(1.0f, 12.0f * dt));
+            }
+        }
+
+        float ringAxisAngle = _ringCursorAngle + RingCantAngle;
+        Vector2 ringMinorDir = new Vector2(MathF.Cos(ringAxisAngle), MathF.Sin(ringAxisAngle));
+        Vector2 ringMajorDir = new Vector2(-ringMinorDir.Y, ringMinorDir.X);
+        float coreRadiusOffset = MathF.Max(0.0f, playerCoreRadius - 16.0f);
+
+        // Orientasi Cincin 3D Musuh: Dihaluskan terhadap arah bidik penambangan atau arah terbang
+        float targetEnemyAimAngle;
+        if (enemyAimDirection.LengthSquared() > 0.01f)
+        {
+            targetEnemyAimAngle = enemyAimDirection.Angle();
+        }
+        else if (enemyCoreVelocity.LengthSquared() > 16.0f)
+        {
+            targetEnemyAimAngle = enemyCoreVelocity.Angle();
+        }
+        else if (!_enemyRingAngleInitialized)
+        {
+            targetEnemyAimAngle = (anchorPos - enemyCorePos).Angle();
+        }
+        else
+        {
+            targetEnemyAimAngle = _enemyRingAimAngle;
+        }
+
+        if (!_enemyRingAngleInitialized)
+        {
+            _enemyRingAimAngle = targetEnemyAimAngle;
+            _enemyRingAngleInitialized = true;
+        }
+        else
+        {
+            _enemyRingAimAngle = Mathf.LerpAngle(_enemyRingAimAngle, targetEnemyAimAngle, MathF.Min(1.0f, 10.0f * dt));
+        }
+
+        float enemyAxisAngle = _enemyRingAimAngle + RingCantAngle;
+        Vector2 enemyRingMinorDir = new Vector2(MathF.Cos(enemyAxisAngle), MathF.Sin(enemyAxisAngle));
+        Vector2 enemyRingMajorDir = new Vector2(-enemyRingMinorDir.Y, enemyRingMinorDir.X);
+        float enemyCoreRadiusOffset = MathF.Max(0.0f, enemyCoreRadius - 16.0f);
 
         float decayOrbit = MathF.Pow(Damping, dt * 60.0f);
         float decayGuardian = MathF.Pow(0.89f, dt * 60.0f);
@@ -423,31 +488,81 @@ public sealed class BoidSystem
             {
                 if (swarm.State == SwarmState.Orbiting)
                 {
-                    Vector2 toEnemyCore = enemyCorePos - pos.Value;
-                    float distToEnemyCore = toEnemyCore.Length();
-                    Vector2 dirToEnemyCore = distToEnemyCore > 0.001f ? toEnemyCore / distToEnemyCore : Vector2.Right;
+                    // =====================================================================
+                    // FORMASI CINCIN 3D MIRING (3D TILTED ORBITAL RING) UNTUK ARMADA RIVAL HIVE
+                    // - Seksama & simetris 100% dengan formasi cincin 3D pemain
+                    // - Menggunakan kedalaman depthZ = sin(theta) untuk Back/Front Ring depth
+                    // =====================================================================
+                    float angularSpd = MathF.Abs(swarm.OrbitSpeed) > 0.2f ? MathF.Abs(swarm.OrbitSpeed) : 1.75f;
+                    swarm.OrbitAngle = Mathf.Wrap(swarm.OrbitAngle + angularSpd * dt, 0.0f, Mathf.Tau);
 
-                    Vector2 accel = Vector2.Zero;
-                    float distError = distToEnemyCore - swarm.OrbitDistance;
-                    accel += dirToEnemyCore * (distError * OrbitSpringWeight * 1.8f);
-                    Vector2 tangent = new Vector2(-dirToEnemyCore.Y, dirToEnemyCore.X);
-                    accel += tangent * (swarm.OrbitSpeed * OrbitTangentialWeight);
-                    accel += enemyCoreVelocity * 1.95f;
+                    float waveJitter = MathF.Sin(_organicWaveTime * 2.2f + swarm.PersonalAngleOffset * 8.0f) * 0.035f;
+                    float effectiveTheta = swarm.OrbitAngle + waveJitter;
+                    float cosT = MathF.Cos(effectiveTheta);
+                    float sinT = MathF.Sin(effectiveTheta);
+
+                    float depthZ = sinT;
+                    swarm.OrbitDepth = depthZ;
+
+                    float baseRoleRadius = swarm.Role switch
+                    {
+                        SwarmRole.Guardian => 80.0f,
+                        SwarmRole.MiningDroid or SwarmRole.ScannerDrone => 68.0f,
+                        _ => 74.0f
+                    };
+                    float majorR = baseRoleRadius + Math.Clamp(swarm.PersonalRadialOffset, -6.0f, 6.0f) + enemyCoreRadiusOffset;
+                    float minorR = majorR * RingTiltAspect;
+
+                    Vector2 ringOffset = enemyRingMajorDir * (majorR * cosT) + enemyRingMinorDir * (minorR * sinT);
+                    Vector2 targetRingPos = enemyCorePos + ringOffset;
+
+                    Vector2 ringTangentVel = (-enemyRingMajorDir * (majorR * sinT) + enemyRingMinorDir * (minorR * cosT)) * angularSpd;
+
+                    Vector2 posError = targetRingPos - pos.Value;
+                    Vector2 desiredVel = enemyCoreVelocity + ringTangentVel + posError * RingSpringStiffness;
+                    vel.Value = vel.Value.Lerp(desiredVel, MathF.Min(1.0f, 14.0f * dt));
 
                     float maxEnemyOrbitSpd = MathF.Max(MaxOrbitSpeed, enemyCoreVelocity.Length() + 360.0f);
-                    vel.Value = (vel.Value + accel * dt) * decayOrbit;
                     if (vel.Value.LengthSquared() > maxEnemyOrbitSpd * maxEnemyOrbitSpd)
                     {
                         vel.Value = vel.Value.Normalized() * maxEnemyOrbitSpd;
                     }
                     pos.Value += vel.Value * dt;
 
-                    // Jika Enemy Core sedang lari cepat (Escape Pod Eject) dan drone tertinggal > 160 px, tarik menempel!
-                    if (distToEnemyCore > swarm.OrbitDistance + 120.0f)
+                    // Skala Perspektif 3D berdasarkan kedalaman depthZ
+                    float baseRoleScale = swarm.Role switch
                     {
-                        pos.Value = pos.Value.Lerp(enemyCorePos - dirToEnemyCore * swarm.OrbitDistance, MathF.Min(1.0f, 18.0f * dt));
+                        SwarmRole.Guardian => 0.72f,
+                        SwarmRole.ScannerDrone => 0.60f,
+                        SwarmRole.MiningDroid => 0.62f,
+                        _ => 0.55f
+                    };
+                    float depthScaleMult = depthZ < 0.0f
+                        ? Mathf.Lerp(0.92f, 0.70f, -depthZ)
+                        : Mathf.Lerp(0.92f, 1.12f, depthZ);
+                    vis.Scale = Mathf.Lerp(vis.Scale, baseRoleScale * depthScaleMult, MathF.Min(1.0f, dt * 12.0f));
+
+                    // Orientasi hadap unit musuh: Mining Droid membidik arah target penambangan, lainnya mengikuti aliran cincin
+                    if (swarm.Role == SwarmRole.MiningDroid)
+                    {
+                        Vector2 aimDir = (enemyAimDirection.LengthSquared() > 0.01f) ? enemyAimDirection : ringTangentVel;
+                        if (aimDir.LengthSquared() > 0.01f)
+                        {
+                            float desiredAngle = aimDir.Angle() + Mathf.Pi * 0.5f;
+                            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredAngle, MathF.Min(1.0f, 24.0f * dt));
+                        }
                     }
-                    swarm.SpinAngle = vel.Value.Angle() + Mathf.Pi * 0.5f;
+                    else if (MathF.Abs(swarm.SpinRate) <= 0.01f)
+                    {
+                        Vector2 flowDir = ringTangentVel.LengthSquared() > 1.0f ? ringTangentVel : vel.Value;
+                        if (flowDir.LengthSquared() > 1.0f)
+                        {
+                            float desiredFaceAngle = flowDir.Angle() + Mathf.Pi * 0.5f;
+                            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredFaceAngle, MathF.Min(1.0f, 18.0f * dt));
+                        }
+                    }
+
+                    // Efek Redup Kedalaman (Depth Dimming) & Warna Role Musuh
                     if (swarm.HitFlashTimer > 0.0f)
                     {
                         swarm.HitFlashTimer -= dt;
@@ -455,7 +570,24 @@ public sealed class BoidSystem
                     }
                     else
                     {
-                        vis.Color = EnemyGlowColor;
+                        Color baseCol = swarm.Role switch
+                        {
+                            SwarmRole.MiningDroid => new Color(3.6f, 1.8f, 0.4f, 1.0f),
+                            SwarmRole.Guardian => new Color(2.6f, 0.45f, 3.2f, 1.0f),
+                            SwarmRole.DrillDrone => new Color(4.2f, 0.6f, 0.2f, 1.0f),
+                            SwarmRole.GigaShuriken => new Color(3.8f, 0.3f, 1.8f, 1.0f),
+                            SwarmRole.CrescentBoomerang => new Color(0.4f, 2.8f, 1.2f, 1.0f),
+                            _ => EnemyGlowColor
+                        };
+
+                        if (depthZ < 0.0f)
+                        {
+                            vis.Color = new Color(baseCol.R * 0.58f, baseCol.G * 0.58f, baseCol.B * 0.58f, 0.72f);
+                        }
+                        else
+                        {
+                            vis.Color = baseCol;
+                        }
                     }
                     return;
                 }
@@ -648,124 +780,122 @@ public sealed class BoidSystem
                     // ke Kubah Parabola di depan Core oleh SwarmSimulation.UpdateDartBoost!
                     if (isBoostActive)
                     {
+                        swarm.OrbitDepth = 1.0f;
                         return;
                     }
 
-                    // Efek flash putih saat terkena benturan (HP berkurang) atau transisi peredaman warna
-                    if (swarm.HitFlashTimer > 0.0f)
+                    // =====================================================================
+                    // FORMASI CINCIN 3D MIRING (3D TILTED ORBITAL RING) UNTUK SELURUH ROLE
+                    // - Berputar mulus mengikuti arah kursor (ringMajorDir & ringMinorDir)
+                    // - Mencakup semua unit termasuk Guardian (⛨)
+                    // - Kedalaman depthZ = sin(theta) in [-1..+1]:
+                    //   * depthZ < 0: Lewat di BELAKANG Core (Back Ring ZIndex=1, agak redup & mengecil)
+                    //   * depthZ >= 0: Lewat di DEPAN Core (Front Ring ZIndex=3, menyala terang & membesar)
+                    // =====================================================================
+                    float angularSpd = MathF.Abs(swarm.OrbitSpeed) > 0.2f ? MathF.Abs(swarm.OrbitSpeed) : 1.75f;
+                    swarm.OrbitAngle = Mathf.Wrap(swarm.OrbitAngle + angularSpd * dt, 0.0f, Mathf.Tau);
+
+                    float waveJitter = MathF.Sin(_organicWaveTime * 2.2f + swarm.PersonalAngleOffset * 8.0f) * 0.035f;
+                    float effectiveTheta = swarm.OrbitAngle + waveJitter;
+                    float cosT = MathF.Cos(effectiveTheta);
+                    float sinT = MathF.Sin(effectiveTheta);
+
+                    float depthZ = sinT;
+                    swarm.OrbitDepth = depthZ;
+
+                    float baseRoleRadius = swarm.Role switch
                     {
-                        swarm.HitFlashTimer -= dt;
-                        vis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
-                    }
-                    else if (vis.Color != vis.BaseColor)
+                        SwarmRole.Guardian => 80.0f,
+                        SwarmRole.MiningDroid or SwarmRole.ScannerDrone => 68.0f,
+                        _ => 74.0f
+                    };
+                    float majorR = baseRoleRadius + Math.Clamp(swarm.PersonalRadialOffset, -6.0f, 6.0f) + coreRadiusOffset;
+                    float minorR = majorR * RingTiltAspect;
+
+                    Vector2 ringOffset = ringMajorDir * (majorR * cosT) + ringMinorDir * (minorR * sinT);
+                    Vector2 targetRingPos = anchorPos + ringOffset;
+
+                    // Kecepatan tangensial elips analitik (memberikan efek foreshortening 3D alami di ujung elips)
+                    Vector2 ringTangentVel = (-ringMajorDir * (majorR * sinT) + ringMinorDir * (minorR * cosT)) * angularSpd;
+
+                    Vector2 posError = targetRingPos - pos.Value;
+                    Vector2 desiredVel = anchorVelocity + ringTangentVel + posError * RingSpringStiffness;
+                    vel.Value = vel.Value.Lerp(desiredVel, MathF.Min(1.0f, 14.0f * dt));
+
+                    float dynamicMaxOrbitSpd = MathF.Max(MaxOrbitSpeed, anchorVelocity.Length() + 360.0f);
+                    if (vel.Value.LengthSquared() > dynamicMaxOrbitSpd * dynamicMaxOrbitSpd)
                     {
-                        vis.Color = vis.Color.Lerp(vis.BaseColor, dt * 5.0f);
+                        vel.Value = vel.Value.Normalized() * dynamicMaxOrbitSpd;
                     }
-                    float targetRoleScale = swarm.Role switch
+
+                    // Skala Perspektif 3D berdasarkan kedalaman depthZ
+                    float baseRoleScale = swarm.Role switch
                     {
                         SwarmRole.Guardian => 0.72f,
                         SwarmRole.ScannerDrone => 0.60f,
                         SwarmRole.MiningDroid => 0.62f,
                         _ => 0.55f
                     };
-                    if (vis.Scale < targetRoleScale)
+                    float depthScaleMult = depthZ < 0.0f
+                        ? Mathf.Lerp(0.92f, 0.70f, -depthZ)
+                        : Mathf.Lerp(0.92f, 1.12f, depthZ);
+                    vis.Scale = Mathf.Lerp(vis.Scale, baseRoleScale * depthScaleMult, MathF.Min(1.0f, dt * 12.0f));
+
+                    // Efek Redup Kedalaman (Depth Dimming) saat di belakang Core vs Terang di depan Core
+                    if (swarm.HitFlashTimer > 0.0f)
                     {
-                        vis.Scale = Mathf.Lerp(vis.Scale, targetRoleScale, dt * 6.5f);
-                    }
-
-                    if (swarm.Role == SwarmRole.Guardian)
-                    {
-                        Vector2 fromCore = pos.Value - anchorPos;
-                        float distFromCore = fromCore.Length();
-                        Vector2 radialOut = distFromCore > 0.001f ? fromCore / distFromCore : Vector2.Right;
-                        Vector2 tangent = new Vector2(-radialOut.Y, radialOut.X);
-
-                        float breathing = MathF.Sin(_organicWaveTime * 1.8f + swarm.OrbitAngle) * 6.5f;
-                        float targetRadius = ShieldRadius + swarm.PersonalRadialOffset + breathing;
-
-                        float radialError = targetRadius - distFromCore;
-                        Vector2 force = radialOut * (radialError * ShieldRadialSpring);
-
-                        float currentAngle = fromCore.Angle();
-                        float angleError = Mathf.AngleDifference(currentAngle, swarm.ShieldTargetAngle);
-                        float clampedAngleErr = Mathf.Clamp(angleError, -2.0f, 2.0f);
-                        force += tangent * (clampedAngleErr * ShieldRadius * ShieldAngularSpring);
-
-                        force += anchorVelocity * 1.55f;
-
-                        if (distFromCore > ShieldRadius * 1.35f)
-                        {
-                            force -= radialOut * ((distFromCore - ShieldRadius) * (ShieldRadialSpring * 1.15f));
-                        }
-
-                        int nearCount = _defenderSpatialGrid.QueryNeighbors(pos.Value, DefenderSeparationRadius, _neighborBuffer);
-                        Vector2 sepForce = Vector2.Zero;
-                        for (int n = 0; n < nearCount; n++)
-                        {
-                            int otherIdx = _neighborBuffer[n];
-                            Vector2 diff = pos.Value - _defenderPositions[otherIdx];
-                            float dSq = diff.LengthSquared();
-                            if (dSq > 0.01f && dSq < DefenderSeparationRadius * DefenderSeparationRadius)
-                            {
-                                float d = MathF.Sqrt(dSq);
-                                float push = (DefenderSeparationRadius - d) / DefenderSeparationRadius;
-                                sepForce += (diff / d) * (push * DefenderSeparationWeight);
-                            }
-                        }
-                        force += sepForce;
-
-                        vel.Value = (vel.Value + force * dt) * decayGuardian;
-                        if (vel.Value.LengthSquared() > MaxGuardianSpeed * MaxGuardianSpeed)
-                        {
-                            vel.Value = vel.Value.Normalized() * MaxGuardianSpeed;
-                        }
-
-                        float desiredFaceAngle = currentAngle + Mathf.Pi * 0.5f + MathF.Sin(_organicWaveTime * 2.5f + swarm.OrbitAngle) * 0.12f;
-                        swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredFaceAngle, MathF.Min(1.0f, 7.5f * dt));
+                        swarm.HitFlashTimer -= dt;
+                        vis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
                     }
                     else
                     {
-                        Vector2 toCore = anchorPos - pos.Value;
-                        float distToCore = toCore.Length();
-                        Vector2 dirToCore = distToCore > 0.001f ? toCore / distToCore : Vector2.Right;
-
-                        Vector2 accel = Vector2.Zero;
-
-                        float distError = distToCore - swarm.OrbitDistance;
-                        accel += dirToCore * (distError * OrbitSpringWeight);
-
-                        Vector2 tangent = new Vector2(-dirToCore.Y, dirToCore.X);
-                        accel += tangent * (swarm.OrbitSpeed * OrbitTangentialWeight);
-
-                        accel += anchorVelocity * 1.65f;
-
-                        Vector2 localPos = pos.Value - gridOrigin;
-                        int cx = Math.Clamp((int)(localPos.X * InvCellSize), 1, GridWidth - 2);
-                        int cy = Math.Clamp((int)(localPos.Y * InvCellSize), 1, GridHeight - 2);
-                        int idx = cy * GridWidth + cx;
-                        float gradX = _densityGrid[idx - 1] - _densityGrid[idx + 1];
-                        float gradY = _densityGrid[idx - GridWidth] - _densityGrid[idx + GridWidth];
-
-                        if (MathF.Abs(gradX) + MathF.Abs(gradY) > 0.05f)
+                        Color baseCol = vis.BaseColor;
+                        Color targetDepthColor;
+                        if (depthZ < 0.0f)
                         {
-                            accel += new Vector2(gradX, gradY) * SeparationWeight;
+                            // Saat di belakang Core: redupkan di bawah ambang bloom HDR (~25%) & turunkan alpha
+                            float backFactor = -depthZ;
+                            float rgbMult = Mathf.Lerp(0.68f, 0.25f, backFactor);
+                            float alphaMult = Mathf.Lerp(0.88f, 0.50f, backFactor);
+                            targetDepthColor = new Color(
+                                baseCol.R * rgbMult,
+                                baseCol.G * rgbMult,
+                                baseCol.B * rgbMult,
+                                alphaMult
+                            );
                         }
-
-                        float dynamicMaxOrbitSpd = MathF.Max(MaxOrbitSpeed, anchorVelocity.Length() + 320.0f);
-                        vel.Value = (vel.Value + accel * dt) * decayOrbit;
-                        if (vel.Value.LengthSquared() > dynamicMaxOrbitSpd * dynamicMaxOrbitSpd)
+                        else
                         {
-                            vel.Value = vel.Value.Normalized() * dynamicMaxOrbitSpd;
+                            // Saat di depan Core: menyala penuh hingga 114% di puncak depan
+                            float frontFactor = depthZ;
+                            float rgbMult = Mathf.Lerp(0.82f, 1.14f, frontFactor);
+                            targetDepthColor = new Color(
+                                baseCol.R * rgbMult,
+                                baseCol.G * rgbMult,
+                                baseCol.B * rgbMult,
+                                1.0f
+                            );
                         }
+                        vis.Color = vis.Color.Lerp(targetDepthColor, MathF.Min(1.0f, dt * 14.0f));
+                    }
 
-                        if (swarm.Role == SwarmRole.MiningDroid)
+                    // Orientasi hadap unit mengikuti aliran cincin (MiningDroid tetap siap membidik kursor)
+                    if (swarm.Role == SwarmRole.MiningDroid)
+                    {
+                        Vector2 toCursor = cursorThreatPos - pos.Value;
+                        if (toCursor.LengthSquared() > 4.0f)
                         {
-                            Vector2 toCursor = cursorThreatPos - pos.Value;
-                            if (toCursor.LengthSquared() > 4.0f)
-                            {
-                                float desiredAngle = toCursor.Angle() + Mathf.Pi * 0.5f;
-                                swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredAngle, MathF.Min(1.0f, 24.0f * dt));
-                            }
+                            float desiredAngle = toCursor.Angle() + Mathf.Pi * 0.5f;
+                            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredAngle, MathF.Min(1.0f, 24.0f * dt));
+                        }
+                    }
+                    else if (MathF.Abs(swarm.SpinRate) <= 0.01f)
+                    {
+                        Vector2 flowDir = ringTangentVel.LengthSquared() > 1.0f ? ringTangentVel : vel.Value;
+                        if (flowDir.LengthSquared() > 1.0f)
+                        {
+                            float desiredFaceAngle = flowDir.Angle() + Mathf.Pi * 0.5f;
+                            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredFaceAngle, MathF.Min(1.0f, 14.0f * dt));
                         }
                     }
                     break;
@@ -986,9 +1116,15 @@ public sealed class BoidSystem
                         vel.Value = vel.Value.Normalized() * ReturnMaxSpeed;
                     }
 
-                    float returnRadius = (swarm.Role == SwarmRole.Guardian) ? ShieldRadius : swarm.OrbitDistance;
+                    swarm.OrbitDepth = 1.0f;
+                    float returnRadius = 74.0f + coreRadiusOffset;
                     if (distRet <= returnRadius + 30.0f)
                     {
+                        Vector2 relEntry = pos.Value - anchorPos;
+                        float pMaj = relEntry.Dot(ringMajorDir) / MathF.Max(1.0f, returnRadius);
+                        float pMin = relEntry.Dot(ringMinorDir) / MathF.Max(1.0f, returnRadius * RingTiltAspect);
+                        swarm.OrbitAngle = Mathf.Wrap(MathF.Atan2(pMin, pMaj), 0.0f, Mathf.Tau);
+                        swarm.OrbitDepth = MathF.Sin(swarm.OrbitAngle);
                         swarm.State = SwarmState.Orbiting;
                         swarm.LifeTime = 0.0f;
                         swarm.MaxHealth = SwarmUnitComponent.GetMaxHealthForRole(swarm.Role, SwarmState.Orbiting);

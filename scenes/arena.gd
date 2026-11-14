@@ -258,9 +258,13 @@ func _process(delta: float) -> void:
 			var is_p_pod: bool = swarm_sim.get("IsPlayerEscapePod") == true
 			var p_status: String = " [⚡ ESCAPE POD]" if is_p_pod else " [HIVE]"
 
-			swarm_label.text = "CORE: %d/%d%s\nSWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d ]\nDARTS: %d | SCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d" % [
+			var e_dist: int = int(swarm_sim.get("DistanceToEnemy"))
+			var e_status: String = str(swarm_sim.get("EnemyStateText"))
+
+			swarm_label.text = "CORE: %d/%d%s\nSWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d ]\nDARTS: %d | SCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d\nRIVAL HIVE (Jarak: %d px): %s" % [
 				p_hp, p_max_hp, p_status,
-				total, status_text, orbiting, launched, returning, darts, scanners, miners, guardians, cores
+				total, status_text, orbiting, launched, returning, darts, scanners, miners, guardians, cores,
+				e_dist, e_status
 			]
 
 func _unhandled_input(event: InputEvent) -> void:

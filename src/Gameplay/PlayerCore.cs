@@ -52,6 +52,7 @@ public partial class PlayerCore : CharacterBody2D
     private readonly HashSet<Vector2I> _occupiedAxials = new();
     private readonly List<Vector2> _hexCellOffsets = new();
     private readonly List<Vector2[]> _cachedHexPolylines = new();
+    private readonly List<Vector2[]> _cachedHexPolygons = new();
 
     private static readonly Vector2I[] HexDirections = new Vector2I[]
     {
@@ -182,9 +183,12 @@ public partial class PlayerCore : CharacterBody2D
         float spawnDist = rng.RandfRange(1350.0f, 1850.0f);
         GlobalPosition = new Vector2(MathF.Cos(spawnAngle), MathF.Sin(spawnAngle)) * spawnDist;
 
+        ZIndex = 2; // Berada di antara Back Ring (ZIndex=1) dan Front Ring (ZIndex=3)
+
         _occupiedAxials.Add(Vector2I.Zero);
         _hexCellOffsets.Add(Vector2.Zero);
         _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
+        _cachedHexPolygons.Add(BuildHexPolygon(Vector2.Zero, HexRadius));
 
         Health = MaxHealth;
 
@@ -279,6 +283,7 @@ public partial class PlayerCore : CharacterBody2D
         _occupiedAxials.Add(_mitosisChosenAxial);
         _hexCellOffsets.Add(_mitosisTargetOffset);
         _cachedHexPolylines.Add(BuildHexPoints(_mitosisTargetOffset, HexRadius));
+        _cachedHexPolygons.Add(BuildHexPolygon(_mitosisTargetOffset, HexRadius));
 
         if (_circleShape != null)
         {
@@ -353,6 +358,7 @@ public partial class PlayerCore : CharacterBody2D
         _occupiedAxials.Clear();
         _hexCellOffsets.Clear();
         _cachedHexPolylines.Clear();
+        _cachedHexPolygons.Clear();
         _reservedAxials.Clear();
         _mitosisQueue.Clear();
         IsMitosisActive = false;
@@ -360,6 +366,7 @@ public partial class PlayerCore : CharacterBody2D
         _occupiedAxials.Add(Vector2I.Zero);
         _hexCellOffsets.Add(Vector2.Zero);
         _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
+        _cachedHexPolygons.Add(BuildHexPolygon(Vector2.Zero, HexRadius));
 
         if (_circleShape != null)
         {
@@ -593,13 +600,19 @@ public partial class PlayerCore : CharacterBody2D
             }
 
             // 1. Gambar semua sel hexagon aktif yang sudah mengkristal permanen
+            Color coreHullFill = new Color(0.010f, 0.006f, 0.022f, 0.94f);
             for (int i = 0; i < _hexCellOffsets.Count; i++)
             {
                 Vector2 offset = _hexCellOffsets[i];
+                Vector2[] poly6 = (i < _cachedHexPolygons.Count)
+                    ? _cachedHexPolygons[i]
+                    : BuildHexPolygon(offset, HexRadius);
                 Vector2[] points = (i < _cachedHexPolylines.Count)
                     ? _cachedHexPolylines[i]
                     : BuildHexPoints(offset, HexRadius);
 
+                // Isi siluet bodi Core agar swarm di Back Ring (ZIndex=1) tertutup saat melintas di belakang Core
+                DrawColoredPolygon(poly6, coreHullFill);
                 DrawPolyline(points, activeAuraColor, 2.8f, false);
                 DrawPolyline(points, activeLineColor, 1.4f, false);
                 DrawCircle(offset, 2.6f, CenterPulseColor);
@@ -826,6 +839,17 @@ public partial class PlayerCore : CharacterBody2D
             pts[i] = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
         }
         pts[6] = pts[0];
+        return pts;
+    }
+
+    private static Vector2[] BuildHexPolygon(Vector2 center, float radius)
+    {
+        var pts = new Vector2[6];
+        for (int i = 0; i < 6; i++)
+        {
+            float angle = Mathf.DegToRad(60.0f * i - 30.0f);
+            pts[i] = center + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * radius;
+        }
         return pts;
     }
 }

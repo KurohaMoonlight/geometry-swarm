@@ -4,54 +4,85 @@ using Godot;
 namespace GeometrySwarm.Visual;
 
 /// <summary>
-/// Renderer GPU MultiMesh dengan dukungan beragam geometri drone:
-/// Dart Needle, Giga Shuriken, Drill Drone, Crescent Boomerang, dan Guardian (Kurung Tebal Ganda ]] ).
+/// Renderer GPU MultiMesh dua lapis (Dual-Layer Depth MultiMesh) untuk mendukung ilusi Cincin 3D (3D Tilted Ring):
+/// - Back Ring Layer (ZIndex = 1): Menggambar unit swarm yang sedang berada di separuh belakang cincin (OrbitDepth &lt; 0)
+///   sehingga lewat di BELAKANG PlayerCore (ZIndex = 2) dengan warna redup.
+/// - Front Ring Layer (ZIndex = 3): Menggambar unit swarm yang berada di separuh depan cincin (OrbitDepth &gt;= 0)
+///   serta proyektil aktif sehingga melintas di DEPAN PlayerCore (ZIndex = 2) dengan pendaran penuh.
 /// </summary>
 public partial class SwarmMultiMeshRenderer : Node2D
 {
     private const int RoleCount = 7;
     private const int MaxInstancesPerRole = 16384;
 
-    private readonly MultiMeshInstance2D[] _meshInstances = new MultiMeshInstance2D[RoleCount];
-    private readonly MultiMesh[] _multiMeshes = new MultiMesh[RoleCount];
-    private readonly int[] _visibleCounts = new int[RoleCount];
+    private readonly MultiMeshInstance2D[] _backMeshInstances = new MultiMeshInstance2D[RoleCount];
+    private readonly MultiMesh[] _backMultiMeshes = new MultiMesh[RoleCount];
+    private readonly int[] _backVisibleCounts = new int[RoleCount];
+
+    private readonly MultiMeshInstance2D[] _frontMeshInstances = new MultiMeshInstance2D[RoleCount];
+    private readonly MultiMesh[] _frontMultiMeshes = new MultiMesh[RoleCount];
+    private readonly int[] _frontVisibleCounts = new int[RoleCount];
 
     public override void _Ready()
     {
         for (int role = 0; role < RoleCount; role++)
         {
-            var mm = new MultiMesh
+            ArrayMesh sharedMesh = CreateMeshForRole(role);
+
+            // 1. Back Layer (ZIndex = 1 -> Di belakang PlayerCore yang memiliki ZIndex = 2)
+            var backMm = new MultiMesh
             {
                 TransformFormat = MultiMesh.TransformFormatEnum.Transform2D,
                 UseColors = true,
                 InstanceCount = MaxInstancesPerRole,
                 VisibleInstanceCount = 0,
-                Mesh = CreateMeshForRole(role)
+                Mesh = sharedMesh
             };
+            var backMmi = new MultiMeshInstance2D
+            {
+                Name = $"BackSwarmMesh_{role}",
+                Multimesh = backMm,
+                ZIndex = 1
+            };
+            AddChild(backMmi);
+            _backMultiMeshes[role] = backMm;
+            _backMeshInstances[role] = backMmi;
+            _backVisibleCounts[role] = 0;
 
-            var mmi = new MultiMeshInstance2D { Multimesh = mm };
-            AddChild(mmi);
-
-            _multiMeshes[role] = mm;
-            _meshInstances[role] = mmi;
-            _visibleCounts[role] = 0;
+            // 2. Front Layer (ZIndex = 3 -> Di depan PlayerCore yang memiliki ZIndex = 2)
+            var frontMm = new MultiMesh
+            {
+                TransformFormat = MultiMesh.TransformFormatEnum.Transform2D,
+                UseColors = true,
+                InstanceCount = MaxInstancesPerRole,
+                VisibleInstanceCount = 0,
+                Mesh = sharedMesh
+            };
+            var frontMmi = new MultiMeshInstance2D
+            {
+                Name = $"FrontSwarmMesh_{role}",
+                Multimesh = frontMm,
+                ZIndex = 3
+            };
+            AddChild(frontMmi);
+            _frontMultiMeshes[role] = frontMm;
+            _frontMeshInstances[role] = frontMmi;
+            _frontVisibleCounts[role] = 0;
         }
     }
 
     public void ResetCounters()
     {
-        Array.Clear(_visibleCounts, 0, RoleCount);
+        Array.Clear(_backVisibleCounts, 0, RoleCount);
+        Array.Clear(_frontVisibleCounts, 0, RoleCount);
     }
 
     /// <summary>
-    /// Update transformasi dan warna drone ke MultiMesh sesuai perannya
+    /// Update transformasi dan warna drone ke MultiMesh (Back Layer jika isBehindCore == true, Front Layer jika false)
     /// </summary>
-    public void SetInstance(int role, Vector2 position, Vector2 velocity, float rotation, Color color, float scale = 1.0f)
+    public void SetInstance(int role, Vector2 position, Vector2 velocity, float rotation, Color color, float scale = 1.0f, bool isBehindCore = false)
     {
         if (role < 0 || role >= RoleCount) return;
-
-        int index = _visibleCounts[role];
-        if (index >= MaxInstancesPerRole) return;
 
         // Gunakan rotasi eksplisit jika ada, jika tidak ikuti arah hadap kecepatan
         float angle = MathF.Abs(rotation) > 0.0001f 
@@ -59,17 +90,31 @@ public partial class SwarmMultiMeshRenderer : Node2D
             : (velocity.LengthSquared() > 1.0f ? velocity.Angle() + Mathf.Pi * 0.5f : 0.0f);
 
         Transform2D xform = new Transform2D(angle, new Vector2(scale, scale), 0.0f, position);
-        _multiMeshes[role].SetInstanceTransform2D(index, xform);
-        _multiMeshes[role].SetInstanceColor(index, color);
 
-        _visibleCounts[role]++;
+        if (isBehindCore)
+        {
+            int index = _backVisibleCounts[role];
+            if (index >= MaxInstancesPerRole) return;
+            _backMultiMeshes[role].SetInstanceTransform2D(index, xform);
+            _backMultiMeshes[role].SetInstanceColor(index, color);
+            _backVisibleCounts[role]++;
+        }
+        else
+        {
+            int index = _frontVisibleCounts[role];
+            if (index >= MaxInstancesPerRole) return;
+            _frontMultiMeshes[role].SetInstanceTransform2D(index, xform);
+            _frontMultiMeshes[role].SetInstanceColor(index, color);
+            _frontVisibleCounts[role]++;
+        }
     }
 
     public void FlushVisibleCounts()
     {
         for (int r = 0; r < RoleCount; r++)
         {
-            _multiMeshes[r].VisibleInstanceCount = _visibleCounts[r];
+            _backMultiMeshes[r].VisibleInstanceCount = _backVisibleCounts[r];
+            _frontMultiMeshes[r].VisibleInstanceCount = _frontVisibleCounts[r];
         }
     }
 

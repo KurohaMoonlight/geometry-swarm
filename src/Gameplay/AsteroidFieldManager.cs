@@ -47,7 +47,7 @@ public partial class AsteroidFieldManager : Node2D
     private readonly List<float> _gravHeatList = new(16);
 
     private readonly List<CosmicRift> _cosmicRifts = new();
-    private float _riftEjectionTimer = 25.0f;
+    private float _riftEjectionTimer = 5.0f;
     private int _nextRiftIndex = 0;
 
     private Rect2 _sectorBounds;
@@ -109,7 +109,7 @@ public partial class AsteroidFieldManager : Node2D
         if (_riftEjectionTimer <= 0.0f && _cosmicRifts.Count > 0)
         {
             int currentAsteroidCount = Asteroid.ActiveAsteroids.Count;
-            // Hanya aktif saat jumlah asteroid batu di arena berkurang di bawah target (< TargetAsteroidCount)
+            // Aktif HANYA jika populasi asteroid di arena berkurang di bawah TargetAsteroidCount
             if (currentAsteroidCount < TargetAsteroidCount)
             {
                 var rift = _cosmicRifts[_nextRiftIndex];
@@ -121,13 +121,13 @@ public partial class AsteroidFieldManager : Node2D
                 }
                 else
                 {
-                    _riftEjectionTimer = 5.0f;
+                    _riftEjectionTimer = 3.0f;
                 }
             }
             else
             {
-                // Jika populasi asteroid di arena masih cukup, tunda cek selama 14 detik
-                _riftEjectionTimer = 14.0f;
+                // Populasi asteroid masih penuh/cukup, cek lagi dalam interval periodik
+                _riftEjectionTimer = 4.0f;
             }
         }
     }
@@ -185,22 +185,31 @@ public partial class AsteroidFieldManager : Node2D
         SwarmRole role = PickRandomMineralRole(rng);
         float radius = (float)GD.RandRange(320.0, 520.0);
 
+        float speed = ejectVelocity.Length();
+        Vector2 ejectDir = speed > 1.0f ? ejectVelocity.Normalized() : Vector2.Right;
+        if (speed < 420.0f)
+        {
+            speed = 540.0f;
+            ejectVelocity = ejectDir * speed;
+        }
+
         var asteroid = new Asteroid
         {
-            GlobalPosition = spawnPos,
             Radius = radius,
             MaxHealth = radius * 5.0f,
             AsteroidType = role,
             IsEnergyAsteroid = false,
             IsBirthAnimationActive = true,
             BirthRiftOrigin = spawnPos,
-            BirthEjectDirection = ejectVelocity.LengthSquared() > 1.0f ? ejectVelocity.Normalized() : Vector2.Right
+            BirthEjectDirection = ejectDir,
+            BirthEjectSpeed = speed
         };
 
-        asteroid.LinearVelocity = ejectVelocity;
-        asteroid.AngularVelocity = (float)GD.RandRange(-0.12, 0.12);
-
         AddChild(asteroid);
+        asteroid.GlobalPosition = spawnPos;
+        asteroid.Sleeping = false;
+        asteroid.LinearVelocity = ejectVelocity;
+        asteroid.AngularVelocity = (float)GD.RandRange(-0.08, 0.08);
     }
 
     public void SpawnColossalAsteroidField()

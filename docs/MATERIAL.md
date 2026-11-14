@@ -76,13 +76,13 @@ Peta kosmik seluas $12.000 \times 12.000\text{ px}$ dibagi ke dalam 3 Sabuk Aste
 * **Siklus Reinkarnasi Abadi Bintang Aether (*Aether Seed Cycle*)**:
   1. **Tahap 1: Dormant Seed ($10\text{ detik}$)**:
      * Setelah Supernova, meninggalkan satu biji energi berpendar kecil (*Aether Seed*) yang diam di titik nol ledakan selama 10 detik, membiarkan pemain leluasa mengumpulkan kristal Aether.
-  2. **Tahap 2: Fast Cosmic Drift & Spacetime Fold Teleportation ($20\text{ detik}$)**:
-     * **Gerak Cepat Meluncur**: Meluncur dengan kecepatan tinggi ($540\text{ px/s}$) melintasi sabuk asteroid mencari koordinat baru yang aman selama 20 detik.
+  2. **Tahap 2: Fast Cosmic Drift & Spacetime Fold Teleportation ($55\text{ detik}$)**:
+     * **Roaming Kosmik Berkelanjutan**: Meluncur anggun dan cepat ($480\text{ px/s}$) menjelajahi berbagai sektor sabuk asteroid selama 55 detik, mengunjungi waypoint-waypoint baru di sepanjang perjalanannya.
      * **Teleportasi Lipat Ruang Acak (*Quantum Spacetime Fold*)**: Setiap beberapa detik, seed melipat ruang:
        * **Spacetime Implosion**: Ruang-waktu di sekitarnya terkompresi sangat kuat (impuls grid negatif $-3400$, cincin gelombang menyusut ke titik tunggal).
        * **Sub-space Vanish**: Biji lenyap seketika ke dalam lipatan sub-space dan melompat $520\text{--}980\text{ px}$ ke koordinat baru secara acak.
        * **Spacetime Expansion**: Muncul kembali di koordinat baru dengan ledakan pelebaran ruang hebat (impuls grid positif $+3800$, shockwave mengembang masif, dan layar bergetar).
-       * **Lanjut Meluncur**: Biji mekar kembali dan melanjutkan penerbangan cepatnya.
+       * **Lanjut Meluncur**: Biji mekar kembali dan melanjutkan roaming melintasi sabuk asteroid.
   3. **Tahap 3: Spacetime Infall & Rebirth ($30\text{ detik}$)**:
      * Tiba di lokasi baru dan berhenti.
      * Menghisap energi ruang-waktu dan partikel cahaya kosmik secara agresif selama 30 detik.
@@ -95,10 +95,15 @@ Sebuah asteroid tidak lenyap secara instan dalam 1 frame, melainkan mengalami se
 1. **Syarat Ambang Batas Kehancuran (*Destruction Triggers*)**:
    * **Asteroid Batu Biasa**: Runtuh saat sisa materi padatnya tersisa $\le 22\%$ (kehilangan $>78\%$ massanya), atau HP mencapai 0.
    * **Asteroid Energy**: Runtuh saat **Inti Singularitas Aether habis tertambang** (`_remainingCoreVoxels <= 0`) karena hilangnya jangkar gravitasi sentral, atau sisa materi padat $\le 28\%$, atau HP mencapai 0.
-2. **Tahap 1: Overload Struktural & Getaran Katastropik ($0.52\text{ detik}$)**:
-   * Kolisi fisik dinonaktifkan seketika.
-   * Badan asteroid bergetar hebat dengan amplitudo meningkat ($2.5 \to 14.0\text{ px}$).
-   * Pola retakan fraktur laba-laba (*spiderweb fracture lines*) menyala putih-pijar berkedip cepat melintasi seluruh badan asteroid.
+2. **Tahap 1: Overload Struktural & Keruntuhan Menjelang Hancur**:
+   * **Asteroid Batu Biasa ($0.76\text{ detik}$)**:
+     * Kolisi fisik dinonaktifkan seketika.
+     * Badan asteroid bergetar hebat dengan amplitudo meningkat ($3.5 \to 18.0\text{ px}$).
+     * Pola retakan fraktur laba-laba (*spiderweb fracture lines*) menyala putih-pijar berkedip cepat melintasi seluruh badan asteroid.
+   * **Bintang Aether - Pre-Supernova Cataclysm ($4.5\text{ detik}$)**:
+     * **Layar Shaking Intensif & Berkelanjutan**: Mengirimkan tremor getaran kamera yang terus menguat secara eksponensial ($2.5 \to 18.0\text{ magnitudo}$), dengan guncangan maksimal saat pemain berada di dekat bintang.
+     * **Pelepasan Shockwave Beruntun (*Continuous Spacetime Shockwaves*)**: Bintang melepaskan gelombang kejut bertubi-tubi dengan frekuensi yang terakselerasi ($0.65\text{s} \to 0.16\text{s}$). Setiap shockwave mendistorsi dan memanaskan grid ruang-waktu (impuls $1600 \to 3800$), mendorong kapal pemain, menghempaskan drone swarm di sekitarnya, serta memicu hentakan guncangan kamera ekstra tajam ($8.0 \to 26.0$).
+     * **Turbulensi Visual Inti & Korona**: Cincin korona berdenyut liar, kilatan fusi putih-pink intensif, dan puluhan berkas sinar tachyon starburst menusuk ruang angkasa 360 derajat.
 3. **Tahap 2: Detonasi Final & Efek Kosmik**:
    * **Gelombang Kejut Vektor (*Expanding Shockwave Ring*)**: Cincin gelombang kejut mengembang cepat ($16 \to 1.8 R$) bergradasi pudar halus. Asteroid Energy memancarkan *Dual-Ring Shockwave* (Cincin Emas Aether di dalam + Cincin Sian Quartz di luar).
    * **Serpihan Bongkahan Poligonal (*Destruction Shards*)**: 18–24 bongkahan batu/kaca kuantum terlontar radial 360° ($120\text{--}340\text{ px/s}$) sambil berotasi bebas selama $2.0\text{--}3.2\text{ detik}$.

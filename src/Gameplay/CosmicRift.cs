@@ -228,31 +228,34 @@ public partial class CosmicRift : Node2D
     }
 
     /// <summary>
-    /// Memindai koridor 360 derajat di sekitar portal untuk menemukan trajektori lontaran terbersih,
-    /// memastikan asteroid baru tidak langsung menabrak asteroid lain atau menumpuk di arena.
+    /// Memindai koridor 360 derajat di sekitar portal untuk menemukan trajektori lontaran terbersih.
+    /// Jika suatu jalur memiliki potensi tabrakan dengan asteroid lain dalam jarak dekat (< 1.600 px),
+    /// sistem pintar akan MENOLAK jalur tersebut dan mencari koridor kosong lain yang benar-benar terbuka!
     /// </summary>
     private Vector2 CalculateSafestEjectionTrajectory()
     {
         Vector2 riftPos = GlobalPosition;
         Vector2 outward = riftPos.LengthSquared() > 1.0f ? riftPos.Normalized() : Vector2.Right;
-        float baseAngle = outward.Angle();
 
-        const int CandidateCount = 20;
-        const float MaxLookahead = 4500.0f;
-        const float EstimatedNewRadius = 380.0f;
-        const float SafetyPadding = 180.0f;
+        const int CandidateCount = 48;
+        const float MaxLookahead = 4800.0f;
+        const float EstimatedNewRadius = 420.0f;
+        const float SafetyPadding = 240.0f;
 
         Vector2 bestDir = outward;
         float bestScore = -1.0f;
 
         for (int i = 0; i < CandidateCount; i++)
         {
-            // Rentang sudut: menyapu sektor keluar (-140 hingga +140 derajat dari vektor radial)
-            float angleOffset = Mathf.Lerp(-Mathf.Pi * 0.78f, Mathf.Pi * 0.78f, (float)i / (CandidateCount - 1));
-            float testAngle = baseAngle + angleOffset;
+            float testAngle = (float)i / CandidateCount * Mathf.Tau;
             Vector2 candDir = new Vector2(MathF.Cos(testAngle), MathF.Sin(testAngle));
 
+            // Hindari melontarkan langsung menabrak pusat arena (Markas Origin < 1.100 px)
+            Vector2 toCenter = -riftPos;
+            if (candDir.Dot(toCenter.Normalized()) > 0.88f) continue;
+
             float clearDist = MaxLookahead;
+            bool blockedByNearAsteroid = false;
 
             // Pindai semua asteroid aktif di sepanjang koridor trajectory
             var asteroids = Asteroid.ActiveAsteroids;
@@ -264,8 +267,8 @@ public partial class CosmicRift : Node2D
                 Vector2 toAst = ast.CachedPosition - riftPos;
                 float projT = toAst.Dot(candDir);
 
-                // Abaikan yang berada di belakang portal atau terlalu jauh di luar jangkauan scan
-                if (projT <= 60.0f || projT >= clearDist) continue;
+                // Abaikan asteroid yang berada di belakang portal
+                if (projT <= 60.0f) continue;
 
                 // Jarak tegak lurus dari asteroid ke garis tengah koridor lontaran
                 float perpDist = (toAst - candDir * projT).Length();
@@ -273,10 +276,17 @@ public partial class CosmicRift : Node2D
 
                 if (perpDist < totalClearanceNeeded)
                 {
-                    // Potensi tabrakan terdeteksi pada jarak projT
-                    clearDist = projT;
+                    if (projT < 1750.0f)
+                    {
+                        // JALUR INI ADA HALANGAN ASTEROID LAIN! Tolak dan cari koridor lain!
+                        blockedByNearAsteroid = true;
+                        break;
+                    }
+                    if (projT < clearDist) clearDist = projT;
                 }
             }
+
+            if (blockedByNearAsteroid) continue;
 
             // Periksa batas arena sektor (agar tidak langsung terlempar menabrak batas dinding)
             Vector2 endPt = riftPos + candDir * clearDist;
@@ -288,9 +298,9 @@ public partial class CosmicRift : Node2D
                 if (boundT < clearDist) clearDist = boundT;
             }
 
-            // Skoring: Semakin jauh koridor bebas asteroid + bonus arah ke sabuk luar
+            // Skoring: Koridor terpanjang + bonus mengarah ke sabuk asteroid luar
             float outwardFactor = MathF.Max(0.0f, candDir.Dot(outward));
-            float score = clearDist * (1.0f + outwardFactor * 0.50f);
+            float score = clearDist * (1.0f + outwardFactor * 0.65f);
 
             if (score > bestScore)
             {
@@ -299,8 +309,41 @@ public partial class CosmicRift : Node2D
             }
         }
 
-        // Kecepatan lontaran bertenaga tinggi (310 - 365 px/s) agar asteroid meluncur bebas ke orbit kosong
-        float ejectSpeed = (float)GD.RandRange(310.0, 365.0);
+        // Jika semua kandidat awal terhalang, cari koridor dengan jarak obstacle terjauh
+        if (bestScore <= 0.0f)
+        {
+            float maxClear = -1.0f;
+            var asteroids = Asteroid.ActiveAsteroids;
+            for (int i = 0; i < CandidateCount; i++)
+            {
+                float testAngle = (float)i / CandidateCount * Mathf.Tau;
+                Vector2 candDir = new Vector2(MathF.Cos(testAngle), MathF.Sin(testAngle));
+                if (candDir.Dot((-riftPos).Normalized()) > 0.88f) continue;
+
+                float nearestAstDist = MaxLookahead;
+                for (int a = 0; a < asteroids.Count; a++)
+                {
+                    var ast = asteroids[a];
+                    if (ast == null || !IsInstanceValid(ast) || !ast.IsActiveInTree) continue;
+                    Vector2 toAst = ast.CachedPosition - riftPos;
+                    float projT = toAst.Dot(candDir);
+                    if (projT <= 60.0f) continue;
+                    float perp = (toAst - candDir * projT).Length();
+                    if (perp < EstimatedNewRadius + ast.OuterBoundRadius + SafetyPadding && projT < nearestAstDist)
+                    {
+                        nearestAstDist = projT;
+                    }
+                }
+                if (nearestAstDist > maxClear)
+                {
+                    maxClear = nearestAstDist;
+                    bestDir = candDir;
+                }
+            }
+        }
+
+        // Kecepatan lontaran bertenaga tinggi (540 - 640 px/s) agar asteroid benar-benar terlempar jauh
+        float ejectSpeed = (float)GD.RandRange(540.0, 640.0);
         return bestDir * ejectSpeed;
     }
 

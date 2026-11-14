@@ -5,6 +5,7 @@ using GeometrySwarm.Core.ECS.Components;
 using GeometrySwarm.Core.ECS.Systems;
 using GeometrySwarm.Visual;
 using Godot;
+using GeometrySwarm.Gameplay.Enemy;
 using static GeometrySwarm.Gameplay.Asteroid;
 
 namespace GeometrySwarm.Gameplay;
@@ -54,9 +55,12 @@ public partial class SwarmSimulation : Node2D
     }
 
     // =========================================================================
-    // ENEMY CORE, MUSUH MENEMBAK & CLASH ANIMATION
+    // ENEMY CORE, RIVAL HIVE CONTROLLER & CLASH ANIMATION
     // =========================================================================
     private EnemyCore? _enemyCore;
+    private EnemyController? _enemyController;
+    public EnemyCore? EnemyCore => _enemyCore;
+    public EnemyController? EnemyController => _enemyController;
     public bool IsEnemyFiring { get; set; } = false;
     private float _duelFireTimer = 0.0f;
     private const float EnemyFireInterval = 0.20f;
@@ -335,6 +339,10 @@ public partial class SwarmSimulation : Node2D
     public float EnemyHealth => _enemyCore?.Health ?? 0.0f;
     public float EnemyMaxHealth => _enemyCore?.MaxHealth ?? 1.0f;
     public bool IsEnemyEscapePod => _enemyCore?.IsEscapePod ?? false;
+    public float DistanceToEnemy => (_playerCore != null && _enemyCore != null) ? _playerCore.GlobalPosition.DistanceTo(_enemyCore.GlobalPosition) : 0.0f;
+    public string EnemyStateText => _enemyController != null
+        ? $"{_enemyController.State} [⛏ {_enemyController.MinerCount} | ⛨ {_enemyController.GuardianCount} | ▲ {_enemyController.DartCount}]"
+        : "None";
 
     public int GigaDrillTotalUnits => _activeDrillFormationCount + _activeDefenderCoreCount;
     public int GigaDrillDefenderCoreCount => _activeDefenderCoreCount;
@@ -382,8 +390,20 @@ public partial class SwarmSimulation : Node2D
             AddChild(_plasmaBoostMesh);
         }
 
-        // Mode Eksplorasi Kosmik Murni: EnemyCore debug dinonaktifkan
-        _enemyCore = null;
+        // Inisialisasi Rival Hive Core & AI Controller di Sabuk Asteroid (Jarak ~1.750 px dari Pusat)
+        _enemyCore = new EnemyCore();
+        _enemyCore.GlobalPosition = new Vector2(1750.0f, 350.0f);
+        AddChild(_enemyCore);
+        _enemyCore.EnemyEscapePodEjected += OnEnemyEscapePodEjected;
+        _enemyCore.EnemyCoreDestroyed += OnEnemyCoreDestroyed;
+
+        _enemyController = new EnemyController();
+        _enemyCore.AddChild(_enemyController);
+        _enemyController.Initialize(this, _enemyCore);
+
+        // Spawn armada awal Rival Hive (fokus penambangan mandiri)
+        AddEnemySwarm(SwarmRole.MiningDroid, 3);
+        AddEnemySwarm(SwarmRole.DartNeedle, 10);
     }
 
     public void SpawnStartingSwarm()
@@ -1522,6 +1542,90 @@ public partial class SwarmSimulation : Node2D
         RefreshFoundryGui();
     }
 
+    public void AddEnemySwarm(SwarmRole role, int count)
+    {
+        if (_enemyCore == null || !IsInstanceValid(_enemyCore)) return;
+        Vector2 corePos = _enemyCore.GlobalPosition;
+        Color color = role switch
+        {
+            SwarmRole.MiningDroid => new Color(3.6f, 1.8f, 0.4f, 1.0f),
+            SwarmRole.Guardian => new Color(2.6f, 0.45f, 3.2f, 1.0f),
+            SwarmRole.DartNeedle => new Color(3.5f, 0.45f, 0.95f, 1.0f),
+            SwarmRole.DrillDrone => new Color(4.2f, 0.6f, 0.2f, 1.0f),
+            SwarmRole.GigaShuriken => new Color(3.8f, 0.3f, 1.8f, 1.0f),
+            SwarmRole.CrescentBoomerang => new Color(0.4f, 2.8f, 1.2f, 1.0f),
+            _ => new Color(3.5f, 0.45f, 0.95f, 1.0f)
+        };
+
+        float targetScale = role switch
+        {
+            SwarmRole.Guardian => 0.72f,
+            SwarmRole.ScannerDrone => 0.60f,
+            SwarmRole.MiningDroid => 0.62f,
+            _ => 0.55f
+        };
+
+        int remaining = count;
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        {
+            if (remaining <= 0 || swarm.State != SwarmState.Dead) return;
+
+            float orbitDist = role switch
+            {
+                SwarmRole.Guardian => 78.0f + (GD.Randf() - 0.5f) * 8.0f,
+                SwarmRole.MiningDroid => 58.0f + (GD.Randf() - 0.5f) * 6.0f,
+                _ => 68.0f + (GD.Randf() - 0.5f) * 10.0f
+            };
+            float orbitSpeed = 1.75f + (GD.Randf() - 0.5f) * 0.25f;
+
+            float angle = GD.Randf() * Mathf.Tau;
+            Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * orbitDist;
+
+            pos.Value = corePos + offset;
+            vel.Value = _enemyCore.Velocity;
+            swarm = new SwarmUnitComponent(role, 1, orbitDist, orbitSpeed);
+            vis = new VisualComponent(color, targetScale);
+
+            _entityCount++;
+            remaining--;
+        });
+
+        for (int i = 0; i < remaining; i++)
+        {
+            float orbitDist = role switch
+            {
+                SwarmRole.Guardian => 78.0f + (GD.Randf() - 0.5f) * 8.0f,
+                SwarmRole.MiningDroid => 58.0f + (GD.Randf() - 0.5f) * 6.0f,
+                _ => 68.0f + (GD.Randf() - 0.5f) * 10.0f
+            };
+            float orbitSpeed = 1.75f + (GD.Randf() - 0.5f) * 0.25f;
+
+            float angle = GD.Randf() * Mathf.Tau;
+            Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * orbitDist;
+
+            var unit = new SwarmUnitComponent(role, 1, orbitDist, orbitSpeed);
+            _world.Create(
+                new PositionComponent(corePos + offset),
+                new VelocityComponent(_enemyCore.Velocity),
+                unit,
+                new VisualComponent(color, targetScale)
+            );
+            _entityCount++;
+        }
+    }
+
+    public void CollectEnemyMinerPositions(List<Vector2> outputList)
+    {
+        outputList.Clear();
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref SwarmUnitComponent swarm) =>
+        {
+            if (swarm.OwnerId == 1 && swarm.State == SwarmState.Orbiting && swarm.Role == SwarmRole.MiningDroid)
+            {
+                outputList.Add(pos.Value);
+            }
+        });
+    }
+
     public void SpawnEnemySectorAttack(Vector2 attackOriginDirPos, int enemyCount = 50)
     {
         Vector2 corePos = _playerCore.GlobalPosition;
@@ -1859,6 +1963,9 @@ public partial class SwarmSimulation : Node2D
             Vector2 enemyCoreVel = (_enemyCore != null && IsInstanceValid(_enemyCore))
                 ? _enemyCore.Velocity
                 : Vector2.Zero;
+            Vector2 enemyAimDir = (_enemyController != null && _enemyController.IsMiningLaserActive)
+                ? _enemyController.LaserAimDir
+                : Vector2.Zero;
 
             _boidSystem.Update(
                 dt,
@@ -1870,7 +1977,8 @@ public partial class SwarmSimulation : Node2D
                 _isGigaDrillActive,
                 playerCoreRadius,
                 enemyCoreRadius,
-                enemyCoreVel
+                enemyCoreVel,
+                enemyAimDir
             );
 
             // Eksekusi animasi benturan (Clash FX) & spawn kepingan scrap
@@ -1888,6 +1996,11 @@ public partial class SwarmSimulation : Node2D
                 _enemyCore.TakeDamage(_boidSystem.EnemyCoreHitsThisFrame * 40.0f, hitDir);
             }
 
+            if (_enemyController != null && _enemyController.IsMiningLaserActive)
+            {
+                QueueRedraw();
+            }
+
             if (_boidSystem.PlayerCoreHitsThisFrame > 0 && _playerCore != null && IsInstanceValid(_playerCore))
             {
                 Vector2 hitDir = _boidSystem.LastPlayerHitVelocity.LengthSquared() > 0.01f
@@ -1898,13 +2011,15 @@ public partial class SwarmSimulation : Node2D
 
             UpdateClashSparks(dt);
 
-            // Sinkronisasi jumlah swarm hidup milik pemain secara real-time dalam 1 pass render (100% bebas desync!)
+            // Sinkronisasi jumlah swarm hidup milik pemain dan musuh secara real-time dalam 1 pass render (100% bebas desync!)
             int liveDart = 0, liveShuriken = 0, liveBoomerang = 0, liveDrill = 0, liveGuardian = 0, liveScanner = 0, liveMining = 0;
+            int eMiners = 0, eGuardians = 0, eDarts = 0, eShurikens = 0, eDrills = 0, eBoomerangs = 0;
             _renderer.ResetCounters();
             _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
             {
                 if (swarm.State == SwarmState.Dead) return;
-                _renderer.SetInstance((int)swarm.Role, pos.Value, vel.Value, swarm.SpinAngle, vis.Color, vis.Scale);
+                bool isBehindCore = swarm.State == SwarmState.Orbiting && !_isBoostActive && swarm.OrbitDepth < 0.0f;
+                _renderer.SetInstance((int)swarm.Role, pos.Value, vel.Value, swarm.SpinAngle, vis.Color, vis.Scale, isBehindCore);
 
                 if (swarm.OwnerId == 0)
                 {
@@ -1919,8 +2034,21 @@ public partial class SwarmSimulation : Node2D
                         case SwarmRole.MiningDroid: liveMining++; break;
                     }
                 }
+                else if (swarm.OwnerId == 1)
+                {
+                    switch (swarm.Role)
+                    {
+                        case SwarmRole.MiningDroid: eMiners++; break;
+                        case SwarmRole.Guardian: eGuardians++; break;
+                        case SwarmRole.DartNeedle: eDarts++; break;
+                        case SwarmRole.GigaShuriken: eShurikens++; break;
+                        case SwarmRole.DrillDrone: eDrills++; break;
+                        case SwarmRole.CrescentBoomerang: eBoomerangs++; break;
+                    }
+                }
             });
             _renderer.FlushVisibleCounts();
+            _enemyController?.SetUnitCounts(eMiners, eGuardians, eDarts, eShurikens, eDrills, eBoomerangs);
 
             int liveTotal = liveDart + liveShuriken + liveBoomerang + liveDrill + liveGuardian + liveScanner + liveMining;
             if (liveTotal != _entityCount
@@ -4157,7 +4285,7 @@ public partial class SwarmSimulation : Node2D
         QueueRedraw();
     }
 
-    private void SpawnVoxelErosionDebris(Vector2 worldCenter, Vector2 outNormal, VoxelType brokenType)
+    public void SpawnVoxelErosionDebris(Vector2 worldCenter, Vector2 outNormal, VoxelType brokenType)
     {
         if (brokenType == VoxelType.Rock)
         {
@@ -4240,9 +4368,9 @@ public partial class SwarmSimulation : Node2D
 
             for (int i = 0; i < nuggetCount; i++)
             {
-                float spread = (GD.Randf() - 0.5f) * 1.5f;
+                float spread = (GD.Randf() - 0.5f) * 0.55f;
                 Vector2 dir = outNormal.Rotated(spread);
-                float speed = 60.0f + GD.Randf() * 85.0f;
+                float speed = 145.0f + GD.Randf() * 115.0f;
                 float life = 24.0f + GD.Randf() * 8.0f; // BERTAHAN LAMA (24 - 32 DETIK)!
 
                 _miningDebris.Add(new MiningDebrisParticle
@@ -4299,9 +4427,16 @@ public partial class SwarmSimulation : Node2D
 
             if (p.IsCrystalMatter)
             {
-                Vector2 toCore = corePos - p.Position;
-                float dist = toCore.Length();
-                if (dist <= 28.0f)
+                Vector2 toPlayer = corePos - p.Position;
+                float distPlayer = toPlayer.Length();
+
+                Vector2 toEnemy = (_enemyCore != null && IsInstanceValid(_enemyCore))
+                    ? _enemyCore.GlobalPosition - p.Position
+                    : new Vector2(99999f, 99999f);
+                float distEnemy = toEnemy.Length();
+
+                // 1. Penyerapan Kristal oleh Player Core (dist <= 28 px)
+                if (distPlayer <= 28.0f)
                 {
                     int rIdx = (int)p.MatterType;
                     if (rIdx >= 0 && rIdx < _resourceStock.Length)
@@ -4315,11 +4450,26 @@ public partial class SwarmSimulation : Node2D
                     continue;
                 }
 
-                // MAGNET PULL: Menarik puing kristal berharga saat kapal pemain mendekat (dist <= 220 px)!
-                if (dist <= 220.0f)
+                // 2. Penyerapan Kristal oleh Enemy Core (dist <= 28 px)
+                if (distEnemy <= 28.0f)
                 {
-                    Vector2 pullDir = toCore / MathF.Max(0.001f, dist);
-                    p.Velocity = p.Velocity.Lerp(pullDir * 820.0f, MathF.Min(1.0f, dt * 8.0f));
+                    int rIdx = (int)p.MatterType;
+                    _enemyController?.AddResource(rIdx, 1);
+                    _miningDebris.RemoveAt(i);
+                    continue;
+                }
+
+                // 3. Tarikan Magnetis (Magnet Pull) ke kapal terdekat
+                if (distPlayer <= 260.0f && distPlayer <= distEnemy)
+                {
+                    Vector2 pullDir = toPlayer / MathF.Max(0.001f, distPlayer);
+                    p.Velocity = p.Velocity.Lerp(pullDir * 860.0f, MathF.Min(1.0f, dt * 8.0f));
+                    p.Position += p.Velocity * dt;
+                }
+                else if (distEnemy <= 360.0f)
+                {
+                    Vector2 pullDir = toEnemy / MathF.Max(0.001f, distEnemy);
+                    p.Velocity = p.Velocity.Lerp(pullDir * 860.0f, MathF.Min(1.0f, dt * 8.0f));
                     p.Position += p.Velocity * dt;
                 }
                 else
@@ -4487,6 +4637,27 @@ public partial class SwarmSimulation : Node2D
             });
         }
 
+        QueueRedraw();
+    }
+
+    public void TriggerPreSupernovaShockwave(Vector2 position, float asteroidRadius, float progress)
+    {
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = position,
+            Radius = 14.0f,
+            StartRadius = 14.0f,
+            MaxRadius = asteroidRadius * Mathf.Lerp(2.2f, 4.5f, progress),
+            Life = 0.55f,
+            MaxLife = 0.55f,
+            Color1 = new Color(4.2f, 3.4f, 1.2f, 0.95f),
+            Color2 = new Color(0.45f, 2.55f, 4.2f, 0.90f),
+            IsEnergy = true,
+            IsInward = false
+        });
+
+        float impulsePower = Mathf.Lerp(1200.0f, 3200.0f, progress);
+        EmitSignal(SignalName.SwarmClashImpulse, position, impulsePower, asteroidRadius * 3.5f);
         QueueRedraw();
     }
 
@@ -4818,10 +4989,10 @@ public partial class SwarmSimulation : Node2D
                 DrawDartPlasmaBrakeVfx();
             }
 
-            // 3. Gambar Efek Visual Laser Penambangan Multi-Blok
-            if (!_isMiningLaserActive || _activeMinerPositions.Count == 0) return;
-
-            int minerCount = _activeMinerPositions.Count;
+            // 3. Gambar Efek Visual Laser Penambangan Multi-Blok Pemain
+            if (_isMiningLaserActive && _activeMinerPositions.Count > 0)
+            {
+                int minerCount = _activeMinerPositions.Count;
             float densityFactor = Mathf.Clamp((minerCount - 1) / 45.0f, 0.0f, 1.0f);
             float highFreqWave = 0.5f + 0.5f * MathF.Sin(_laserPulseTimer * 28.0f);
 
@@ -4994,6 +5165,10 @@ public partial class SwarmSimulation : Node2D
                     }
                 }
             }
+            }
+
+            // 4. Gambar Laser Penambangan Musuh (Rival Hive Mining Laser)
+            _enemyController?.DrawLaser(this);
         }
         catch (Exception ex)
         {

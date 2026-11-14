@@ -44,12 +44,16 @@ public struct VelocityComponent
 
 public struct SwarmUnitComponent
 {
+	private static int _goldenAngleSpawnCounter = 0;
+	private const float GoldenAngleRad = 2.39996323f;
+
 	public SwarmRole Role;
 	public SwarmState State;
 	public int OwnerId;                 // 0 = Player, 1+ = Enemy Hives / Proyektil Musuh
-	public float OrbitDistance;         // Jarak orbit ideal dari Core (dengan variasi organik per unit)
-	public float OrbitAngle;            // Fase osilasi / sudut orbit organik unit
-	public float OrbitSpeed;            // Kecepatan angular putaran / osilasi
+	public float OrbitDistance;         // Jarak sumbu mayor cincin orbit dari Core
+	public float OrbitAngle;            // Fase sudut posisi unit di sepanjang keliling cincin (0..2*Pi)
+	public float OrbitSpeed;            // Kecepatan angular putaran di sepanjang cincin
+	public float OrbitDepth;            // Kedalaman 3D semu pada cincin miring: [-1..+1] (< 0 di belakang Core, >= 0 di depan Core)
 	public float Energy;                // HP / Durability
 	public int Health;                  // Jumlah tubrukan yang dapat ditahan sebelum hancur
 	public int MaxHealth;               // Kapasitas HP maksimal
@@ -63,8 +67,8 @@ public struct SwarmUnitComponent
 	public float SpinRate;              // Kecepatan rotasi (misal putaran Shuriken/Bor)
 	public float ShieldTargetAngle;     // Sudut orbit target yang diberikan Core ke Defender
 	public int AssignedSector;          // Sektor pertahanan (0..11) yang dialokasikan Core
-	public float PersonalAngleOffset;   // Offset sudut acak agar barisan tameng organik & tidak kaku
-	public float PersonalRadialOffset;  // Offset radius acak di sekitar ShieldRadius (120px)
+	public float PersonalAngleOffset;   // Offset fase mikro agar aliran cincin organik
+	public float PersonalRadialOffset;  // Offset pita ketebalan cincin
 	public int FormationIndex;          // Indeks urutan formasi pada Super Giga Drill / Boost Nozzle
 	public float ExhaustTriggerTime;    // Waktu (detik) saat drone bagian belakang meledak jadi exhaust roket
 
@@ -91,8 +95,13 @@ public struct SwarmUnitComponent
 		State = SwarmState.Orbiting;
 		OwnerId = ownerId;
 		OrbitDistance = orbitDist;
-		OrbitAngle = GD.Randf() * Mathf.Tau;
+
+		// Distribusi Golden Angle agar unit tersebar merata 360 derajat di sepanjang cincin tanpa menggerombol
+		int seq = System.Threading.Interlocked.Increment(ref _goldenAngleSpawnCounter);
+		OrbitAngle = Mathf.Wrap(seq * GoldenAngleRad + (GD.Randf() - 0.5f) * 0.08f, 0.0f, Mathf.Tau);
 		OrbitSpeed = orbitSpd;
+		OrbitDepth = System.MathF.Sin(OrbitAngle);
+
 		Energy = 100.0f;
 		MaxHealth = GetMaxHealthForRole(role, State);
 		Health = MaxHealth;
@@ -104,11 +113,11 @@ public struct SwarmUnitComponent
 		SpatialEntityId = -1;
 		SpinAngle = GD.Randf() * Mathf.Tau;
 
-		int initialSector = (int)(GD.Randf() * 12.0f) % 12;
+		int initialSector = seq % 12;
 		AssignedSector = initialSector;
 		PersonalAngleOffset = (GD.Randf() - 0.5f) * (Mathf.Tau / 12.0f) * 0.85f;
-		PersonalRadialOffset = (GD.Randf() - 0.5f) * 22.0f;
-		ShieldTargetAngle = (initialSector + 0.5f) * (Mathf.Tau / 12.0f) - Mathf.Pi + PersonalAngleOffset;
+		PersonalRadialOffset = (GD.Randf() - 0.5f) * 8.0f;
+		ShieldTargetAngle = OrbitAngle;
 		FormationIndex = 0;
 		ExhaustTriggerTime = -1.0f;
 
@@ -127,12 +136,19 @@ public struct VisualComponent
 {
 	public Color Color;
 	public float Scale;
-	public Color BaseColor; // Warna default berdasarkan peran
+	public Color BaseColor; // Warna murni berdasarkan peran (A = 1.0f)
 
 	public VisualComponent(Color color, float scale = 1.0f)
 	{
 		Color = color;
-		BaseColor = color;
+		BaseColor = new Color(color.R, color.G, color.B, 1.0f);
+		Scale = scale;
+	}
+
+	public VisualComponent(Color currentColor, Color baseColor, float scale = 1.0f)
+	{
+		Color = currentColor;
+		BaseColor = new Color(baseColor.R, baseColor.G, baseColor.B, 1.0f);
 		Scale = scale;
 	}
 }
