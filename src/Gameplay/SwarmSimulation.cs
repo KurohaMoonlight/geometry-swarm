@@ -11,13 +11,20 @@ namespace GeometrySwarm.Gameplay;
 
 /// <summary>
 /// Driver utama simulasi kawanan Arch ECS, Laser Multi-Blok Dinamis, Sacrificial Dart Boost [SPACE],
-/// & GUI Pabrik Interaktif (Hive Foundry).
+/// GUI Pabrik Interaktif (Hive Foundry), & Tactical Swarm Dock (Bottom-Center Multi-Toggle HUD).
 /// - Bug Fix Priming Laser: Menghilangkan sinar tembus asteroid pada masa priming (hanya bola fokus & feeder).
 /// - Fitur Sacrificial Plasma Boost [SPACE]:
-///   * Para Dart berkumpul ke belakang kapal berlawanan arah kursor membentuk nozzle pendorong plasma.
-///   * Jika satu Dart mati terbakar, posisinya otomatis digantikan Dart lain yang masih mengorbit.
-///   * Laju kematian Dart meningkat seiring bertambahnya kecepatan kapal hingga batas atas (BoostMaxSpeed).
-/// - Mode Debug Infinite Resource: Stok seluruh bahan diatur tak terbatas (∞) untuk kemudahan pengujian.
+///   * 10 DartNeedle berkumpul di buritan kapal membentuk cincin nozzle ruang bakar (Focal Plasma Chamber).
+///   * Seluruh sisa swarm (Mining Droid, Scanner, Guardian, Shuriken, Drill, & sisa Dart cadangan)
+///     membentuk Kubah Parabola Aerodinamis (Parabolic Bow Shock Dome) di depan Core agar 0% unit tertinggal.
+///   * Dart di nozzle terbakar habis satu per satu menjadi propelan exhaust (BoostDartSacrificed),
+///     dan slot yang kosong langsung diisi ulang secara mulus oleh Dart cadangan dari kubah depan.
+/// - Fitur Tactical Swarm Dock (Tengah Bawah Layar):
+///   * Menampilkan jumlah real-time masing-masing jenis swarm (Mining, Dart, Shuriken, Boomerang, Drill, Guardian, Scanner).
+///   * Mendukung Multi-Toggle independen lewat tombol [1]-[5] atau klik langsung pada kartu slot di bawah layar.
+///   * Klik Kiri [LMB] HANYA mengaktifkan Mining Laser (jika [1] ON) dan/atau menembakkan swarm tempur yang slotnya sedang ON.
+///   * Guardian [AUTO SHIELD] tetap bekerja otomatis mengikuti pembagian 12 Pizza Slice ancaman musuh,
+///     dan Scanner [AUTO SCAN] bekerja pasif memindai deposit mineral asteroid.
 /// </summary>
 public partial class SwarmSimulation : Node2D
 {
@@ -32,6 +39,28 @@ public partial class SwarmSimulation : Node2D
 
     [Signal]
     public delegate void BoostDartSacrificedEventHandler(Vector2 nozzlePos, Vector2 aimDir, float powerRatio);
+
+    [Signal]
+    public delegate void SwarmClashImpulseEventHandler(Vector2 pos, float power, float radius);
+
+    private struct ClashSparkParticle
+    {
+        public Vector2 Position;
+        public Vector2 Velocity;
+        public Color Color;
+        public float Life;
+        public float MaxLife;
+        public float Size;
+    }
+
+    // =========================================================================
+    // ENEMY CORE, MUSUH MENEMBAK & CLASH ANIMATION
+    // =========================================================================
+    private EnemyCore? _enemyCore;
+    public bool IsEnemyFiring { get; set; } = true;
+    private float _duelFireTimer = 0.0f;
+    private const float EnemyFireInterval = 0.20f;
+    private readonly List<ClashSparkParticle> _clashSparks = new();
 
     private struct MiningDebrisParticle
     {
@@ -63,6 +92,23 @@ public partial class SwarmSimulation : Node2D
         public bool AutoCraftEnabled;
     }
 
+    private sealed class TacticalSwarmSlot
+    {
+        public int SlotIndex;
+        public string HotkeyText = "";
+        public string ShortName = "";
+        public string Glyph = "";
+        public SwarmRole Role;
+        public bool IsPassiveAuto;
+        public bool IsToggledOn;
+        public Color ThemeColor;
+        public PanelContainer? CardPanel;
+        public StyleBoxFlat? CardStyle;
+        public Label? CountLabel;
+        public Label? StateBadgeLabel;
+        public Button? ToggleOverlayButton;
+    }
+
     [Export] public int InitialSwarmCount { get; set; } = 15;
     [Export] public bool InfiniteDebugResources { get; set; } = true;
 
@@ -89,6 +135,8 @@ public partial class SwarmSimulation : Node2D
     public int CoreCellCount => _playerCore?.CoreCellCount ?? 1;
 
     public int DartNeedleCount { get; private set; } = 0;
+    public int GigaShurikenCount { get; private set; } = 0;
+    public int CrescentBoomerangCount { get; private set; } = 0;
     public int DrillDroneCount { get; private set; } = 0;
     public int GuardianCount { get; private set; } = 0;
     public int ScannerCount { get; private set; } = 0;
@@ -110,29 +158,38 @@ public partial class SwarmSimulation : Node2D
     public float GigaDrillNoseRadius => (_activeDefenderCoreCount > 0 && !_hasDefenderNoseBreached) ? MathF.Min(28.0f, 12.0f + MathF.Sqrt(_activeDefenderCoreCount) * 3.6f) : 0.0f;
 
     // =========================================================================
-    // PARAMETER DART PLASMA BOOST & RETRO-BRAKE [SPACE]
+    // PARAMETER SACRIFICIAL DART PLASMA BOOST, KUBAH PARABOLA, & RETRO-BRAKE [SPACE]
     // =========================================================================
     public struct DartThrusterJet
     {
         public Vector2 Position;
-        public Vector2 Direction; // Arah semburan exhaust
+        public Vector2 Direction; // Arah semburan exhaust atau konvergen
         public float Power;
         public float Length;
         public Color ThemeColor;
         public bool IsBrake;
     }
 
-    private const int MaxBoostThrusterSlots = 36;
+    private const int MaxBoostThrusterSlots = 10;
     private const int MaxBrakeSlots = 14;
     private bool _isBoostActive = false;
     private bool _isBoostFullPower = false;
     private float _boostPrimingTimer = 0.0f;
-    private float _boostPrimingDuration = 4.0f; // Dasar ~4.0s, semakin banyak dart semakin cepat
+    private float _boostPrimingDuration = 0.45f;
     private float _boostPulseTimer = 0.0f;
+    private float _boostSacrificeAccumulator = 0.0f;
+    private float _boostSacrificeFlash = 0.0f;
+    private int _nextSacrificeSlotCursor = 0;
     private int _activeBoostDartCount = 0;
     private readonly bool[] _boostSlotOccupied = new bool[MaxBoostThrusterSlots];
     private readonly List<DartThrusterJet> _activeThrusterJets = new(MaxBoostThrusterSlots);
     private readonly List<Vector2> _activeThrusterDartPositions = new(MaxBoostThrusterSlots);
+
+    // Kubah Parabola di depan Core (Parabolic Bow Shock Dome) untuk seluruh sisa swarm
+    private Vector2 _parabolaApexWorldPos = Vector2.Zero;
+    private float _parabolaHalfSpan = 105.0f;
+    private float _parabolaCurvatureK = 0.0052f;
+    private int _activeParabolaSwarmCount = 0;
 
     // Sistem pengereman balik retro-rocket (Reverse Thruster Braking)
     private bool _isBrakeActive = false;
@@ -174,7 +231,7 @@ public partial class SwarmSimulation : Node2D
     private readonly List<MiningDebrisParticle> _miningDebris = new();
 
     // =========================================================================
-    // INVENTORI 5 RESOURCE (DEBUG INFINITE) & GUI PABRIK INTERAKTIF (HIVE FOUNDRY)
+    // INVENTORI 5 RESOURCE, GUI PABRIK, & TACTICAL SWARM DOCK (TENGAH BAWAH)
     // =========================================================================
     private const int InfiniteStockValue = 999999;
     private readonly int[] _resourceStock = new int[5] { InfiniteStockValue, InfiniteStockValue, InfiniteStockValue, InfiniteStockValue, InfiniteStockValue };
@@ -187,6 +244,11 @@ public partial class SwarmSimulation : Node2D
     private bool _isFoundryExpanded = true;
     private float _autoCraftTimer = 0.0f;
     private readonly List<FactoryRecipe> _recipes = new();
+
+    // Tactical Swarm Hotbar Dock di Tengah Bawah (Multi-Toggle [1]-[5] + Indikator Pasif)
+    private PanelContainer? _tacticalDockPanel;
+    private readonly List<TacticalSwarmSlot> _tacticalSlots = new();
+    private readonly bool[] _roleToggledOn = new bool[7];
 
     // Parameter Super Giga Drill Break
     private bool _isChargingDrill = false;
@@ -209,6 +271,17 @@ public partial class SwarmSimulation : Node2D
     private int _activeDefenderCoreCount = 0;
     private int _gigaDrillExhaustStartIndex = 0;
 
+    private float _drillAsteroidGrindTimer = 0.0f;
+    private float _drillEnemyGrindTimer = 0.0f;
+    private float _drillAttritionTimer = 0.0f;
+
+    public float PlayerHealth => _playerCore?.Health ?? 0.0f;
+    public float PlayerMaxHealth => _playerCore?.MaxHealth ?? 1.0f;
+    public bool IsPlayerEscapePod => _playerCore?.IsEscapePod ?? false;
+    public float EnemyHealth => _enemyCore?.Health ?? 0.0f;
+    public float EnemyMaxHealth => _enemyCore?.MaxHealth ?? 1.0f;
+    public bool IsEnemyEscapePod => _enemyCore?.IsEscapePod ?? false;
+
     public int GigaDrillTotalUnits => _activeDrillFormationCount + _activeDefenderCoreCount;
     public int GigaDrillDefenderCoreCount => _activeDefenderCoreCount;
     public int GigaDrillLanceCount => _activeDrillFormationCount;
@@ -220,11 +293,25 @@ public partial class SwarmSimulation : Node2D
         _allSwarmQuery = new QueryDescription().WithAll<PositionComponent, VelocityComponent, SwarmUnitComponent, VisualComponent>();
 
         _playerCore = GetNode<PlayerCore>("PlayerCore");
+        if (_playerCore != null)
+        {
+            _playerCore.EscapePodEjected += OnPlayerEscapePodEjected;
+            _playerCore.CoreDestroyed += OnPlayerCoreDestroyed;
+        }
         _renderer = GetNode<SwarmMultiMeshRenderer>("SwarmRenderer");
 
         InitializeRecipes();
+        InitializeTacticalSlots();
         CallDeferred(MethodName.BuildInteractiveFoundryGui);
         SpawnStartingSwarm();
+
+        // Inisialisasi Kapal Induk Musuh (Enemy Hive Core) berhadapan dengan Player Core
+        _enemyCore = new EnemyCore();
+        _enemyCore.Position = new Vector2(1150.0f, 0.0f);
+        _enemyCore.EnemyEscapePodEjected += OnEnemyEscapePodEjected;
+        _enemyCore.EnemyCoreDestroyed += OnEnemyCoreDestroyed;
+        AddChild(_enemyCore);
+        SpawnInitialEnemySwarm(60);
     }
 
     public void SpawnStartingSwarm()
@@ -244,7 +331,7 @@ public partial class SwarmSimulation : Node2D
             Name = "Dart Needle (+10)",
             Glyph = "▲",
             Description = "Swarm penusuk cepat & bahan bakar Plasma Boost [SPACE]",
-            HotkeyLabel = "[1]",
+            HotkeyLabel = "▲",
             Role = SwarmRole.DartNeedle,
             OutputCount = 10,
             Costs = new[] { 10, 0, 0, 0, 0 },
@@ -257,7 +344,7 @@ public partial class SwarmSimulation : Node2D
             Name = "Mining Droid (+2)",
             Glyph = "⛏",
             Description = "Gali batu asteroid & perlebar laser kapal",
-            HotkeyLabel = "[2]",
+            HotkeyLabel = "⛏",
             Role = SwarmRole.MiningDroid,
             OutputCount = 2,
             Costs = new[] { 10, 8, 0, 0, 2 },
@@ -270,7 +357,7 @@ public partial class SwarmSimulation : Node2D
             Name = "Scanner Drone (+2)",
             Glyph = "◈",
             Description = "Pindai deposit mineral tersembunyi",
-            HotkeyLabel = "[3]",
+            HotkeyLabel = "◈",
             Role = SwarmRole.ScannerDrone,
             OutputCount = 2,
             Costs = new[] { 6, 12, 0, 0, 2 },
@@ -282,8 +369,8 @@ public partial class SwarmSimulation : Node2D
         {
             Name = "Guardian Shield (+5)",
             Glyph = "⛨",
-            Description = "Perisai putar tangguh penahan musuh",
-            HotkeyLabel = "[4]",
+            Description = "Perisai otomatis 12 sektor penahan musuh",
+            HotkeyLabel = "⛨",
             Role = SwarmRole.Guardian,
             OutputCount = 5,
             Costs = new[] { 12, 12, 8, 0, 0 },
@@ -295,8 +382,8 @@ public partial class SwarmSimulation : Node2D
         {
             Name = "Drill Drone (+5)",
             Glyph = "▼",
-            Description = "Penembus batu & tombak peluncur",
-            HotkeyLabel = "[5]",
+            Description = "Penembus batu & tombak Super Giga Drill [RMB]",
+            HotkeyLabel = "▼",
             Role = SwarmRole.DrillDrone,
             OutputCount = 5,
             Costs = new[] { 12, 0, 18, 0, 4 },
@@ -309,7 +396,7 @@ public partial class SwarmSimulation : Node2D
             Name = "Giga Shuriken (+5)",
             Glyph = "✹",
             Description = "Cakram putar pemotong rintangan",
-            HotkeyLabel = "[6]",
+            HotkeyLabel = "✹",
             Role = SwarmRole.GigaShuriken,
             OutputCount = 5,
             Costs = new[] { 10, 0, 14, 10, 0 },
@@ -322,7 +409,7 @@ public partial class SwarmSimulation : Node2D
             Name = "Boomerang (+5)",
             Glyph = "☽",
             Description = "Sapu melengkung area luas dan kembali",
-            HotkeyLabel = "[7]",
+            HotkeyLabel = "☽",
             Role = SwarmRole.CrescentBoomerang,
             OutputCount = 5,
             Costs = new[] { 0, 8, 0, 16, 4 },
@@ -335,11 +422,110 @@ public partial class SwarmSimulation : Node2D
             Name = "Expand Hive Core (+1 Hex)",
             Glyph = "⬡",
             Description = "Membelah sel core secara mitosis",
-            HotkeyLabel = "[8]",
+            HotkeyLabel = "⬡",
             IsCoreExpansion = true,
             OutputCount = 1,
             Costs = new[] { 35, 25, 25, 0, 20 },
             ThemeColor = new Color(1.0f, 0.88f, 0.35f)
+        });
+    }
+
+    private void InitializeTacticalSlots()
+    {
+        _tacticalSlots.Clear();
+        Array.Clear(_roleToggledOn, 0, _roleToggledOn.Length);
+
+        // Default: [1] Mining Laser dan [2] Dart Needle aktif di awal permainan
+        _roleToggledOn[(int)SwarmRole.MiningDroid] = true;
+        _roleToggledOn[(int)SwarmRole.DartNeedle] = true;
+        _roleToggledOn[(int)SwarmRole.GigaShuriken] = true;
+        _roleToggledOn[(int)SwarmRole.CrescentBoomerang] = true;
+        _roleToggledOn[(int)SwarmRole.DrillDrone] = false; // Default disimpan untuk Super Giga Drill [RMB], bisa di-toggle [5]
+
+        // 5 Slot Aktif Multi-Toggle (Klik Kiri / Tombol 1-5)
+        _tacticalSlots.Add(new TacticalSwarmSlot
+        {
+            SlotIndex = 0,
+            HotkeyText = "[1]",
+            ShortName = "MINING",
+            Glyph = "⛏",
+            Role = SwarmRole.MiningDroid,
+            IsPassiveAuto = false,
+            IsToggledOn = _roleToggledOn[(int)SwarmRole.MiningDroid],
+            ThemeColor = new Color(1.0f, 0.68f, 0.22f)
+        });
+
+        _tacticalSlots.Add(new TacticalSwarmSlot
+        {
+            SlotIndex = 1,
+            HotkeyText = "[2]",
+            ShortName = "DART",
+            Glyph = "▲",
+            Role = SwarmRole.DartNeedle,
+            IsPassiveAuto = false,
+            IsToggledOn = _roleToggledOn[(int)SwarmRole.DartNeedle],
+            ThemeColor = new Color(0.95f, 1.0f, 0.35f)
+        });
+
+        _tacticalSlots.Add(new TacticalSwarmSlot
+        {
+            SlotIndex = 2,
+            HotkeyText = "[3]",
+            ShortName = "SHURIKEN",
+            Glyph = "✹",
+            Role = SwarmRole.GigaShuriken,
+            IsPassiveAuto = false,
+            IsToggledOn = _roleToggledOn[(int)SwarmRole.GigaShuriken],
+            ThemeColor = new Color(1.0f, 0.32f, 0.85f)
+        });
+
+        _tacticalSlots.Add(new TacticalSwarmSlot
+        {
+            SlotIndex = 3,
+            HotkeyText = "[4]",
+            ShortName = "BOOMERANG",
+            Glyph = "☽",
+            Role = SwarmRole.CrescentBoomerang,
+            IsPassiveAuto = false,
+            IsToggledOn = _roleToggledOn[(int)SwarmRole.CrescentBoomerang],
+            ThemeColor = new Color(0.32f, 1.0f, 0.65f)
+        });
+
+        _tacticalSlots.Add(new TacticalSwarmSlot
+        {
+            SlotIndex = 4,
+            HotkeyText = "[5]",
+            ShortName = "DRILL",
+            Glyph = "▼",
+            Role = SwarmRole.DrillDrone,
+            IsPassiveAuto = false,
+            IsToggledOn = _roleToggledOn[(int)SwarmRole.DrillDrone],
+            ThemeColor = new Color(1.0f, 0.38f, 0.25f)
+        });
+
+        // 2 Slot Indikator Otomatis / Pasif (Guardian 12-Sector Pizza Slice & Scanner)
+        _tacticalSlots.Add(new TacticalSwarmSlot
+        {
+            SlotIndex = 5,
+            HotkeyText = "AUTO",
+            ShortName = "GUARDIAN",
+            Glyph = "⛨",
+            Role = SwarmRole.Guardian,
+            IsPassiveAuto = true,
+            IsToggledOn = true,
+            ThemeColor = new Color(0.25f, 0.92f, 1.0f)
+        });
+
+        _tacticalSlots.Add(new TacticalSwarmSlot
+        {
+            SlotIndex = 6,
+            HotkeyText = "PASSIVE",
+            ShortName = "SCANNER",
+            Glyph = "◈",
+            Role = SwarmRole.ScannerDrone,
+            IsPassiveAuto = true,
+            IsToggledOn = true,
+            ThemeColor = new Color(0.85f, 0.50f, 1.0f)
         });
     }
 
@@ -350,8 +536,7 @@ public partial class SwarmSimulation : Node2D
     private const float FoundryClosedBtnX = 0.0f;
 
     /// <summary>
-    /// Membangun GUI Pabrik (Hive Foundry) bergaya Cyber-Glassmorphic dengan animasi sliding halus
-    /// dan kartu unit ramah pengguna.
+    /// Membangun GUI Pabrik (Hive Foundry) di sebelah kiri dan Tactical Swarm Hotbar Dock di Tengah Bawah.
     /// </summary>
     private void BuildInteractiveFoundryGui()
     {
@@ -499,7 +684,7 @@ public partial class SwarmSimulation : Node2D
         // 3. Scroll Container untuk Daftar Kartu Unit (Modern Card List)
         var scrollContainer = new ScrollContainer
         {
-            CustomMinimumSize = new Vector2(FoundryPanelWidth - 24, 430),
+            CustomMinimumSize = new Vector2(FoundryPanelWidth - 24, 380),
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
             VerticalScrollMode = ScrollContainer.ScrollMode.Auto
         };
@@ -541,14 +726,14 @@ public partial class SwarmSimulation : Node2D
             cardVBox.AddThemeConstantOverride("separation", 3);
             cardPanel.AddChild(cardVBox);
 
-            // Baris 1: Glyph + Hotkey + Nama Unit + Tombol Auto-Craft
+            // Baris 1: Glyph + Nama Unit + Tombol Auto-Craft
             var topHBox = new HBoxContainer();
             topHBox.AddThemeConstantOverride("separation", 6);
             cardVBox.AddChild(topHBox);
 
             var titleLabel = new Label
             {
-                Text = $"{rec.HotkeyLabel} {rec.Glyph} {rec.Name}",
+                Text = $"{rec.Glyph} {rec.Name}",
                 SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
             };
             titleLabel.AddThemeColorOverride("font_color", rec.ThemeColor);
@@ -634,7 +819,311 @@ public partial class SwarmSimulation : Node2D
         };
         rootVBox.AddChild(cheatBtn);
 
+        // 5. Bangun Tactical Swarm Hotbar Dock di Tengah Bawah Layar
+        BuildBottomCenterSwarmDockGui(hudLayer);
+
         RefreshFoundryGui();
+    }
+
+    /// <summary>
+    /// Membangun GUI Tactical Swarm Dock di Tengah Bawah Layar:
+    /// - Menampilkan jumlah masing-masing jenis swarm secara real-time.
+    /// - Slot [1] s/d [5] mendukung Multi-Toggle untuk memilih aksi Klik Kiri (Mining Laser / Tembak Swarm).
+    /// - Slot Guardian & Scanner menampilkan jumlah dan status otomatis (12-Sector Pizza Slice Shield & Auto-Scan).
+    /// </summary>
+    private void BuildBottomCenterSwarmDockGui(CanvasLayer hudLayer)
+    {
+        var bottomAnchorBox = new HBoxContainer
+        {
+            Name = "BottomCenterDockAnchor",
+            AnchorLeft = 0.0f,
+            AnchorRight = 1.0f,
+            AnchorTop = 1.0f,
+            AnchorBottom = 1.0f,
+            OffsetTop = -102.0f,
+            OffsetBottom = -14.0f,
+            Alignment = BoxContainer.AlignmentMode.Center,
+            MouseFilter = Control.MouseFilterEnum.Ignore
+        };
+        hudLayer.AddChild(bottomAnchorBox);
+
+        var dockOuterStyle = new StyleBoxFlat
+        {
+            BgColor = new Color(0.03f, 0.04f, 0.075f, 0.92f),
+            BorderColor = new Color(0.28f, 0.72f, 1.0f, 0.55f),
+            BorderWidthLeft = 2,
+            BorderWidthTop = 2,
+            BorderWidthRight = 2,
+            BorderWidthBottom = 2,
+            CornerRadiusTopLeft = 12,
+            CornerRadiusTopRight = 12,
+            CornerRadiusBottomLeft = 12,
+            CornerRadiusBottomRight = 12,
+            ContentMarginLeft = 12,
+            ContentMarginRight = 12,
+            ContentMarginTop = 8,
+            ContentMarginBottom = 8
+        };
+
+        _tacticalDockPanel = new PanelContainer
+        {
+            Name = "TacticalSwarmDockPanel",
+            MouseFilter = Control.MouseFilterEnum.Stop
+        };
+        _tacticalDockPanel.AddThemeStyleboxOverride("panel", dockOuterStyle);
+        bottomAnchorBox.AddChild(_tacticalDockPanel);
+
+        var dockVBox = new VBoxContainer();
+        dockVBox.AddThemeConstantOverride("separation", 4);
+        _tacticalDockPanel.AddChild(dockVBox);
+
+        var dockHintLabel = new Label
+        {
+            Text = "⚡ TACTICAL SWARM MULTI-TOGGLE [1-5] • KLIK KIRI [LMB]: AKTIFKAN LASER / TEMBAK SWARM YANG ON",
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        dockHintLabel.AddThemeColorOverride("font_color", new Color(0.68f, 0.85f, 1.0f, 0.88f));
+        dockHintLabel.AddThemeFontSizeOverride("font_size", 10);
+        dockVBox.AddChild(dockHintLabel);
+
+        var slotsHBox = new HBoxContainer();
+        slotsHBox.AddThemeConstantOverride("separation", 8);
+        slotsHBox.Alignment = BoxContainer.AlignmentMode.Center;
+        dockVBox.AddChild(slotsHBox);
+
+        for (int i = 0; i < _tacticalSlots.Count; i++)
+        {
+            int slotIdx = i;
+            var slot = _tacticalSlots[i];
+
+            // Beri pemisah tipis sebelum slot pasif otomatis (Guardian & Scanner)
+            if (i == 5)
+            {
+                var sep = new VSeparator
+                {
+                    CustomMinimumSize = new Vector2(6, 0)
+                };
+                slotsHBox.AddChild(sep);
+            }
+
+            var cardStyle = new StyleBoxFlat
+            {
+                BgColor = new Color(0.06f, 0.08f, 0.14f, 0.92f),
+                BorderColor = slot.ThemeColor,
+                BorderWidthLeft = 2,
+                BorderWidthTop = 2,
+                BorderWidthRight = 2,
+                BorderWidthBottom = 2,
+                CornerRadiusTopLeft = 8,
+                CornerRadiusTopRight = 8,
+                CornerRadiusBottomLeft = 8,
+                CornerRadiusBottomRight = 8,
+                ContentMarginLeft = 8,
+                ContentMarginRight = 8,
+                ContentMarginTop = 5,
+                ContentMarginBottom = 5
+            };
+
+            var cardPanel = new PanelContainer
+            {
+                CustomMinimumSize = new Vector2(96, 56),
+                MouseFilter = Control.MouseFilterEnum.Stop
+            };
+            cardPanel.AddThemeStyleboxOverride("panel", cardStyle);
+            slotsHBox.AddChild(cardPanel);
+
+            slot.CardPanel = cardPanel;
+            slot.CardStyle = cardStyle;
+
+            var cardVBox = new VBoxContainer();
+            cardVBox.AddThemeConstantOverride("separation", 1);
+            cardVBox.MouseFilter = Control.MouseFilterEnum.Ignore;
+            cardPanel.AddChild(cardVBox);
+
+            // Baris 1: Hotkey [1] di kiri + Status ON/OFF di kanan
+            var topRow = new HBoxContainer();
+            topRow.MouseFilter = Control.MouseFilterEnum.Ignore;
+            cardVBox.AddChild(topRow);
+
+            var keyLbl = new Label
+            {
+                Text = slot.HotkeyText,
+                SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+                MouseFilter = Control.MouseFilterEnum.Ignore
+            };
+            keyLbl.AddThemeFontSizeOverride("font_size", 10);
+            keyLbl.AddThemeColorOverride("font_color", new Color(0.78f, 0.86f, 0.98f));
+            topRow.AddChild(keyLbl);
+
+            var badgeLbl = new Label
+            {
+                Text = slot.IsPassiveAuto ? "AUTO" : (slot.IsToggledOn ? "● ON" : "○ OFF"),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                MouseFilter = Control.MouseFilterEnum.Ignore
+            };
+            badgeLbl.AddThemeFontSizeOverride("font_size", 10);
+            topRow.AddChild(badgeLbl);
+            slot.StateBadgeLabel = badgeLbl;
+
+            // Baris 2: Glyph + Jumlah Unit Real-Time berukuran besar
+            var countLbl = new Label
+            {
+                Text = $"{slot.Glyph} 0",
+                HorizontalAlignment = HorizontalAlignment.Center,
+                MouseFilter = Control.MouseFilterEnum.Ignore
+            };
+            countLbl.AddThemeFontSizeOverride("font_size", 15);
+            countLbl.AddThemeColorOverride("font_color", slot.ThemeColor);
+            cardVBox.AddChild(countLbl);
+            slot.CountLabel = countLbl;
+
+            // Baris 3: Nama Jenis Swarm
+            var nameLbl = new Label
+            {
+                Text = slot.ShortName,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                MouseFilter = Control.MouseFilterEnum.Ignore
+            };
+            nameLbl.AddThemeFontSizeOverride("font_size", 9);
+            nameLbl.AddThemeColorOverride("font_color", new Color(0.75f, 0.80f, 0.90f, 0.90f));
+            cardVBox.AddChild(nameLbl);
+
+            // Jika bukan pasif, tambahkan tombol transparan di atas kartu agar bisa diklik langsung dengan mouse
+            if (!slot.IsPassiveAuto)
+            {
+                var emptyStyle = new StyleBoxEmpty();
+                var hoverStyle = new StyleBoxFlat
+                {
+                    BgColor = new Color(1.0f, 1.0f, 1.0f, 0.07f),
+                    CornerRadiusTopLeft = 8,
+                    CornerRadiusTopRight = 8,
+                    CornerRadiusBottomLeft = 8,
+                    CornerRadiusBottomRight = 8
+                };
+
+                var btnOverlay = new Button
+                {
+                    Flat = false,
+                    FocusMode = Control.FocusModeEnum.None,
+                    MouseFilter = Control.MouseFilterEnum.Stop,
+                    MouseDefaultCursorShape = Control.CursorShape.PointingHand
+                };
+                btnOverlay.AddThemeStyleboxOverride("normal", emptyStyle);
+                btnOverlay.AddThemeStyleboxOverride("hover", hoverStyle);
+                btnOverlay.AddThemeStyleboxOverride("pressed", hoverStyle);
+                btnOverlay.Pressed += () => ToggleTacticalSlot(slotIdx);
+                cardPanel.AddChild(btnOverlay);
+                slot.ToggleOverlayButton = btnOverlay;
+            }
+        }
+
+        RefreshTacticalDockGui();
+    }
+
+    public void ToggleTacticalSlot(int slotIndex)
+    {
+        if (slotIndex < 0 || slotIndex >= _tacticalSlots.Count) return;
+        var slot = _tacticalSlots[slotIndex];
+        if (slot.IsPassiveAuto) return;
+
+        slot.IsToggledOn = !slot.IsToggledOn;
+        _roleToggledOn[(int)slot.Role] = slot.IsToggledOn;
+
+        // Jika Mining Droid baru saja di-OFF-kan saat laser menyala, langsung matikan laser
+        if (slot.Role == SwarmRole.MiningDroid && !slot.IsToggledOn && _isMiningLaserActive)
+        {
+            _laserPrimingTimer = 0.0f;
+            _laserFocusWarmup = 0.0f;
+            _isMiningLaserActive = false;
+            _laserActiveHitBoxes.Clear();
+            QueueRedraw();
+        }
+
+        RefreshTacticalDockGui();
+    }
+
+    private int GetRoleSwarmCount(SwarmRole role)
+    {
+        return role switch
+        {
+            SwarmRole.MiningDroid => MiningCount,
+            SwarmRole.DartNeedle => DartNeedleCount,
+            SwarmRole.GigaShuriken => GigaShurikenCount,
+            SwarmRole.CrescentBoomerang => CrescentBoomerangCount,
+            SwarmRole.DrillDrone => DrillDroneCount,
+            SwarmRole.Guardian => GuardianCount,
+            SwarmRole.ScannerDrone => ScannerCount,
+            _ => 0
+        };
+    }
+
+    private void RefreshTacticalDockGui()
+    {
+        for (int i = 0; i < _tacticalSlots.Count; i++)
+        {
+            var slot = _tacticalSlots[i];
+            int count = GetRoleSwarmCount(slot.Role);
+
+            if (slot.CountLabel != null)
+            {
+                slot.CountLabel.Text = $"{slot.Glyph} {count}";
+            }
+
+            if (slot.IsPassiveAuto)
+            {
+                if (slot.StateBadgeLabel != null)
+                {
+                    slot.StateBadgeLabel.Text = slot.Role == SwarmRole.Guardian ? "12-SEC" : "PASSIVE";
+                    slot.StateBadgeLabel.AddThemeColorOverride("font_color", slot.ThemeColor * 0.95f);
+                }
+                if (slot.CardStyle != null)
+                {
+                    slot.CardStyle.BgColor = new Color(0.05f, 0.07f, 0.12f, 0.88f);
+                    slot.CardStyle.BorderColor = slot.ThemeColor * (count > 0 ? 0.55f : 0.25f);
+                }
+                if (slot.CountLabel != null)
+                {
+                    slot.CountLabel.AddThemeColorOverride("font_color", count > 0 ? slot.ThemeColor : new Color(0.45f, 0.50f, 0.60f));
+                }
+            }
+            else
+            {
+                bool isOn = slot.IsToggledOn;
+                if (slot.StateBadgeLabel != null)
+                {
+                    slot.StateBadgeLabel.Text = isOn ? "● ON" : "○ OFF";
+                    slot.StateBadgeLabel.AddThemeColorOverride(
+                        "font_color",
+                        isOn ? new Color(0.35f, 1.0f, 0.55f) : new Color(0.52f, 0.55f, 0.65f)
+                    );
+                }
+
+                if (slot.CardStyle != null)
+                {
+                    slot.CardStyle.BgColor = isOn
+                        ? new Color(slot.ThemeColor.R * 0.16f, slot.ThemeColor.G * 0.16f, slot.ThemeColor.B * 0.18f, 0.94f)
+                        : new Color(0.04f, 0.045f, 0.08f, 0.78f);
+
+                    slot.CardStyle.BorderColor = isOn
+                        ? slot.ThemeColor
+                        : new Color(0.25f, 0.28f, 0.36f, 0.45f);
+
+                    int bw = isOn ? 2 : 1;
+                    slot.CardStyle.BorderWidthLeft = bw;
+                    slot.CardStyle.BorderWidthTop = bw;
+                    slot.CardStyle.BorderWidthRight = bw;
+                    slot.CardStyle.BorderWidthBottom = bw;
+                }
+
+                if (slot.CountLabel != null)
+                {
+                    slot.CountLabel.AddThemeColorOverride(
+                        "font_color",
+                        isOn ? slot.ThemeColor : (slot.ThemeColor * 0.48f)
+                    );
+                }
+            }
+        }
     }
 
     private void ToggleFoundryPanel()
@@ -809,20 +1298,59 @@ public partial class SwarmSimulation : Node2D
                 rec.AutoButton.AddThemeColorOverride("font_color", rec.AutoCraftEnabled ? new Color(0.3f, 1.0f, 0.5f) : new Color(0.65f, 0.65f, 0.70f));
             }
         }
+
+        RefreshTacticalDockGui();
     }
 
     private bool IsMouseOverFoundryGui()
     {
-        if (GetViewport().GuiGetHoveredControl() != null) return true;
+        Vector2 mPos = GetViewport().GetMousePosition();
+
         if (_foundryMainPanel != null && _foundryMainPanel.Visible)
         {
-            Rect2 rect = _foundryMainPanel.GetGlobalRect();
-            if (rect.HasPoint(GetViewport().GetMousePosition()))
+            if (_foundryMainPanel.GetGlobalRect().HasPoint(mPos))
             {
                 return true;
             }
         }
+
+        if (_tacticalDockPanel != null && _tacticalDockPanel.Visible)
+        {
+            if (_tacticalDockPanel.GetGlobalRect().HasPoint(mPos))
+            {
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    private void IncrementRoleCounter(SwarmRole role, int delta)
+    {
+        switch (role)
+        {
+            case SwarmRole.DartNeedle:
+                DartNeedleCount = Math.Max(0, DartNeedleCount + delta);
+                break;
+            case SwarmRole.GigaShuriken:
+                GigaShurikenCount = Math.Max(0, GigaShurikenCount + delta);
+                break;
+            case SwarmRole.CrescentBoomerang:
+                CrescentBoomerangCount = Math.Max(0, CrescentBoomerangCount + delta);
+                break;
+            case SwarmRole.DrillDrone:
+                DrillDroneCount = Math.Max(0, DrillDroneCount + delta);
+                break;
+            case SwarmRole.Guardian:
+                GuardianCount = Math.Max(0, GuardianCount + delta);
+                break;
+            case SwarmRole.ScannerDrone:
+                ScannerCount = Math.Max(0, ScannerCount + delta);
+                break;
+            case SwarmRole.MiningDroid:
+                MiningCount = Math.Max(0, MiningCount + delta);
+                break;
+        }
     }
 
     public void AddSpecificSwarm(SwarmRole role, int count)
@@ -878,11 +1406,7 @@ public partial class SwarmSimulation : Node2D
             swarm = new SwarmUnitComponent(role, 0, orbitDist, orbitSpeed);
             vis = new VisualComponent(color * 2.5f, targetScale * 0.42f);
 
-            if (role == SwarmRole.DartNeedle) DartNeedleCount++;
-            if (role == SwarmRole.DrillDrone) DrillDroneCount++;
-            if (role == SwarmRole.Guardian) GuardianCount++;
-            if (role == SwarmRole.ScannerDrone) ScannerCount++;
-            if (role == SwarmRole.MiningDroid) MiningCount++;
+            IncrementRoleCounter(role, 1);
             _entityCount++;
             remaining--;
             spawnIdx++;
@@ -910,11 +1434,7 @@ public partial class SwarmSimulation : Node2D
             Vector2 spawnPos = bayWorld + ejectDir * 6.0f;
             Vector2 spawnVel = _playerCore.Velocity * 0.5f + ejectDir * (380.0f + GD.Randf() * 140.0f);
 
-            if (role == SwarmRole.DartNeedle) DartNeedleCount++;
-            if (role == SwarmRole.DrillDrone) DrillDroneCount++;
-            if (role == SwarmRole.Guardian) GuardianCount++;
-            if (role == SwarmRole.ScannerDrone) ScannerCount++;
-            if (role == SwarmRole.MiningDroid) MiningCount++;
+            IncrementRoleCounter(role, 1);
 
             _world.Create(
                 new PositionComponent(spawnPos),
@@ -984,6 +1504,175 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
+    public void SpawnInitialEnemySwarm(int count = 60)
+    {
+        if (_enemyCore == null) return;
+        Vector2 enemyCorePos = _enemyCore.GlobalPosition;
+        Color enemyColor = new Color(3.4f, 0.35f, 0.9f, 1.0f);
+
+        for (int i = 0; i < count; i++)
+        {
+            float orbitDist = 55.0f + GD.Randf() * 75.0f;
+            float orbitSpd = (GD.Randf() > 0.5f ? 1.0f : -1.0f) * (1.2f + GD.Randf() * 1.8f);
+            float angle = GD.Randf() * Mathf.Tau;
+            Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * orbitDist;
+
+            var pos = new PositionComponent(enemyCorePos + offset);
+            var vel = new VelocityComponent(Vector2.Zero);
+            var unit = new SwarmUnitComponent(SwarmRole.DartNeedle, ownerId: 1, orbitDist, orbitSpd)
+            {
+                State = SwarmState.Orbiting,
+                MaxLifeTime = 3.5f
+            };
+            var vis = new VisualComponent(enemyColor, 0.70f);
+
+            _world.Create(pos, vel, unit, vis);
+        }
+    }
+
+    public void FirePlayerDuelStream(Vector2 targetPos, int count = 1)
+    {
+        int fired = 0;
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm) =>
+        {
+            if (fired >= count) return;
+            if (swarm.OwnerId != 0 || swarm.State != SwarmState.Orbiting) return;
+            if (swarm.Role != SwarmRole.DartNeedle) return;
+
+            Vector2 toTarget = targetPos - pos.Value;
+            if (toTarget.LengthSquared() < 1.0f) return;
+
+            float spread = (GD.Randf() - 0.5f) * 0.08f;
+            Vector2 dir = toTarget.Normalized().Rotated(spread);
+
+            swarm.State = SwarmState.Launched;
+            swarm.MaxHealth = 1;
+            swarm.Health = 1;
+            swarm.TargetDirection = dir;
+            swarm.TargetPosition = targetPos;
+            swarm.LifeTime = 0.0f;
+            swarm.MaxLifeTime = 2.0f;
+            vel.Value = dir * (_boidSystem.BulletMaxSpeed * (0.85f + GD.Randf() * 0.15f));
+            fired++;
+        });
+
+        if (DartNeedleCount < 25)
+        {
+            AddSpecificSwarm(SwarmRole.DartNeedle, 6);
+        }
+    }
+
+    public void FireEnemyDuelStream(Vector2 targetPos, int count = 1)
+    {
+        int fired = 0;
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm) =>
+        {
+            if (fired >= count) return;
+            if (swarm.OwnerId == 0 || swarm.State != SwarmState.Orbiting) return;
+
+            Vector2 toTarget = targetPos - pos.Value;
+            if (toTarget.LengthSquared() < 1.0f) return;
+
+            // Tembakan lurus berkecepatan agak tinggi (720 px/s) untuk skenario uji coba menembus Giga Drill
+            Vector2 dir = toTarget.Normalized();
+
+            swarm.State = SwarmState.Launched;
+            swarm.MaxHealth = 1;
+            swarm.Health = 1;
+            swarm.TargetDirection = dir;
+            swarm.TargetPosition = targetPos;
+            swarm.LifeTime = 0.0f;
+            swarm.MaxLifeTime = 3.5f;
+            vel.Value = dir * 720.0f;
+            fired++;
+        });
+
+        if (fired < count && _enemyCore != null)
+        {
+            SpawnInitialEnemySwarm(6);
+        }
+    }
+
+    public void TriggerClashAnimation(Vector2 pos, bool dropScrap)
+    {
+        // 1. Animasi percikan partikel kinetik (Cyan + Magenta energy flash)
+        int sparkCount = 9;
+        for (int i = 0; i < sparkCount; i++)
+        {
+            float angle = GD.Randf() * Mathf.Tau;
+            float speed = 240.0f + GD.Randf() * 320.0f;
+            Vector2 sVel = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * speed;
+            Color sCol = (i % 2 == 0)
+                ? new Color(0.9f, 2.5f, 3.2f, 1.0f)
+                : new Color(3.5f, 0.4f, 1.8f, 1.0f);
+
+            _clashSparks.Add(new ClashSparkParticle
+            {
+                Position = pos,
+                Velocity = sVel,
+                Color = sCol,
+                Life = 0.22f,
+                MaxLife = 0.22f,
+                Size = 3.8f
+            });
+        }
+
+        // 2. Kepingan Pecahan (Salvageable Scrap Debris yang bisa didekati untuk daur ulang)
+        if (dropScrap && _miningDebris.Count < 300)
+        {
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = pos + new Vector2((GD.Randf() - 0.5f) * 8.0f, (GD.Randf() - 0.5f) * 8.0f),
+                Velocity = new Vector2((GD.Randf() - 0.5f) * 60.0f, (GD.Randf() - 0.5f) * 60.0f),
+                Color = new Color(2.6f, 1.9f, 0.7f, 0.95f),
+                Life = 24.0f,
+                MaxLife = 24.0f,
+                Size = 4.2f,
+                IsCrystalMatter = true,
+                MatterType = ResourceType.Ferrite
+            });
+        }
+
+        // 3. Gelombang kejut mikro pada grid kosmik
+        EmitSignal(SignalName.SwarmClashImpulse, pos, 380.0f, 65.0f);
+    }
+
+    private void UpdateClashSparks(float dt)
+    {
+        if (_clashSparks.Count == 0) return;
+        for (int i = _clashSparks.Count - 1; i >= 0; i--)
+        {
+            var sp = _clashSparks[i];
+            sp.Life -= dt;
+            if (sp.Life <= 0.0f)
+            {
+                _clashSparks.RemoveAt(i);
+            }
+            else
+            {
+                sp.Position += sp.Velocity * dt;
+                sp.Velocity *= MathF.Pow(0.85f, dt * 60.0f);
+                _clashSparks[i] = sp;
+            }
+        }
+        QueueRedraw();
+    }
+
+    private void SpawnOneOrbitingDartNearPlayer()
+    {
+        if (_playerCore == null) return;
+        float orbitDist = 55.0f + GD.Randf() * 75.0f;
+        float orbitSpd = (GD.Randf() > 0.5f ? 1.0f : -1.0f) * (1.2f + GD.Randf() * 1.8f);
+        float angle = GD.Randf() * Mathf.Tau;
+        Vector2 spawnPos = _playerCore.GlobalPosition + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * 30.0f;
+
+        var pos = new PositionComponent(spawnPos);
+        var vel = new VelocityComponent(Vector2.Zero);
+        var unit = new SwarmUnitComponent(SwarmRole.DartNeedle, ownerId: 0, orbitDist, orbitSpd);
+        var vis = new VisualComponent(DartColor, 0.55f);
+        _world.Create(pos, vel, unit, vis);
+    }
+
     public override void _PhysicsProcess(double delta)
     {
         try
@@ -1020,14 +1709,25 @@ public partial class SwarmSimulation : Node2D
 
             if (_fireCooldown > 0.0f) _fireCooldown -= dt;
 
+            // =========================================================================
+            // AKSI KLIK KIRI [LMB] BERDASARKAN MULTI-TOGGLE TACTICAL DOCK [1-5]
+            // =========================================================================
             bool isLeftClick = Input.IsMouseButtonPressed(MouseButton.Left) && !IsMouseOverFoundryGui();
+            bool isMiningToggled = _roleToggledOn[(int)SwarmRole.MiningDroid];
+
             if (isLeftClick && !_isChargingDrill && !_isGigaDrillActive)
             {
-                if (MiningCount > 0)
+                // 1. Jika slot [1] Mining Droid sedang ON, nyalakan Heavy Mining Laser
+                if (isMiningToggled && MiningCount > 0)
                 {
                     UpdateMiningLaser(dt, corePos, mousePos);
                 }
+                else
+                {
+                    DeactivateMiningLaser(dt);
+                }
 
+                // 2. Tembakkan unit swarm tempur yang slot toggle-nya ([2]-[5]) sedang ON
                 if (_fireCooldown <= 0.0f)
                 {
                     FireSwarmStream(mousePos, count: 2);
@@ -1036,14 +1736,7 @@ public partial class SwarmSimulation : Node2D
             }
             else
             {
-                _laserPrimingTimer = 0.0f;
-                _laserFocusWarmup = MathF.Max(0.0f, _laserFocusWarmup - dt * 8.0f);
-                if (_isMiningLaserActive)
-                {
-                    _isMiningLaserActive = false;
-                    _laserActiveHitBoxes.Clear();
-                    QueueRedraw();
-                }
+                DeactivateMiningLaser(dt);
             }
 
             UpdateMiningDebris(dt, corePos);
@@ -1053,7 +1746,47 @@ public partial class SwarmSimulation : Node2D
             UpdateExhaustDrones(dt);
             CheckAsteroidCollisions(dt);
 
-            _boidSystem.Update(dt, corePos, coreVel, mousePos);
+            // Tembakan musuh berkala untuk menguji perisai pertahanan swarm (autofire swarm pemain dimatikan)
+            if (IsEnemyFiring && _enemyCore != null && IsInstanceValid(_enemyCore))
+            {
+                _duelFireTimer += dt;
+                if (_duelFireTimer >= EnemyFireInterval)
+                {
+                    _duelFireTimer = 0.0f;
+                    FireEnemyDuelStream(corePos, 1);
+                }
+            }
+
+            Vector2 enemyCorePos = (_enemyCore != null && IsInstanceValid(_enemyCore))
+                ? _enemyCore.GlobalPosition
+                : corePos + new Vector2(1150.0f, 0.0f);
+
+            _boidSystem.Update(dt, corePos, coreVel, enemyCorePos, mousePos, _isBoostActive);
+
+            // Eksekusi animasi benturan (Clash FX) & spawn kepingan scrap
+            for (int i = 0; i < _boidSystem.ClashEvents.Count; i++)
+            {
+                var ev = _boidSystem.ClashEvents[i];
+                TriggerClashAnimation(ev.Position, ev.DropScrap);
+            }
+
+            if (_boidSystem.EnemyCoreHitsThisFrame > 0 && _enemyCore != null && IsInstanceValid(_enemyCore))
+            {
+                Vector2 hitDir = _boidSystem.LastEnemyHitVelocity.LengthSquared() > 0.01f
+                    ? _boidSystem.LastEnemyHitVelocity.Normalized()
+                    : Vector2.Right;
+                _enemyCore.TakeDamage(_boidSystem.EnemyCoreHitsThisFrame * 40.0f, hitDir);
+            }
+
+            if (_boidSystem.PlayerCoreHitsThisFrame > 0 && _playerCore != null && IsInstanceValid(_playerCore))
+            {
+                Vector2 hitDir = _boidSystem.LastPlayerHitVelocity.LengthSquared() > 0.01f
+                    ? _boidSystem.LastPlayerHitVelocity.Normalized()
+                    : Vector2.Right;
+                _playerCore.TakeDamage(_boidSystem.PlayerCoreHitsThisFrame * 40.0f, hitDir);
+            }
+
+            UpdateClashSparks(dt);
 
             _renderer.ResetCounters();
             _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
@@ -1069,8 +1802,20 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
+    private void DeactivateMiningLaser(float dt)
+    {
+        _laserPrimingTimer = 0.0f;
+        _laserFocusWarmup = MathF.Max(0.0f, _laserFocusWarmup - dt * 8.0f);
+        if (_isMiningLaserActive)
+        {
+            _isMiningLaserActive = false;
+            _laserActiveHitBoxes.Clear();
+            QueueRedraw();
+        }
+    }
+
     // =========================================================================
-    // SISTEM SACRIFICIAL DART PLASMA BOOST [SPACE]
+    // SISTEM SACRIFICIAL DART PLASMA BOOST & KUBAH PARABOLA DEPAN [SPACE]
     // =========================================================================
 
     private void UpdateDartBoost(float dt, Vector2 corePos, Vector2 _coreVel, Vector2 mousePos)
@@ -1103,8 +1848,9 @@ public partial class SwarmSimulation : Node2D
         Vector2 toMouse = mousePos - corePos;
         Vector2 aimDir = toMouse.LengthSquared() > 1.0f ? toMouse.Normalized() : Vector2.Right;
         Vector2 backDir = -aimDir;
+        Vector2 tangent = new Vector2(-aimDir.Y, aimDir.X);
 
-        // 1. Periksa slot pendorong yang sedang terisi oleh DartNeedle
+        // 1. Periksa slot pendorong yang sedang terisi oleh DartNeedle (maksimal 10 slot cincin ruang bakar)
         Array.Clear(_boostSlotOccupied, 0, MaxBoostThrusterSlots);
         int activeCount = 0;
 
@@ -1148,7 +1894,7 @@ public partial class SwarmSimulation : Node2D
             }
         });
 
-        // 2. Tarik DartNeedle dari Orbiting/Returning untuk mengisi slot 3/4 busur lingkaran di belakang Core
+        // 2. Tarik DartNeedle cadangan dari Kubah Parabola depan (Orbiting/Returning) untuk mengisi slot nozzle kosong
         if (activeCount < MaxBoostThrusterSlots)
         {
             int nextSlot = 0;
@@ -1175,7 +1921,7 @@ public partial class SwarmSimulation : Node2D
             });
         }
 
-        // Jika sudah tidak ada DartNeedle yang tersisa sama sekali, hentikan boost
+        // Jika sudah tidak ada DartNeedle yang tersisa sama sekali (habis dikorbankan), hentikan boost
         if (activeCount == 0)
         {
             if (_isBoostActive)
@@ -1189,49 +1935,68 @@ public partial class SwarmSimulation : Node2D
         _activeBoostDartCount = activeCount;
         BoostAimDirection = aimDir;
 
-        // 3. Masa Priming Plasma: Berbobot ~4 detik tergantung jumlah dart
-        //    Semakin banyak dart yang terpasang di busur, induksi plasma semakin cepat (1.5s - 4.0s)
-        _boostPrimingDuration = Mathf.Clamp(4.0f / (1.0f + (activeCount - 6) * 0.055f), 1.5f, 4.0f);
+        // 3. Masa Ignition Priming Singkat (~0.42s) lalu langsung Full Power Sacrificial Thrust
+        _boostPrimingDuration = 0.42f;
         _boostPrimingTimer += dt;
         float primingProgress = Mathf.Clamp(_boostPrimingTimer / _boostPrimingDuration, 0.0f, 1.0f);
         _isBoostFullPower = (_boostPrimingTimer >= _boostPrimingDuration);
 
-        _boostPulseTimer += dt * (18.0f + primingProgress * 30.0f);
-        float thrusterFillRatio = Mathf.Clamp((float)activeCount / 18.0f, 0.35f, 1.0f);
+        _boostPulseTimer += dt * (22.0f + primingProgress * 36.0f);
+        _boostSacrificeFlash = MathF.Max(0.0f, _boostSacrificeFlash - dt * 6.5f);
+
+        float thrusterFillRatio = Mathf.Clamp((float)activeCount / MaxBoostThrusterSlots, 0.40f, 1.0f);
+        Vector2 shipVel = _playerCore.Velocity;
+        float currentSpeed = shipVel.Length();
+        float speedNorm = Mathf.Clamp(
+            (currentSpeed - _playerCore.MaxSpeed * 0.45f) / MathF.Max(1.0f, _playerCore.BoostMaxSpeed - _playerCore.MaxSpeed * 0.45f),
+            0.0f,
+            1.0f
+        );
 
         if (_isBoostFullPower)
         {
-            float boostAccel = 6800.0f * thrusterFillRatio;
+            float boostAccel = 7200.0f * thrusterFillRatio;
             _playerCore.IsBoosting = true;
             _playerCore.BoostThrustVector = aimDir * boostAccel;
-
-            float currentSpeed = _playerCore.Velocity.Length();
-            float speedNorm = Mathf.Clamp(
-                (currentSpeed - _playerCore.MaxSpeed * 0.60f) / MathF.Max(1.0f, _playerCore.BoostMaxSpeed - _playerCore.MaxSpeed * 0.60f),
-                0.0f,
-                1.0f
-            );
-            BoostPowerRatio = Mathf.Clamp(0.55f + speedNorm * 0.45f, 0.55f, 1.0f);
+            BoostPowerRatio = Mathf.Clamp(0.62f + speedNorm * 0.38f, 0.62f, 1.0f);
         }
         else
         {
-            // Selama masa priming: pendorong memberikan gaya dorong pemanasan bertahap
-            float warmupAccel = 1200.0f * primingProgress * thrusterFillRatio;
+            float warmupAccel = 2600.0f * primingProgress * thrusterFillRatio;
             _playerCore.IsBoosting = true;
             _playerCore.BoostThrustVector = aimDir * warmupAccel;
-            BoostPowerRatio = Mathf.Lerp(0.12f, 0.50f, primingProgress);
+            BoostPowerRatio = Mathf.Lerp(0.22f, 0.62f, primingProgress);
         }
 
-        // 4. Formasi Dart 3/4 Busur Lingkaran (Arc Span = 1.5 * PI = 270 derajat) di belakang Core
+        float coreRadius = 20.0f + MathF.Sqrt(Math.Max(1, _playerCore.CoreCellCount)) * 8.5f;
+        float nozzleRingRadius = coreRadius + 16.0f;
+        Vector2 focalChamberPos = corePos + backDir * (nozzleRingRadius + 24.0f);
+        BoostNozzlePosition = focalChamberPos;
+
+        // =========================================================================
+        // 4. LOGIKA PENGORBANAN DART (SACRIFICIAL BURN & AUTO-REFILL)
+        //    Dart di nozzle terbakar habis menjadi propelan plasma seiring laju kapal!
+        // =========================================================================
+        float burnRatePerSec = _isBoostFullPower
+            ? (3.2f + speedNorm * speedNorm * 10.8f) // ~3.2 Dart/s saat awal -> ~14 Dart/s pada top speed
+            : (1.5f * primingProgress);
+
+        _boostSacrificeAccumulator += burnRatePerSec * dt;
+        if (_boostSacrificeAccumulator >= 1.0f)
+        {
+            _boostSacrificeAccumulator -= 1.0f;
+            SacrificeOneThrusterDart(focalChamberPos, aimDir, BoostPowerRatio);
+        }
+
+        // =========================================================================
+        // 5. FORMASI NOZZLE BELAKANG (10 DART MENYATU KE FOCAL PLASMA CHAMBER)
+        // =========================================================================
         _activeThrusterJets.Clear();
         _activeThrusterDartPositions.Clear();
 
-        float coreRadius = 24.0f + MathF.Sqrt(Math.Max(1, _playerCore.CoreCellCount)) * 9.0f;
-        float arcRadius = coreRadius + 14.0f;
-        float arcSpan = 1.5f * Mathf.Pi; // 270 derajat menyebar di belakang Core
-        float baseAngle = backDir.Angle();
+        float nozzleArcSpan = 0.68f * Mathf.Pi; // ~122 derajat cincin buritan yang rapi & terfokus
+        float baseBackAngle = backDir.Angle();
         float pulseTime = _boostPulseTimer;
-        Vector2 shipVel = _playerCore.Velocity;
         float power = BoostPowerRatio;
 
         _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
@@ -1242,72 +2007,232 @@ public partial class SwarmSimulation : Node2D
             int slot = Math.Clamp(swarm.FormationIndex, 0, MaxBoostThrusterSlots - 1);
             swarm.LifeTime += dt;
 
-            float arcT = (activeCount > 1)
-                ? ((float)slot / (activeCount - 1) - 0.5f)
+            float arcT = (MaxBoostThrusterSlots > 1)
+                ? ((float)slot / (MaxBoostThrusterSlots - 1) - 0.5f)
                 : 0.0f;
-            float angle = baseAngle + arcT * arcSpan;
+            float angle = baseBackAngle + arcT * nozzleArcSpan;
 
-            float microJitter = MathF.Sin(pulseTime * 2.8f + slot * 1.6f) * (1.2f + power * 2.5f);
-            float currentArcRadius = arcRadius + microJitter;
-            Vector2 slotWorldPos = corePos + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * currentArcRadius;
-            Vector2 slotOutwardDir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+            float microVib = MathF.Sin(pulseTime * 3.5f + slot * 1.9f) * (1.2f + power * 1.8f);
+            Vector2 slotWorldPos = corePos + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * (nozzleRingRadius + microVib);
 
-            // Exhaust mengarah ke belakang dan sedikit menyebar radial dari pusat core
-            Vector2 dartExhaustDir = (backDir * 0.72f + slotOutwardDir * 0.28f).Normalized();
+            // Arah feeder konvergen dari Dart menuju Focal Chamber di belakang Core
+            Vector2 toFocal = focalChamberPos - slotWorldPos;
+            Vector2 feederDir = toFocal.LengthSquared() > 0.01f ? toFocal.Normalized() : backDir;
 
-            float lockProgress = Mathf.Clamp(swarm.LifeTime / 0.14f, 0.0f, 1.0f);
+            float lockProgress = Mathf.Clamp(swarm.LifeTime / 0.12f, 0.0f, 1.0f);
             Vector2 toSlot = slotWorldPos - pos.Value;
-            Vector2 targetVel = shipVel + toSlot * Mathf.Lerp(16.0f, 36.0f, lockProgress);
+            Vector2 targetVel = shipVel + toSlot * Mathf.Lerp(22.0f, 44.0f, lockProgress);
 
-            vel.Value = vel.Value.Lerp(targetVel, MathF.Min(1.0f, 22.0f * dt));
-            pos.Value = pos.Value.Lerp(slotWorldPos, MathF.Min(1.0f, (12.0f + 18.0f * lockProgress) * dt));
+            vel.Value = vel.Value.Lerp(targetVel, MathF.Min(1.0f, 26.0f * dt));
+            pos.Value = pos.Value.Lerp(slotWorldPos, MathF.Min(1.0f, (16.0f + 22.0f * lockProgress) * dt));
 
-            // Orientasi: Dart menghadap ke Core (ekor/nozzle menghadap ke dartExhaustDir)
-            float targetSpin = (-dartExhaustDir).Angle() + Mathf.Pi * 0.5f;
-            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, targetSpin, MathF.Min(1.0f, 24.0f * dt));
+            // Orientasi: Moncong Dart menghadap ke luar/depan, ekor memancarkan plasma ke Focal Chamber
+            float targetSpin = (-feederDir).Angle() + Mathf.Pi * 0.5f;
+            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, targetSpin, MathF.Min(1.0f, 26.0f * dt));
 
-            // Visual: Dart menyala sesuai fase priming vs full power
-            if (_isBoostFullPower)
-            {
-                float heatPulse = 0.5f + 0.5f * MathF.Sin(pulseTime * 3.4f + slot);
-                vis.Color = new Color(
-                    Mathf.Lerp(1.8f, 5.0f, power),
-                    Mathf.Lerp(3.2f, 4.8f, heatPulse),
-                    Mathf.Lerp(4.5f, 5.8f, power),
-                    1.0f
-                );
-                vis.Scale = Mathf.Lerp(0.85f, 1.15f, power);
-            }
-            else
-            {
-                vis.Color = new Color(
-                    Mathf.Lerp(1.2f, 3.8f, primingProgress),
-                    Mathf.Lerp(2.2f, 3.2f, primingProgress),
-                    Mathf.Lerp(4.0f, 5.2f, primingProgress),
-                    1.0f
-                );
-                vis.Scale = Mathf.Lerp(0.65f, 0.85f, primingProgress);
-            }
-
-            // Semburan plasma langsung dari masing-masing dart
-            float jetLen = _isBoostFullPower
-                ? Mathf.Lerp(75.0f, 195.0f, power) * (0.88f + 0.12f * MathF.Sin(pulseTime * 2.4f + slot))
-                : Mathf.Lerp(16.0f, 48.0f, primingProgress) * (0.85f + 0.15f * MathF.Sin(pulseTime * 4.2f + slot * 2.0f));
+            // Warna pemanasan pengorbanan: makin lama di nozzle, makin membara sian-putih ke emas pijar
+            float sacrificeHeat = Mathf.Clamp(swarm.LifeTime * 2.2f, 0.0f, 1.0f);
+            vis.Color = new Color(
+                Mathf.Lerp(1.6f, 4.8f, sacrificeHeat),
+                Mathf.Lerp(3.6f, 4.4f, power),
+                Mathf.Lerp(5.2f, 2.2f, sacrificeHeat),
+                1.0f
+            );
+            vis.Scale = Mathf.Lerp(0.78f, 1.05f, sacrificeHeat);
 
             _activeThrusterJets.Add(new DartThrusterJet
             {
                 Position = pos.Value,
-                Direction = dartExhaustDir,
+                Direction = feederDir,
                 Power = power,
-                Length = jetLen,
+                Length = pos.Value.DistanceTo(focalChamberPos),
                 ThemeColor = vis.Color,
                 IsBrake = false
             });
             _activeThrusterDartPositions.Add(pos.Value);
         });
 
-        BoostNozzlePosition = corePos + backDir * arcRadius;
+        // =========================================================================
+        // 6. FORMASI KUBAH PARABOLA DI DEPAN CORE (PARABOLIC BOW SHOCK DOME)
+        //    Seluruh sisa swarm (Miner, Scanner, Guardian, Shuriken, Drill, & sisa Dart)
+        //    membentuk perisai parabola aerodinamis di depan Core agar TIDAK ADA yang tertinggal!
+        // =========================================================================
+        UpdateParabolicFrontDome(dt, corePos, shipVel, aimDir, tangent, coreRadius, power);
+
         QueueRedraw();
+    }
+
+    private void SacrificeOneThrusterDart(Vector2 focalChamberPos, Vector2 aimDir, float powerRatio)
+    {
+        bool sacrificed = false;
+        int startCursor = _nextSacrificeSlotCursor;
+
+        // Pilih Dart yang sudah paling matang / sesuai urutan rotasi cincin nozzle untuk dikorbankan
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        {
+            if (sacrificed) return;
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DartNeedle && swarm.State == SwarmState.BoostThruster)
+            {
+                if (swarm.FormationIndex == startCursor || swarm.LifeTime >= 0.18f)
+                {
+                    IgniteDartAsPlasmaExhaust(ref pos, ref vel, ref swarm, ref vis, focalChamberPos, aimDir, powerRatio);
+                    sacrificed = true;
+                }
+            }
+        });
+
+        if (!sacrificed)
+        {
+            _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+            {
+                if (sacrificed) return;
+                if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DartNeedle && swarm.State == SwarmState.BoostThruster)
+                {
+                    IgniteDartAsPlasmaExhaust(ref pos, ref vel, ref swarm, ref vis, focalChamberPos, aimDir, powerRatio);
+                    sacrificed = true;
+                }
+            });
+        }
+
+        if (sacrificed)
+        {
+            _nextSacrificeSlotCursor = (_nextSacrificeSlotCursor + 1) % MaxBoostThrusterSlots;
+            _boostSacrificeFlash = 1.0f;
+            EmitSignal(SignalName.BoostDartSacrificed, focalChamberPos, aimDir, powerRatio);
+            RefreshFoundryGui();
+        }
+    }
+
+    private static void IgniteDartAsPlasmaExhaust(
+        ref PositionComponent pos,
+        ref VelocityComponent vel,
+        ref SwarmUnitComponent swarm,
+        ref VisualComponent vis,
+        Vector2 focalChamberPos,
+        Vector2 aimDir,
+        float powerRatio)
+    {
+        swarm.State = SwarmState.DrillExhaust;
+        swarm.LifeTime = 0.0f;
+        swarm.MaxLifeTime = 0.26f + GD.Randf() * 0.14f;
+        swarm.FormationIndex = -1;
+
+        Vector2 backDir = -aimDir;
+        Vector2 tangent = new Vector2(-aimDir.Y, aimDir.X);
+        float jitterLat = (GD.Randf() - 0.5f) * 14.0f;
+        pos.Value = focalChamberPos + tangent * jitterLat;
+
+        float spreadAngle = (GD.Randf() - 0.5f) * 0.24f;
+        Vector2 exhaustDir = backDir.Rotated(spreadAngle);
+        float exhaustSpeed = (980.0f + 520.0f * powerRatio) * (0.85f + GD.Randf() * 0.30f);
+
+        vel.Value = exhaustDir * exhaustSpeed;
+        swarm.TargetDirection = exhaustDir;
+        swarm.SpinAngle = exhaustDir.Angle() + Mathf.Pi * 0.5f;
+
+        // Warna lontaran pengorbanan: inti plasma putih-sian berpijar yang meluruh jadi ungu-emas
+        vis.Color = new Color(4.8f, 4.6f, 5.8f, 1.0f);
+        vis.Scale = 1.38f;
+    }
+
+    /// <summary>
+    /// Menyusun seluruh sisa swarm yang sedang Orbiting/Returning menjadi Kubah Parabola berlapis
+    /// di depan Core (Parabolic Bow Shock Dome): P(s) = Apex - aimDir * (k * s^2) + tangent * s
+    /// sehingga tidak ada satu pun unit yang tercecer di belakang saat kecepatan tinggi.
+    /// </summary>
+    private void UpdateParabolicFrontDome(
+        float dt,
+        Vector2 corePos,
+        Vector2 shipVel,
+        Vector2 aimDir,
+        Vector2 tangent,
+        float coreRadius,
+        float powerRatio)
+    {
+        int domeTotal = 0;
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
+        {
+            if (swarm.OwnerId == 0 && (swarm.State == SwarmState.Orbiting || swarm.State == SwarmState.Returning))
+            {
+                domeTotal++;
+            }
+        });
+
+        _activeParabolaSwarmCount = domeTotal;
+        float apexDist = coreRadius + 46.0f + powerRatio * 16.0f;
+        _parabolaApexWorldPos = corePos + aimDir * apexDist;
+        _parabolaHalfSpan = Mathf.Clamp(68.0f + MathF.Sqrt(Math.Max(1, domeTotal)) * 11.5f, 72.0f, 165.0f);
+        _parabolaCurvatureK = 0.0054f;
+
+        if (domeTotal == 0) return;
+
+        int layerCount = domeTotal > 42 ? 3 : (domeTotal > 16 ? 2 : 1);
+        float pulse = _boostPulseTimer;
+        int domeIdx = 0;
+
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        {
+            if (swarm.OwnerId != 0 || (swarm.State != SwarmState.Orbiting && swarm.State != SwarmState.Returning))
+                return;
+
+            // Pastikan unit yang tadinya Returning langsung masuk ke formasi kubah Orbiting
+            if (swarm.State == SwarmState.Returning)
+            {
+                swarm.State = SwarmState.Orbiting;
+            }
+
+            int layer = domeIdx % layerCount;
+            int idxInLayer = domeIdx / layerCount;
+            int countInLayer = Math.Max(1, (domeTotal + layerCount - 1 - layer) / layerCount);
+
+            // Sebar simetris kiri-kanan di sepanjang kurva parabola: u dari -1.0 hingga +1.0
+            float u = (countInLayer > 1)
+                ? ((float)idxInLayer / (countInLayer - 1)) * 2.0f - 1.0f
+                : 0.0f;
+
+            float layerSpan = _parabolaHalfSpan * (1.0f - layer * 0.13f);
+            float s = u * layerSpan;
+            float layerDepthOffset = layer * 14.0f;
+
+            // Persamaan Kubah Parabola: x(s) = -k * s^2, y(s) = s
+            float parabolaBackX = _parabolaCurvatureK * (s * s) + layerDepthOffset;
+            float shimmerWave = MathF.Sin(pulse * 2.4f + domeIdx * 0.9f) * 2.2f;
+
+            Vector2 domeSlotPos = _parabolaApexWorldPos
+                                - aimDir * parabolaBackX
+                                + tangent * (s + shimmerWave);
+
+            // Tarikan pegas pengunci super responsif agar 100% menempel di depan Core tanpa keteteran
+            Vector2 toSlot = domeSlotPos - pos.Value;
+            float distSq = toSlot.LengthSquared();
+            Vector2 targetVel = shipVel + toSlot * 28.0f;
+
+            vel.Value = vel.Value.Lerp(targetVel, MathF.Min(1.0f, 24.0f * dt));
+            pos.Value += vel.Value * dt;
+
+            // Koreksi posisi langsung (hard-lock elastis) agar mustahil tertinggal meski kapal bermanuver tajam
+            float snapFactor = distSq > 180.0f * 180.0f ? 22.0f : 14.0f;
+            pos.Value = pos.Value.Lerp(domeSlotPos, MathF.Min(1.0f, snapFactor * dt));
+
+            // Orientasi unit mengikuti garis singgung/normal kurva parabola menghadap ke depan
+            float slopeAngle = MathF.Atan(-2.0f * _parabolaCurvatureK * s) * 0.45f;
+            float targetSpin = aimDir.Angle() + slopeAngle + Mathf.Pi * 0.5f;
+            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, targetSpin, MathF.Min(1.0f, 20.0f * dt));
+
+            // Kilau ionisasi aerodinamis pada unit di kubah depan
+            float targetScale = swarm.Role switch
+            {
+                SwarmRole.Guardian => 0.78f,
+                SwarmRole.ScannerDrone => 0.65f,
+                SwarmRole.MiningDroid => 0.66f,
+                _ => 0.60f
+            };
+            vis.Scale = Mathf.Lerp(vis.Scale, targetScale, dt * 10.0f);
+            Color bowTint = new Color(1.6f, 3.4f, 4.8f, 1.0f);
+            vis.Color = vis.BaseColor.Lerp(bowTint, 0.35f * powerRatio);
+
+            domeIdx++;
+        });
     }
 
     private void DeactivateDartBoost()
@@ -1315,7 +2240,9 @@ public partial class SwarmSimulation : Node2D
         _isBoostActive = false;
         _isBoostFullPower = false;
         _boostPrimingTimer = 0.0f;
+        _boostSacrificeAccumulator = 0.0f;
         _activeBoostDartCount = 0;
+        _activeParabolaSwarmCount = 0;
         _activeThrusterJets.Clear();
         _activeThrusterDartPositions.Clear();
 
@@ -1327,13 +2254,22 @@ public partial class SwarmSimulation : Node2D
 
         _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
-            if (swarm.OwnerId == 0 && swarm.State == SwarmState.BoostThruster)
+            if (swarm.OwnerId == 0 && (swarm.State == SwarmState.BoostThruster || swarm.State == SwarmState.Orbiting))
             {
-                swarm.State = SwarmState.Orbiting;
-                swarm.LifeTime = 0.0f;
-                swarm.FormationIndex = -1;
+                if (swarm.State == SwarmState.BoostThruster)
+                {
+                    swarm.State = SwarmState.Orbiting;
+                    swarm.LifeTime = 0.0f;
+                    swarm.FormationIndex = -1;
+                }
                 vis.Color = vis.BaseColor;
-                vis.Scale = 0.55f;
+                vis.Scale = swarm.Role switch
+                {
+                    SwarmRole.Guardian => 0.72f,
+                    SwarmRole.ScannerDrone => 0.60f,
+                    SwarmRole.MiningDroid => 0.62f,
+                    _ => 0.55f
+                };
             }
         });
 
@@ -1542,6 +2478,7 @@ public partial class SwarmSimulation : Node2D
                     needed--;
                 }
             });
+            RefreshFoundryGui();
         }
 
         Vector2 frontAnchor = corePos + aimDir * 56.0f;
@@ -1591,7 +2528,7 @@ public partial class SwarmSimulation : Node2D
             }
         });
 
-        int defenderAPQuota = Math.Max(2, (int)MathF.Round(readyDefenderCount * 0.25f));
+        int defenderAPQuota = readyDefenderCount > 0 ? Math.Max(1, (int)MathF.Round(readyDefenderCount * 0.25f)) : 0;
         int defCounter = 0;
 
         _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
@@ -1933,15 +2870,27 @@ public partial class SwarmSimulation : Node2D
             if (swarm.State == SwarmState.ChargingDrill && swarm.OwnerId == 0)
             {
                 swarm.State = SwarmState.Launched;
+                if (swarm.Role == SwarmRole.Guardian)
+                {
+                    swarm.MaxHealth = 5; // Defender di Ballistic Shield punya 5 HP (tidak kebal, bisa hancur jika ditembak 5 kali)
+                    swarm.Health = 5;
+                }
+                else
+                {
+                    swarm.MaxHealth = 1;
+                    swarm.Health = 1;
+                }
                 swarm.TargetDirection = aimDir;
                 swarm.LifeTime = 0.0f;
-                swarm.MaxLifeTime = GigaDrillFlightDuration + 0.2f;
+                swarm.MaxLifeTime = GigaDrillFlightDuration + 0.3f;
 
-                if (swarm.Role == SwarmRole.DrillDrone && swarm.FormationIndex >= exhaustStartIdx)
+                if (swarm.Role == SwarmRole.DrillDrone)
                 {
+                    // Seluruh driller bertindak sebagai pendorong bertingkat dari belakang ke depan
+                    // Semakin jauh jarak tempuh, semakin banyak driller yang mati terbakar sebagai thruster
                     int orderFromBack = (totalUnits - 1) - swarm.FormationIndex;
-                    float ratio = (float)orderFromBack / exhaustCount;
-                    swarm.ExhaustTriggerTime = ratio * (GigaDrillFlightDuration * 0.82f);
+                    float ratio = (float)(orderFromBack + 1) / totalUnits;
+                    swarm.ExhaustTriggerTime = ratio * (GigaDrillFlightDuration * 0.95f);
 
                     if (swarm.ExhaustTriggerTime <= 0.04f)
                     {
@@ -1962,12 +2911,13 @@ public partial class SwarmSimulation : Node2D
         Vector2 breachCenter = _gigaDrillTipPos + _gigaDrillAimDir * (defConeLength * 0.5f);
 
         int breachedCount = 0;
-        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
             if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.Guardian && swarm.State == SwarmState.Launched)
             {
                 swarm.State = SwarmState.Dead;
                 vis.Color = new Color(0, 0, 0, 0);
+                TriggerClashAnimation(pos.Value, dropScrap: true);
                 breachedCount++;
             }
         });
@@ -1976,9 +2926,10 @@ public partial class SwarmSimulation : Node2D
         GuardianCount = Math.Max(0, GuardianCount - breachedCount);
         _activeDefenderCoreCount = 0;
 
-        _gigaDrillVel *= 1.38f;
+        _gigaDrillVel *= 1.35f;
 
         EmitSignal(SignalName.GigaDrillNoseBreached, breachCenter, _gigaDrillAimDir, breachedCount);
+        RefreshFoundryGui();
     }
 
     private void UpdateActiveGigaDrill(float dt)
@@ -2007,27 +2958,83 @@ public partial class SwarmSimulation : Node2D
         if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
         {
             float distToTarget = _gigaDrillTipPos.DistanceTo(_gigaDrillTargetPos);
-            bool nearTarget = distToTarget <= 140.0f && _gigaDrillElapsedFlight >= 0.12f;
-            bool flightProgressBreach = _gigaDrillElapsedFlight >= GigaDrillFlightDuration * 0.65f;
+            Vector2 enemyCorePos = (_enemyCore != null && IsInstanceValid(_enemyCore))
+                ? _enemyCore.GlobalPosition
+                : Vector2.Zero;
+            float distToEnemyCore = enemyCorePos != Vector2.Zero ? _gigaDrillTipPos.DistanceTo(enemyCorePos) : 9999.0f;
 
-            float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
-            Vector2 noseApex = _gigaDrillTipPos + _gigaDrillAimDir * defConeLength;
-            int nearbyEnemies = 0;
-            _world.Query(in _allSwarmQuery, (ref PositionComponent p, ref SwarmUnitComponent s) =>
+            bool nearTarget = (distToTarget <= 130.0f || distToEnemyCore <= 130.0f) && _gigaDrillElapsedFlight >= 0.08f;
+            bool flightProgressBreach = _gigaDrillElapsedFlight >= GigaDrillFlightDuration * 0.75f;
+
+            int aliveConeDefenders = 0;
+            _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
             {
-                if (s.OwnerId != 0 && s.State != SwarmState.Dead)
+                if (s.OwnerId == 0 && s.Role == SwarmRole.Guardian && s.State == SwarmState.Launched)
                 {
-                    if (p.Value.DistanceSquaredTo(noseApex) <= 65.0f * 65.0f)
-                    {
-                        nearbyEnemies++;
-                    }
+                    aliveConeDefenders++;
                 }
             });
-            bool enemyImpactBreach = nearbyEnemies >= 2;
 
-            if (nearTarget || flightProgressBreach || enemyImpactBreach)
+            // Jika seluruh defender cone mati tertembak musuh di perjalanan:
+            if (aliveConeDefenders == 0)
             {
+                _hasDefenderNoseBreached = true;
+                _activeDefenderCoreCount = 0;
+            }
+            else if (nearTarget || flightProgressBreach)
+            {
+                float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
                 TriggerNoseShieldBreach(defConeLength);
+            }
+        }
+
+        // Tabrakan & Gerusan Kinetik Aktif terhadap Kapal Induk Musuh (Enemy Core)
+        if (_enemyCore != null && IsInstanceValid(_enemyCore))
+        {
+            float distToEnemy = _gigaDrillTipPos.DistanceTo(_enemyCore.GlobalPosition);
+            float contactRadius = _enemyCore.CoreCollisionRadius + drillBaseRadius * 0.65f;
+
+            if (distToEnemy <= contactRadius)
+            {
+                if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
+                {
+                    float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
+                    TriggerNoseShieldBreach(defConeLength);
+                }
+
+                // OPSI 1: KINETIC DRAG & HEAVY GRINDING PADA ARMOR ENEMY CORE!
+                float curSpd = _gigaDrillVel.Length();
+                float decelSpd = MathF.Max(80.0f, curSpd - 3200.0f * dt);
+                _gigaDrillVel = _gigaDrillAimDir * decelSpd;
+
+                // Kerusakan gerusan terus menerus pada armor musuh
+                _enemyCore.TakeDamage(2500.0f * dt, _gigaDrillAimDir);
+                _enemyCore.Velocity += _gigaDrillAimDir * (380.0f * dt);
+
+                for (int s = 0; s < 3; s++)
+                {
+                    Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 22.0f, (GD.Randf() - 0.5f) * 22.0f);
+                    TriggerClashAnimation(_gigaDrillTipPos + sparkJitter, dropScrap: false);
+                }
+
+                _drillEnemyGrindTimer += dt;
+                _drillAttritionTimer += dt;
+                if (_drillAttritionTimer >= 0.10f)
+                {
+                    _drillAttritionTimer = 0.0f;
+                    WearDownFrontDriller();
+                }
+
+                // OPSI 2: TERMINAL BUNKER BUSTER DETONATION PADA ENEMY CORE!
+                if (_drillEnemyGrindTimer >= 0.35f || _gigaDrillVel.Length() <= 140.0f || _enemyCore.Health <= 0.0f)
+                {
+                    TriggerGigaDrillBunkerBuster(null, _enemyCore);
+                    return;
+                }
+            }
+            else
+            {
+                _drillEnemyGrindTimer = MathF.Max(0.0f, _drillEnemyGrindTimer - dt * 2.0f);
             }
         }
 
@@ -2146,6 +3153,26 @@ public partial class SwarmSimulation : Node2D
             }
         });
 
+        // Cek berapa driller yang masih hidup di formasi Giga Drill
+        int aliveDrillers = 0;
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
+        {
+            if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched)
+            {
+                aliveDrillers++;
+            }
+        });
+
+        // Jika seluruh driller habis terbakar karena jarak terlalu jauh atau tertembak musuh: Serangan GAGAL!
+        if (aliveDrillers == 0)
+        {
+            _isGigaDrillActive = false;
+            _gigaDrillFlightTimer = 0.0f;
+            TriggerClashAnimation(_gigaDrillTipPos, dropScrap: true);
+            EmitSignal(SignalName.GigaDrillDetonated, _gigaDrillTipPos, basePos, 0);
+            return;
+        }
+
         if (_gigaDrillFlightTimer <= 0.0f)
         {
             _isGigaDrillActive = false;
@@ -2180,12 +3207,14 @@ public partial class SwarmSimulation : Node2D
                 }
             });
             _activeDefenderCoreCount = 0;
+            RefreshFoundryGui();
         }
     }
 
     private void UpdateExhaustDrones(float dt)
     {
         float drag = MathF.Pow(0.92f, dt * 60.0f);
+        bool anyDied = false;
 
         _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
@@ -2240,39 +3269,266 @@ public partial class SwarmSimulation : Node2D
                 if (swarm.OwnerId == 0)
                 {
                     _entityCount = Math.Max(0, _entityCount - 1);
-                    if (swarm.Role == SwarmRole.DartNeedle)
-                    {
-                        DartNeedleCount = Math.Max(0, DartNeedleCount - 1);
-                    }
-                    else if (swarm.Role == SwarmRole.DrillDrone)
-                    {
-                        DrillDroneCount = Math.Max(0, DrillDroneCount - 1);
-                    }
-                    else if (swarm.Role == SwarmRole.Guardian)
-                    {
-                        GuardianCount = Math.Max(0, GuardianCount - 1);
-                    }
+                    IncrementRoleCounter(swarm.Role, -1);
+                    anyDied = true;
                 }
             }
         });
+
+        if (anyDied)
+        {
+            RefreshFoundryGui();
+        }
     }
 
-    private void CheckAsteroidCollisions(float _dt)
+    private void CheckAsteroidCollisions(float dt)
     {
         if (!_isGigaDrillActive) return;
 
+        bool isGrindingAsteroid = false;
         var asteroids = Asteroid.ActiveAsteroids;
         for (int i = 0; i < asteroids.Count; i++)
         {
             var ast = asteroids[i];
             if (ast == null || !ast.IsActiveInTree) continue;
 
-            float drillHitRadius = ast.OuterBoundRadius + GigaDrillRadius + 24.0f;
-            if (ast.CachedPosition.DistanceSquaredTo(_gigaDrillTipPos) <= drillHitRadius * drillHitRadius
-                || ast.CachedPosition.DistanceSquaredTo(GigaDrillBasePosition) <= drillHitRadius * drillHitRadius)
+            float outerReach = ast.OuterBoundRadius + GigaDrillRadius + 18.0f;
+            float distSq = ast.CachedPosition.DistanceSquaredTo(_gigaDrillTipPos);
+            if (distSq > outerReach * outerReach) continue;
+
+            // Gali lingkaran voxel di titik ujung bor
+            int carved = ast.CarveVoxelCircle(_gigaDrillTipPos, GigaDrillRadius * 0.88f);
+            float rockReach = ast.Radius + GigaDrillRadius * 0.5f;
+            bool inRock = distSq <= rockReach * rockReach;
+
+            if (carved > 0 || inRock)
             {
-                ast.ApplyDrillBreach(_gigaDrillTipPos, _gigaDrillVel, 35000.0f, GigaDrillRadius * 0.9f);
+                isGrindingAsteroid = true;
+
+                // OPSI 1: KINETIC DRAG & ACTIVE GRINDING!
+                // Kecepatan bor anjlok drastis akibat friksi batuan keras
+                float curSpeed = _gigaDrillVel.Length();
+                float decelSpeed = MathF.Max(120.0f, curSpeed - 2400.0f * dt);
+                _gigaDrillVel = _gigaDrillAimDir * decelSpeed;
+
+                // Gaya dorong & torsi kinetik ke batuan asteroid
+                ast.ApplyCentralImpulse(_gigaDrillAimDir * (85000.0f * dt));
+                ast.ApplyTorqueImpulse((GD.Randf() > 0.5f ? 1.0f : -1.0f) * 35000.0f * dt);
+
+                // Percikan bunga api penggalian batuan (sparks)
+                for (int s = 0; s < 3; s++)
+                {
+                    Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 18.0f, (GD.Randf() - 0.5f) * 18.0f);
+                    TriggerClashAnimation(_gigaDrillTipPos + sparkJitter, dropScrap: false);
+                }
+
+                // Keausan mata bor (Drill Wear / Attrition)
+                _drillAttritionTimer += dt;
+                if (_drillAttritionTimer >= 0.12f)
+                {
+                    _drillAttritionTimer = 0.0f;
+                    WearDownFrontDriller();
+                }
+
+                _drillAsteroidGrindTimer += dt;
+
+                // OPSI 2: TERMINAL BUNKER BUSTER DETONATION!
+                // Meledak jika kecepatan bor turun di bawah 170 px/s, atau grinding > 0.55s, atau waktu terbang habis
+                if (_gigaDrillVel.Length() <= 170.0f || _drillAsteroidGrindTimer >= 0.55f || _gigaDrillFlightTimer <= 0.05f)
+                {
+                    TriggerGigaDrillBunkerBuster(ast, null);
+                    return;
+                }
+
+                break;
             }
+        }
+
+        if (!isGrindingAsteroid)
+        {
+            _drillAsteroidGrindTimer = MathF.Max(0.0f, _drillAsteroidGrindTimer - dt * 2.0f);
+        }
+    }
+
+    private void WearDownFrontDriller()
+    {
+        int minIdx = int.MaxValue;
+        Entity targetEnt = Entity.Null;
+        Vector2 targetPos = Vector2.Zero;
+
+        _world.Query(in _allSwarmQuery, (Entity ent, ref PositionComponent pos, ref SwarmUnitComponent swarm) =>
+        {
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DrillDrone && swarm.State == SwarmState.Launched)
+            {
+                if (swarm.FormationIndex < minIdx)
+                {
+                    minIdx = swarm.FormationIndex;
+                    targetEnt = ent;
+                    targetPos = pos.Value;
+                }
+            }
+        });
+
+        if (targetEnt != Entity.Null && _world.IsAlive(targetEnt))
+        {
+            ref var swarm = ref _world.Get<SwarmUnitComponent>(targetEnt);
+            ref var vis = ref _world.Get<VisualComponent>(targetEnt);
+            swarm.State = SwarmState.Dead;
+            vis.Color = new Color(0, 0, 0, 0);
+
+            TriggerClashAnimation(targetPos, dropScrap: true);
+            _entityCount = Math.Max(0, _entityCount - 1);
+            IncrementRoleCounter(SwarmRole.DrillDrone, -1);
+            _activeDrillFormationCount = Math.Max(0, _activeDrillFormationCount - 1);
+            RefreshFoundryGui();
+        }
+    }
+
+    private void TriggerGigaDrillBunkerBuster(Asteroid? hitAsteroid, EnemyCore? hitEnemyCore)
+    {
+        _isGigaDrillActive = false;
+        _gigaDrillFlightTimer = 0.0f;
+        _drillAsteroidGrindTimer = 0.0f;
+        _drillEnemyGrindTimer = 0.0f;
+
+        Vector2 detPos = _gigaDrillTipPos;
+        Vector2 basePos = GigaDrillBasePosition;
+
+        if (hitAsteroid != null && IsInstanceValid(hitAsteroid))
+        {
+            hitAsteroid.CarveVoxelCircle(detPos, GigaDrillRadius * 2.3f);
+            hitAsteroid.ApplyCentralImpulse(_gigaDrillAimDir * 240000.0f);
+            hitAsteroid.ApplyTorqueImpulse((GD.Randf() > 0.5f ? 1.0f : -1.0f) * 60000.0f);
+        }
+
+        if (hitEnemyCore != null && IsInstanceValid(hitEnemyCore))
+        {
+            hitEnemyCore.TakeDamage(1800.0f, _gigaDrillAimDir);
+            hitEnemyCore.Velocity += _gigaDrillAimDir * 780.0f;
+        }
+
+        // Ledakan katastropik: 14 ledakan percikan dan scrap di sekitar titik detonasi
+        for (int i = 0; i < 14; i++)
+        {
+            float r = GD.Randf() * GigaDrillRadius * 1.5f;
+            float a = GD.Randf() * Mathf.Tau;
+            Vector2 p = detPos + new Vector2(MathF.Cos(a), MathF.Sin(a)) * r;
+            TriggerClashAnimation(p, dropScrap: (i % 2 == 0));
+        }
+
+        // Konsumsi unit hulu ledak (maksimal 35% formasi meledak jadi serpihan)
+        // Unit driller belakang yang selamat terlempar keluar dan kembali ke orbit (Returning)
+        int totalUnits = _activeDrillFormationCount;
+        int warheadSacrifice = Math.Max(1, (int)(totalUnits * 0.35f));
+        int sacrificedCount = 0;
+
+        _world.Query(in _allSwarmQuery, (Entity ent, ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        {
+            if (swarm.OwnerId == 0 && swarm.State == SwarmState.Launched)
+            {
+                if (swarm.Role == SwarmRole.DrillDrone)
+                {
+                    if (swarm.FormationIndex < warheadSacrifice)
+                    {
+                        swarm.State = SwarmState.Dead;
+                        vis.Color = new Color(0, 0, 0, 0);
+                        _entityCount = Math.Max(0, _entityCount - 1);
+                        IncrementRoleCounter(SwarmRole.DrillDrone, -1);
+                        sacrificedCount++;
+                    }
+                    else
+                    {
+                        swarm.State = SwarmState.Returning;
+                        swarm.LifeTime = 0.0f;
+                        float scatterAngle = _gigaDrillAimDir.Angle() + Mathf.Pi + (GD.Randf() - 0.5f) * 1.8f;
+                        vel.Value = new Vector2(MathF.Cos(scatterAngle), MathF.Sin(scatterAngle)) * (360.0f + GD.Randf() * 200.0f);
+                    }
+                }
+                else if (swarm.Role == SwarmRole.Guardian)
+                {
+                    swarm.State = SwarmState.Dead;
+                    vis.Color = new Color(0, 0, 0, 0);
+                    _entityCount = Math.Max(0, _entityCount - 1);
+                    GuardianCount = Math.Max(0, GuardianCount - 1);
+                }
+            }
+        });
+
+        _activeDefenderCoreCount = 0;
+        _activeDrillFormationCount = 0;
+
+        EmitSignal(SignalName.GigaDrillDetonated, detPos, basePos, sacrificedCount);
+        RefreshFoundryGui();
+    }
+
+    private void OnPlayerEscapePodEjected(Vector2 ejectionPos, Vector2 ejectionVel)
+    {
+        for (int i = 0; i < 16; i++)
+        {
+            Vector2 p = ejectionPos + new Vector2((GD.Randf() - 0.5f) * 48.0f, (GD.Randf() - 0.5f) * 48.0f);
+            TriggerClashAnimation(p, dropScrap: true);
+        }
+        SpawnEmergencyMiner(0);
+        RefreshFoundryGui();
+    }
+
+    private void OnPlayerCoreDestroyed()
+    {
+        if (_playerCore == null) return;
+        for (int i = 0; i < 24; i++)
+        {
+            Vector2 p = _playerCore.GlobalPosition + new Vector2((GD.Randf() - 0.5f) * 64.0f, (GD.Randf() - 0.5f) * 64.0f);
+            TriggerClashAnimation(p, dropScrap: true);
+        }
+    }
+
+    private void OnEnemyEscapePodEjected(Vector2 ejectionPos, Vector2 ejectionVel)
+    {
+        for (int i = 0; i < 16; i++)
+        {
+            Vector2 p = ejectionPos + new Vector2((GD.Randf() - 0.5f) * 48.0f, (GD.Randf() - 0.5f) * 48.0f);
+            TriggerClashAnimation(p, dropScrap: true);
+        }
+        SpawnEmergencyMiner(1);
+    }
+
+    private void OnEnemyCoreDestroyed()
+    {
+        if (_enemyCore == null) return;
+        for (int i = 0; i < 28; i++)
+        {
+            Vector2 p = _enemyCore.GlobalPosition + new Vector2((GD.Randf() - 0.5f) * 72.0f, (GD.Randf() - 0.5f) * 72.0f);
+            TriggerClashAnimation(p, dropScrap: true);
+        }
+    }
+
+    public void SpawnEmergencyMiner(int ownerId)
+    {
+        if (ownerId == 0)
+        {
+            AddSpecificSwarm(SwarmRole.MiningDroid, 1);
+        }
+        else
+        {
+            if (_enemyCore == null || !IsInstanceValid(_enemyCore)) return;
+            Vector2 enemyCorePos = _enemyCore.GlobalPosition;
+            Color minerColor = new Color(3.5f, 1.8f, 0.4f, 1.0f);
+
+            float orbitDist = 42.0f;
+            float orbitSpd = 1.6f;
+            float angle = GD.Randf() * Mathf.Tau;
+            Vector2 offset = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * orbitDist;
+
+            var pos = new PositionComponent(enemyCorePos + offset);
+            var vel = new VelocityComponent(Vector2.Zero);
+            var unit = new SwarmUnitComponent(SwarmRole.MiningDroid, ownerId: 1, orbitDist, orbitSpd)
+            {
+                State = SwarmState.Orbiting,
+                MaxLifeTime = 9999.0f
+            };
+            var vis = new VisualComponent(minerColor, 0.65f);
+
+            _world.Create(pos, vel, unit, vis);
         }
     }
 
@@ -2484,7 +3740,7 @@ public partial class SwarmSimulation : Node2D
             {
                 Vector2 toCore = corePos - p.Position;
                 float dist = toCore.Length();
-                if (dist <= 22.0f)
+                if (dist <= 24.0f)
                 {
                     int rIdx = (int)p.MatterType;
                     if (rIdx >= 0 && rIdx < _resourceStock.Length)
@@ -2493,13 +3749,28 @@ public partial class SwarmSimulation : Node2D
                         stockChanged = true;
                     }
 
+                    // Daur ulang puing menjadi Dart tambahan untuk koloni pemain!
+                    IncrementRoleCounter(SwarmRole.DartNeedle, 1);
+                    _entityCount++;
+                    SpawnOneOrbitingDartNearPlayer();
+
                     _miningDebris.RemoveAt(i);
                     continue;
                 }
 
-                Vector2 pullDir = toCore / MathF.Max(0.001f, dist);
-                p.Velocity = p.Velocity.Lerp(pullDir * 720.0f, MathF.Min(1.0f, dt * 6.8f));
-                p.Position += p.Velocity * dt;
+                // MAGNET PULL: Hanya aktif saat kapal pemain mendekat (dist <= 180 px)!
+                if (dist <= 180.0f)
+                {
+                    Vector2 pullDir = toCore / MathF.Max(0.001f, dist);
+                    p.Velocity = p.Velocity.Lerp(pullDir * 780.0f, MathF.Min(1.0f, dt * 7.5f));
+                    p.Position += p.Velocity * dt;
+                }
+                else
+                {
+                    // Melayang pelan di luar angkasa dengan inersia
+                    p.Velocity *= MathF.Pow(0.92f, dt * 60.0f);
+                    p.Position += p.Velocity * dt;
+                }
             }
             else
             {
@@ -2550,7 +3821,16 @@ public partial class SwarmSimulation : Node2D
                 }
             }
 
-            // 2. Gambar Efek Visual Dart Plasma Boost [SPACE] & Retro-Rocket Braking
+            // 1b. Gambar percikan kinetik benturan antar drone (Clash Sparks)
+            for (int i = 0; i < _clashSparks.Count; i++)
+            {
+                var sp = _clashSparks[i];
+                float alpha = Mathf.Clamp(sp.Life / sp.MaxLife, 0.0f, 1.0f);
+                Color c = new Color(sp.Color.R, sp.Color.G, sp.Color.B, sp.Color.A * alpha);
+                DrawLine(sp.Position, sp.Position - sp.Velocity * 0.025f, c, sp.Size);
+            }
+
+            // 2. Gambar Efek Visual Sacrificial Dart Plasma Boost [SPACE], Kubah Parabola, & Retro-Brake
             if (_isBoostActive && _activeThrusterJets.Count > 0)
             {
                 DrawDartPlasmaBoostVfx();
@@ -2585,10 +3865,6 @@ public partial class SwarmSimulation : Node2D
 
             if (isPriming)
             {
-                // =========================================================================
-                // TAHAP PRIMING: HANYA BOLA FOKUS ENERGI & PERCIKAN KONVERGEN
-                // (Tanpa seberkas cahaya tracer ke depan agar tidak menembus asteroid!)
-                // =========================================================================
                 float primingPulse = 0.72f + 0.28f * MathF.Sin(_laserPrimingTimer * 44.0f);
                 float orbRadius = Mathf.Lerp(2.0f, 7.5f, primingProgress) * primingPulse;
 
@@ -2604,9 +3880,6 @@ public partial class SwarmSimulation : Node2D
             }
             else
             {
-                // =========================================================================
-                // TAHAP MENEMBAK PENUH (HEAVY MINING LASER BLAST)
-                // =========================================================================
                 float focusRadius = Mathf.Lerp(2.0f, 3.2f + _currentLaserBlockSpan * 1.4f, _laserFocusWarmup);
                 DrawCircle(_laserConvergencePoint, focusRadius * 1.45f, new Color(2.2f, 1.2f, 0.25f, 0.32f * _laserFocusWarmup));
                 DrawCircle(_laserConvergencePoint, focusRadius, new Color(3.2f, 2.6f, 1.1f, 0.95f * _laserFocusWarmup));
@@ -2695,6 +3968,12 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
+    /// <summary>
+    /// Menggambar Efek Megah Sacrificial Plasma Boost:
+    /// 1. Selubung Gelombang Kejut Kubah Parabola (Parabolic Bow Shock Shield) di depan Core.
+    /// 2. Berkas Feeder Konvergen dari 10 Dart Nozzle menuju ruang bakar (Focal Plasma Chamber).
+    /// 3. Satu Aliran Jet Plasma Utama yang Ramping, Tajam, & Megah dengan Cincin Mach Shock Diamonds.
+    /// </summary>
     private void DrawDartPlasmaBoostVfx()
     {
         float power = BoostPowerRatio;
@@ -2702,85 +3981,165 @@ public partial class SwarmSimulation : Node2D
         int dartCount = _activeThrusterJets.Count;
         if (dartCount == 0) return;
 
-        bool isFull = _isBoostFullPower;
+        Vector2 aimDir = BoostAimDirection;
+        Vector2 backDir = -aimDir;
+        Vector2 tangent = new Vector2(-aimDir.Y, aimDir.X);
+        Vector2 focalPos = BoostNozzlePosition;
 
-        // 1. Busur Induksi Listrik / Plasma Arcs antar Dart yang berdampingan sepanjang 3/4 busur lingkaran
-        if (dartCount > 1)
+        // =========================================================================
+        // A. SELUBUNG GELOMBANG KEJUT KUBAH PARABOLA DI DEPAN CORE (BOW SHOCK DOME)
+        // =========================================================================
+        const int domeSegments = 24;
+        var domeOuterPts = new Vector2[domeSegments + 1];
+        var domeInnerPts = new Vector2[domeSegments + 1];
+        float span = _parabolaHalfSpan * 1.06f;
+
+        for (int i = 0; i <= domeSegments; i++)
         {
-            for (int i = 0; i < dartCount - 1; i++)
+            float u = ((float)i / domeSegments) * 2.0f - 1.0f;
+            float s = u * span;
+            float backX = _parabolaCurvatureK * (s * s);
+            float ripple = MathF.Sin(pulse * 2.2f + u * 5.0f) * 1.6f;
+
+            domeOuterPts[i] = _parabolaApexWorldPos - aimDir * (backX - 6.0f) + tangent * (s + ripple);
+            domeInnerPts[i] = _parabolaApexWorldPos - aimDir * (backX + 4.0f) + tangent * s;
+        }
+
+        Color bowOuterCol = new Color(0.6f, 2.8f, 4.8f, (0.32f + 0.25f * power));
+        Color bowCoreCol = new Color(2.4f, 4.6f, 5.8f, (0.55f + 0.30f * power));
+        DrawPolyline(domeOuterPts, bowOuterCol, 3.2f, false);
+        DrawPolyline(domeInnerPts, bowCoreCol, 1.5f, false);
+
+        // Kilau puncak kubah parabola (Apex Mach Nose)
+        float apexPulse = 1.0f + 0.25f * MathF.Sin(pulse * 3.8f);
+        DrawCircle(_parabolaApexWorldPos + aimDir * 5.0f, 4.5f * apexPulse * power, new Color(3.2f, 5.0f, 6.0f, 0.65f * power));
+
+        // =========================================================================
+        // B. BUSUR INDUKSI & FEEDER KONVERGEN DARI 10 DART KE FOCAL PLASMA CHAMBER
+        // =========================================================================
+        for (int i = 0; i < dartCount; i++)
+        {
+            Vector2 dPos = _activeThrusterDartPositions[i];
+            Color feederGlow = new Color(0.8f, 3.4f, 5.2f, 0.55f * power);
+            Color feederCore = new Color(3.8f, 4.8f, 5.8f, 0.88f * power);
+
+            DrawLine(dPos, focalPos, feederGlow, 3.4f, false);
+            DrawLine(dPos, focalPos, feederCore, 1.4f, false);
+
+            if (i < dartCount - 1)
             {
-                Vector2 pA = _activeThrusterDartPositions[i];
-                Vector2 pB = _activeThrusterDartPositions[i + 1];
-                Vector2 mid = (pA + pB) * 0.5f;
-                Vector2 delta = pB - pA;
-                Vector2 normal = delta.LengthSquared() > 0.01f ? new Vector2(-delta.Y, delta.X).Normalized() : Vector2.Up;
-
-                float jitterAmp = isFull ? (2.2f + power * 3.2f) : (1.8f + (1.0f - power) * 3.5f);
-                float jitter = MathF.Sin(pulse * 4.5f + i * 2.7f) * jitterAmp;
-                Vector2 arcMid = mid + normal * jitter;
-
-                Color arcCol = isFull
-                    ? new Color(2.6f, 4.4f, 5.8f, 0.85f)
-                    : new Color(3.8f, 3.2f, 1.2f, 0.72f);
-
-                DrawLine(pA, arcMid, arcCol, isFull ? 2.0f : 1.4f, false);
-                DrawLine(arcMid, pB, arcCol, isFull ? 2.0f : 1.4f, false);
+                Vector2 nextPos = _activeThrusterDartPositions[i + 1];
+                Vector2 mid = (dPos + nextPos) * 0.5f + backDir * (MathF.Sin(pulse * 4.2f + i * 1.7f) * 2.5f);
+                Color arcCol = new Color(1.8f, 4.0f, 5.5f, 0.65f * power);
+                DrawLine(dPos, mid, arcCol, 1.3f, false);
+                DrawLine(mid, nextPos, arcCol, 1.3f, false);
             }
         }
 
-        // 2. Berkas Semburan Plasma Beam LANGSUNG dari Masing-Masing Dart (bukan di ruang kosong)
-        for (int i = 0; i < dartCount; i++)
+        // Bola Ruang Bakar Plasma (Focal Pinch Orb) + Flash saat Dart dikorbankan
+        float flashBoost = _boostSacrificeFlash;
+        float orbRad = (7.5f + 5.0f * power + 6.5f * flashBoost) * (0.90f + 0.10f * MathF.Sin(pulse * 5.0f));
+        DrawCircle(focalPos, orbRad * 1.85f, new Color(0.5f, 2.4f, 4.8f, 0.35f * power));
+        DrawCircle(focalPos, orbRad, new Color(2.8f + flashBoost * 2.0f, 4.6f, 5.8f, 0.92f));
+        DrawCircle(focalPos, orbRad * 0.52f, new Color(5.5f, 5.4f, 4.2f, 0.98f));
+
+        // =========================================================================
+        // C. SEMBURAN JET PLASMA UTAMA TERPUSAT & MACH SHOCK DIAMONDS
+        // =========================================================================
+        float mainJetLen = Mathf.Lerp(165.0f, 340.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.2f));
+        float throatW = 7.0f + 5.5f * power;
+        float midW = 18.0f + 14.0f * power;
+        Vector2 jetEnd = focalPos + backDir * mainJetLen;
+
+        // 1. Selubung Luar Plasma (Outer Ionized Plume Envelope)
+        var outerPlumePts = new Vector2[]
         {
-            var jet = _activeThrusterJets[i];
-            Vector2 origin = jet.Position;
-            Vector2 dir = jet.Direction;
-            Vector2 tangent = new Vector2(-dir.Y, dir.X);
-            float len = jet.Length;
+            focalPos + tangent * throatW,
+            focalPos + backDir * (mainJetLen * 0.28f) + tangent * midW,
+            focalPos + backDir * (mainJetLen * 0.72f) + tangent * (midW * 0.62f),
+            jetEnd,
+            focalPos + backDir * (mainJetLen * 0.72f) - tangent * (midW * 0.62f),
+            focalPos + backDir * (mainJetLen * 0.28f) - tangent * midW,
+            focalPos - tangent * throatW
+        };
+        var outerPlumeCols = new Color[]
+        {
+            new(0.4f, 2.6f, 4.8f, 0.62f * power),
+            new(0.8f, 1.8f, 4.4f, 0.42f * power),
+            new(2.2f, 0.6f, 3.2f, 0.22f * power),
+            new(2.8f, 0.2f, 1.8f, 0.0f),
+            new(2.2f, 0.6f, 3.2f, 0.22f * power),
+            new(0.8f, 1.8f, 4.4f, 0.42f * power),
+            new(0.4f, 2.6f, 4.8f, 0.62f * power)
+        };
+        DrawPolygon(outerPlumePts, outerPlumeCols);
 
-            if (isFull)
+        // 2. Inti Jet Kecepatan Tinggi (High-Velocity Core Beam)
+        float coreBeamLen = mainJetLen * 0.82f;
+        DrawLine(focalPos, focalPos + backDir * coreBeamLen, new Color(1.2f, 3.8f, 5.4f, 0.78f * power), 6.8f * power, false);
+        DrawLine(focalPos, focalPos + backDir * (coreBeamLen * 0.78f), new Color(4.6f, 5.0f, 5.8f, 0.94f * power), 3.0f * power, false);
+
+        // 3. Cincin & Poligon Mach Shock Diamonds di Sepanjang Ekor Jet
+        int diamondCount = 4 + (int)(power * 3.0f);
+        float spacing = (mainJetLen * 0.78f) / (diamondCount + 0.5f);
+
+        for (int d = 0; d < diamondCount; d++)
+        {
+            float flowOffset = ((pulse * 0.35f) % 1.0f) * spacing * 0.35f;
+            float dist = (d + 0.65f) * spacing + flowOffset;
+            float t = dist / mainJetLen;
+            if (t >= 0.92f) continue;
+
+            float fade = 1.0f - t;
+            Vector2 dCenter = focalPos + backDir * dist;
+            float dHalfLen = spacing * 0.36f * (0.7f + 0.3f * fade);
+            float dHalfWidth = (8.5f + 7.5f * power) * fade;
+
+            var diamondPts = new Vector2[]
             {
-                // Corong selubung plasma eksternal per-dart
-                float sheathW = (4.0f + 5.5f * power);
-                var sheathPts = new Vector2[]
-                {
-                    origin + tangent * sheathW,
-                    origin + dir * (len * 0.45f) + tangent * (sheathW * 1.35f),
-                    origin + dir * len,
-                    origin + dir * (len * 0.45f) - tangent * (sheathW * 1.35f),
-                    origin - tangent * sheathW
-                };
-                var sheathCols = new Color[]
-                {
-                    new(0.6f, 3.2f, 5.5f, 0.75f * power),
-                    new(2.4f, 2.2f, 0.8f, 0.45f * power),
-                    new(3.5f, 1.2f, 0.2f, 0.0f),
-                    new(2.4f, 2.2f, 0.8f, 0.45f * power),
-                    new(0.6f, 3.2f, 5.5f, 0.75f * power)
-                };
-                DrawPolygon(sheathPts, sheathCols);
+                dCenter - backDir * dHalfLen,
+                dCenter + tangent * dHalfWidth,
+                dCenter + backDir * dHalfLen,
+                dCenter - tangent * dHalfWidth
+            };
+            Color dCol = new Color(
+                Mathf.Lerp(4.8f, 2.8f, t),
+                Mathf.Lerp(5.0f, 2.2f, t),
+                5.6f,
+                0.78f * fade * power
+            );
+            var diamondCols = new Color[] { dCol, dCol * 0.65f, dCol * 0.45f, dCol * 0.65f };
+            DrawPolygon(diamondPts, diamondCols);
 
-                // Inti Plasma Beam
-                float coreW = 2.4f + 3.2f * power;
-                DrawLine(origin, origin + dir * len, new Color(1.8f, 4.2f, 5.8f, 0.92f), coreW * 1.8f, false);
-                DrawLine(origin, origin + dir * (len * 0.85f), new Color(5.2f, 5.2f, 3.8f, 0.98f), coreW, false);
+            // Cincin elips kompresi di simpul Mach Diamond
+            DrawLine(dCenter - tangent * (dHalfWidth * 1.15f), dCenter + tangent * (dHalfWidth * 1.15f), new Color(5.2f, 5.0f, 3.8f, 0.82f * fade), 1.8f, false);
+        }
 
-                // Mini Mach Shock Diamonds per-dart
-                int diamonds = 2 + (int)(power * 2.0f);
-                float dStep = len / (diamonds + 1);
-                for (int d = 1; d <= diamonds; d++)
-                {
-                    Vector2 dCenter = origin + dir * (dStep * d);
-                    float dw = (3.5f + power * 3.0f) * (1.0f - (float)d / (diamonds + 1));
-                    DrawCircle(dCenter, MathF.Max(1.2f, dw * 0.6f), new Color(5.5f, 5.2f, 3.8f, 0.95f));
-                }
-            }
-            else
+        // 4. Pita Heliks Magnetik Kembar (Twin Magnetic Containment Helices)
+        const int helixSteps = 18;
+        Vector2 prevH1 = Vector2.Zero;
+        Vector2 prevH2 = Vector2.Zero;
+        for (int h = 0; h <= helixSteps; h++)
+        {
+            float ht = (float)h / helixSteps;
+            float hDist = ht * (mainJetLen * 0.85f);
+            float envW = Mathf.Lerp(throatW * 0.9f, midW * 0.85f, MathF.Sin(ht * Mathf.Pi));
+            float phase = ht * Mathf.Tau * 2.2f - pulse * 1.4f;
+
+            Vector2 basePt = focalPos + backDir * hDist;
+            Vector2 pt1 = basePt + tangent * (MathF.Sin(phase) * envW);
+            Vector2 pt2 = basePt - tangent * (MathF.Sin(phase) * envW);
+
+            if (h > 0)
             {
-                // Mode Priming: semburan percikan api pra-pengapian kecil berderak
-                DrawLine(origin, origin + dir * len, new Color(4.8f, 2.8f, 0.8f, 0.85f), 2.2f, false);
-                DrawLine(origin, origin + dir * (len * 0.6f), new Color(5.4f, 4.8f, 1.8f, 0.98f), 1.2f, false);
-                DrawCircle(origin, 2.8f * (0.8f + 0.2f * MathF.Sin(pulse * 3.5f + i)), new Color(4.8f, 3.8f, 1.2f, 0.9f));
+                float hAlpha = (1.0f - ht) * 0.68f * power;
+                Color hCol1 = new Color(1.4f, 4.2f, 5.6f, hAlpha);
+                Color hCol2 = new Color(3.8f, 2.4f, 5.2f, hAlpha);
+                DrawLine(prevH1, pt1, hCol1, 1.5f, false);
+                DrawLine(prevH2, pt2, hCol2, 1.5f, false);
             }
+            prevH1 = pt1;
+            prevH2 = pt2;
         }
     }
 
@@ -2847,6 +4206,10 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
+    /// <summary>
+    /// Menembakkan rentetan unit swarm yang status Multi-Toggle di bar tengah bawah sedang ON ([2]-[5]).
+    /// Guardian (12-Sector Auto-Shield), Scanner (Auto-Scan), dan Mining Droid (Mining Laser) tidak ditembakkan sebagai peluru.
+    /// </summary>
     public void FireSwarmStream(Vector2 targetPos, int count = 2)
     {
         int fired = 0;
@@ -2854,10 +4217,16 @@ public partial class SwarmSimulation : Node2D
         {
             if (fired >= count) return;
             if (swarm.State != SwarmState.Orbiting || swarm.OwnerId != 0) return;
+
+            // Guardian, MiningDroid, dan ScannerDrone bukan proyektil tembakan klik kiri
             if (swarm.Role == SwarmRole.Guardian
-                || swarm.Role == SwarmRole.DrillDrone
                 || swarm.Role == SwarmRole.MiningDroid
                 || swarm.Role == SwarmRole.ScannerDrone) return;
+
+            // Hanya tembakkan jenis swarm tempur yang di-toggle ON oleh pemain di Tactical Swarm Dock!
+            int roleIdx = (int)swarm.Role;
+            if (roleIdx < 0 || roleIdx >= _roleToggledOn.Length || !_roleToggledOn[roleIdx])
+                return;
 
             Vector2 toTarget = targetPos - pos.Value;
             if (toTarget.LengthSquared() < 1.0f) return;
@@ -2866,7 +4235,10 @@ public partial class SwarmSimulation : Node2D
             Vector2 dir = toTarget.Normalized().Rotated(spreadAngle);
 
             swarm.State = SwarmState.Launched;
+            swarm.MaxHealth = 1;
+            swarm.Health = 1;
             swarm.TargetDirection = dir;
+            swarm.TargetPosition = targetPos;
             swarm.LifeTime = 0.0f;
             swarm.MaxLifeTime = (swarm.Role == SwarmRole.CrescentBoomerang) ? 1.6f : 1.15f;
 
@@ -2886,13 +4258,18 @@ public partial class SwarmSimulation : Node2D
         {
             if (fired >= count) return;
             if (swarm.State != SwarmState.Orbiting || swarm.OwnerId != 0) return;
-            if (swarm.Role == SwarmRole.Guardian) return;
+            if (swarm.Role == SwarmRole.Guardian
+                || swarm.Role == SwarmRole.MiningDroid
+                || swarm.Role == SwarmRole.ScannerDrone) return;
 
             float spreadAngle = (GD.Randf() - 0.5f) * 0.55f;
             Vector2 dir = baseDir.Rotated(spreadAngle);
 
             swarm.State = SwarmState.Launched;
+            swarm.MaxHealth = 1;
+            swarm.Health = 1;
             swarm.TargetDirection = dir;
+            swarm.TargetPosition = targetPos;
             swarm.LifeTime = 0.0f;
             swarm.MaxLifeTime = 0.95f + GD.Randf() * 0.4f;
 
@@ -2908,13 +4285,18 @@ public partial class SwarmSimulation : Node2D
         {
             if (fired >= count) return;
             if (swarm.State != SwarmState.Orbiting || swarm.OwnerId != 0) return;
-            if (swarm.Role == SwarmRole.Guardian) return;
+            if (swarm.Role == SwarmRole.Guardian
+                || swarm.Role == SwarmRole.MiningDroid
+                || swarm.Role == SwarmRole.ScannerDrone) return;
 
             float angle = ((float)fired / count) * Mathf.Tau;
             Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
 
             swarm.State = SwarmState.Launched;
+            swarm.MaxHealth = 1;
+            swarm.Health = 1;
             swarm.TargetDirection = dir;
+            swarm.TargetPosition = pos.Value + dir * 1200.0f;
             swarm.LifeTime = 0.0f;
             swarm.MaxLifeTime = 1.1f;
 
@@ -2925,7 +4307,7 @@ public partial class SwarmSimulation : Node2D
 
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (@event is InputEventKey keyEvent && keyEvent.Pressed)
+        if (@event is InputEventKey keyEvent && keyEvent.Pressed && !keyEvent.Echo)
         {
             switch (keyEvent.Keycode)
             {
@@ -2934,37 +4316,33 @@ public partial class SwarmSimulation : Node2D
                     ToggleFoundryPanel();
                     break;
                 case Key.Key1:
-                    if (!TryCraftRecipe(0)) AddSpecificSwarm(SwarmRole.DartNeedle, 10);
+                    // Multi-Toggle [1]: Mining Droid (Heavy Mining Laser)
+                    ToggleTacticalSlot(0);
                     break;
                 case Key.Key2:
-                    if (!TryCraftRecipe(1)) AddSpecificSwarm(SwarmRole.MiningDroid, 5);
+                    // Multi-Toggle [2]: Dart Needle
+                    ToggleTacticalSlot(1);
                     break;
                 case Key.Key3:
-                    if (!TryCraftRecipe(2)) AddSpecificSwarm(SwarmRole.ScannerDrone, 5);
+                    // Multi-Toggle [3]: Giga Shuriken
+                    ToggleTacticalSlot(2);
                     break;
                 case Key.Key4:
-                    if (!TryCraftRecipe(3)) AddSpecificSwarm(SwarmRole.Guardian, 10);
+                    // Multi-Toggle [4]: Crescent Boomerang
+                    ToggleTacticalSlot(3);
                     break;
                 case Key.Key5:
-                    if (!TryCraftRecipe(4)) AddSpecificSwarm(SwarmRole.DrillDrone, 10);
-                    break;
-                case Key.Key6:
-                    if (!TryCraftRecipe(5)) AddSpecificSwarm(SwarmRole.GigaShuriken, 10);
-                    break;
-                case Key.Key7:
-                    if (!TryCraftRecipe(6)) AddSpecificSwarm(SwarmRole.CrescentBoomerang, 10);
-                    break;
-                case Key.Key8:
-                    if (!TryCraftRecipe(7)) _playerCore.AddNextHoneycombCell();
-                    break;
-                case Key.Key9:
-                    AddSpecificSwarm(SwarmRole.MiningDroid, 15);
+                    // Multi-Toggle [5]: Drill Drone (Lance Projectile)
+                    ToggleTacticalSlot(4);
                     break;
                 case Key.E:
                     SpawnEnemySectorAttack(GetGlobalMousePosition(), 50);
                     break;
                 case Key.Q:
                     FireRadialNova(80);
+                    break;
+                case Key.T:
+                    IsEnemyFiring = !IsEnemyFiring;
                     break;
             }
         }

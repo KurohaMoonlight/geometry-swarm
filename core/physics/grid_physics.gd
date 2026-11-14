@@ -240,8 +240,9 @@ func apply_radial_impulse(world_pos: Vector2, strength: float, radius: float) ->
 				var falloff: float = 1.0 - (dist / radius)
 				var smooth_f: float = falloff * falloff * (3.0 - 2.0 * falloff)
 				velocities[idx] += dir * (strength * smooth_f)
+				rift_heat[idx] = clampf(rift_heat[idx] + smooth_f * 0.75, 0.0, 2.0)
 
-## Efek riak dan semburan plasma jet pada grid background saat Sacrificial Dart Boost [SPACE] aktif
+## Efek Megah Gelombang Kejut Kubah Parabola (Bow Shock) + Hisapan Venturi + Semburan Plasma Jet
 func apply_boost_jet_impulse(
 	nozzle_pos: Vector2,
 	aim_dir: Vector2,
@@ -256,10 +257,11 @@ func apply_boost_jet_impulse(
 	var dir: Vector2 = aim_dir.normalized() if aim_dir.length_squared() > 0.001 else Vector2.RIGHT
 	var tangent: Vector2 = Vector2(-dir.y, dir.x)
 	
-	var exhaust_len: float = lerpf(140.0, 295.0, power_ratio)
-	var plume_max_r: float = lerpf(56.0, 118.0, power_ratio)
-	var center_pos: Vector2 = nozzle_pos - dir * (exhaust_len * 0.40)
-	var bounds: Rect2i = _get_grid_bounds(center_pos, exhaust_len * 0.65 + plume_max_r)
+	var exhaust_len: float = lerpf(240.0, 490.0, power_ratio)
+	var plume_max_r: float = lerpf(92.0, 195.0, power_ratio)
+	var bow_len: float = lerpf(110.0, 210.0, power_ratio)
+	var center_pos: Vector2 = nozzle_pos - dir * (exhaust_len * 0.28)
+	var bounds: Rect2i = _get_grid_bounds(center_pos, exhaust_len * 0.72 + plume_max_r + 65.0)
 	_mark_active_bounds(bounds)
 	
 	for r in range(bounds.position.y, bounds.end.y):
@@ -271,35 +273,52 @@ func apply_boost_jet_impulse(
 			var axial: float = rel.dot(dir)
 			var lateral: float = rel.dot(tangent)
 			var abs_lat: float = absf(lateral)
+			var side_sign: float = 1.0 if lateral >= 0.0 else -1.0
 			
-			# 1. Gelombang kejut kompresi depan/samping kapal saat melesat (Bow Ripple)
-			if axial >= -15.0 and axial <= 80.0:
-				var bow_r: float = 72.0
-				if abs_lat < bow_r:
-					var lat_f: float = 1.0 - (abs_lat / bow_r)
-					var ax_f: float = 1.0 - clampf(absf(axial - 28.0) / 52.0, 0.0, 1.0)
-					var side_sign: float = 1.0 if lateral >= 0.0 else -1.0
-					var bow_push: Vector2 = (tangent * (side_sign * 560.0) + dir * 250.0) * (lat_f * ax_f * power_ratio)
-					velocities[idx] += bow_push * dt
-					rift_heat[idx] = clampf(rift_heat[idx] + lat_f * ax_f * power_ratio * dt * 8.5, 0.0, 1.4)
+			# 1. Gelombang Kejut Kubah Parabola Depan (Parabolic Mach Cone Bow Shockwave)
+			#    Membelah grid ruang angkasa ke samping mengikuti kubah parabola swarm di depan Core!
+			if axial >= -25.0 and axial <= bow_len:
+				var parabola_curve_x: float = bow_len * 0.72 - 0.0052 * (lateral * lateral)
+				var dist_to_front: float = absf(axial - parabola_curve_x)
+				var wave_thickness: float = lerpf(48.0, 82.0, power_ratio)
+				
+				if dist_to_front < wave_thickness and abs_lat < 190.0:
+					var front_f: float = 1.0 - (dist_to_front / wave_thickness)
+					var lat_f: float = 1.0 - clampf(abs_lat / 190.0, 0.0, 1.0)
+					var shock_intensity: float = front_f * front_f * lat_f * power_ratio
+					
+					var bow_normal: Vector2 = (dir * 0.48 + tangent * (side_sign * 0.88)).normalized()
+					var shimmer: float = 1.0 + 0.35 * sin(abs_lat * 0.12 - pulse_time * 2.2)
+					velocities[idx] += bow_normal * (1450.0 * shock_intensity * shimmer * dt)
+					rift_heat[idx] = clampf(rift_heat[idx] + shock_intensity * shimmer * dt * 19.0, 0.0, 1.95)
 			
-			# 2. Semburan Plasma Beam Pendorong di belakang kapal (-aim_dir)
-			if axial < 12.0 and axial >= -exhaust_len:
+			# 2. Hisapan Venturi Pinch di Leher Ruang Bakar Nozzle (Tepat di belakang Core)
+			if axial >= -75.0 and axial <= 20.0 and abs_lat < 120.0:
+				var neck_ax: float = 1.0 - clampf(absf(axial + 24.0) / 52.0, 0.0, 1.0)
+				var neck_lat: float = 1.0 - (abs_lat / 120.0)
+				var pinch_f: float = neck_ax * neck_lat * power_ratio
+				velocities[idx] += (-tangent * side_sign * 780.0 - dir * 420.0) * (pinch_f * dt)
+				rift_heat[idx] = clampf(rift_heat[idx] + pinch_f * dt * 14.0, 0.0, 1.8)
+			
+			# 3. Semburan Utama Plasma Jet Thrust & Cincin Mach Shock Diamonds di Buritan (-aim_dir)
+			if axial < 10.0 and axial >= -exhaust_len:
 				var back_dist: float = maxf(0.0, -axial)
 				var back_ratio: float = clampf(back_dist / exhaust_len, 0.0, 1.0)
-				var plume_half_w: float = lerpf(28.0, plume_max_r, back_ratio)
+				var plume_half_w: float = lerpf(32.0, plume_max_r, pow(back_ratio, 0.78))
 				
 				if abs_lat < plume_half_w:
 					var lat_f: float = 1.0 - (abs_lat / plume_half_w)
 					var axial_f: float = 1.0 - back_ratio
 					var intensity: float = lat_f * lat_f * axial_f * power_ratio
 					
-					var ripple_wave: float = 1.0 + 0.48 * sin(back_dist * 0.13 - pulse_time * 1.5)
-					var side_spread: float = (lateral / maxf(1.0, plume_half_w)) * 0.52
+					# Gelombang berdiri Mach Shock Diamonds & turbulensi heliks plasma
+					var mach_diamond: float = 1.0 + 0.68 * sin(back_dist * 0.14 - pulse_time * 2.6)
+					var vortex_swirl: float = cos(back_dist * 0.09 - pulse_time * 1.9) * side_sign * 0.38
+					var side_spread: float = (lateral / maxf(1.0, plume_half_w)) * 0.65 + vortex_swirl
 					var jet_dir: Vector2 = (-dir + tangent * side_spread).normalized()
 					
-					velocities[idx] += jet_dir * (1750.0 * intensity * ripple_wave * dt)
-					rift_heat[idx] = clampf(rift_heat[idx] + intensity * ripple_wave * dt * 17.5, 0.0, 1.85)
+					velocities[idx] += jet_dir * (2650.0 * intensity * mach_diamond * dt)
+					rift_heat[idx] = clampf(rift_heat[idx] + intensity * mach_diamond * dt * 28.0, 0.0, 2.0)
 
 func apply_giga_drill_spacetime_and_exhaust(
 	tip_pos: Vector2,
@@ -398,21 +417,64 @@ func sync_window_to_center(world_center: Vector2, half_grid_size: Vector2) -> bo
 	)
 	
 	var delta_snap: Vector2 = snapped_origin - origin
-	if absf(delta_snap.x) < cell_size * 2.0 and absf(delta_snap.y) < cell_size * 2.0:
+	var shift_cols: int = int(round(delta_snap.x / cell_size))
+	var shift_rows: int = int(round(delta_snap.y / cell_size))
+	
+	if shift_cols == 0 and shift_rows == 0:
 		return false
 		
 	origin = snapped_origin
+	
+	if is_sleeping or not has_active_deformation or abs(shift_cols) >= cols or abs(shift_rows) >= rows:
+		for r in range(rows):
+			var row_offset: int = r * cols
+			var py: float = origin.y + r * cell_size
+			for c in range(cols):
+				var idx: int = row_offset + c
+				var p: Vector2 = Vector2(origin.x + c * cell_size, py)
+				base_positions[idx] = p
+				positions[idx] = p
+				velocities[idx] = Vector2.ZERO
+				rift_heat[idx] = 0.0
+		is_sleeping = true
+		has_active_deformation = false
+		return true
+
+	var new_positions: PackedVector2Array = PackedVector2Array()
+	var new_velocities: PackedVector2Array = PackedVector2Array()
+	var new_heat: PackedFloat32Array = PackedFloat32Array()
+	new_positions.resize(total_points)
+	new_velocities.resize(total_points)
+	new_heat.resize(total_points)
+	
 	for r in range(rows):
+		var old_r: int = r + shift_rows
 		var row_offset: int = r * cols
 		var py: float = origin.y + r * cell_size
 		for c in range(cols):
+			var old_c: int = c + shift_cols
 			var idx: int = row_offset + c
-			var p: Vector2 = Vector2(origin.x + c * cell_size, py)
-			base_positions[idx] = p
-			if is_sleeping:
-				positions[idx] = p
+			var base_p: Vector2 = Vector2(origin.x + c * cell_size, py)
+			base_positions[idx] = base_p
+			
+			if old_r >= 0 and old_r < rows and old_c >= 0 and old_c < cols:
+				var old_idx: int = old_r * cols + old_c
+				new_positions[idx] = positions[old_idx]
+				new_velocities[idx] = velocities[old_idx]
+				new_heat[idx] = rift_heat[old_idx]
 			else:
-				positions[idx] += delta_snap
+				new_positions[idx] = base_p
+				new_velocities[idx] = Vector2.ZERO
+				new_heat[idx] = 0.0
+				
+	positions = new_positions
+	velocities = new_velocities
+	rift_heat = new_heat
+	
+	active_min_c = clampi(active_min_c - shift_cols, 0, cols - 1)
+	active_max_c = clampi(active_max_c - shift_cols, 0, cols - 1)
+	active_min_r = clampi(active_min_r - shift_rows, 0, rows - 1)
+	active_max_r = clampi(active_max_r - shift_rows, 0, rows - 1)
 	return true
 
 func reset() -> void:
@@ -422,10 +484,15 @@ func reset() -> void:
 		rift_heat[i] = 0.0
 	is_sleeping = true
 	has_active_deformation = false
+	active_min_c = cols
+	active_max_c = -1
+	active_min_r = rows
+	active_max_r = -1
 
 func _get_grid_bounds(world_pos: Vector2, radius: float) -> Rect2i:
-	var min_c: int = clampi(int(floor((world_pos.x - origin.x - radius) / cell_size)), 0, cols - 1)
-	var max_c: int = clampi(int(ceil((world_pos.x - origin.x + radius) / cell_size)) + 1, min_c, cols)
-	var min_r: int = clampi(int(floor((world_pos.y - origin.y - radius) / cell_size)), 0, rows - 1)
-	var max_r: int = clampi(int(ceil((world_pos.y - origin.y + radius) / cell_size)) + 1, min_r, rows)
-	return Rect2i(min_c, min_r, max_c - min_c, max_r - min_r)
+	var local: Vector2 = world_pos - origin
+	var min_c: int = maxi(0, int(floor((local.x - radius) / cell_size)))
+	var max_c: int = mini(cols, int(ceil((local.x + radius) / cell_size)) + 1)
+	var min_r: int = maxi(0, int(floor((local.y - radius) / cell_size)))
+	var max_r: int = mini(rows, int(ceil((local.y + radius) / cell_size)) + 1)
+	return Rect2i(min_c, min_r, maxi(0, max_c - min_c), maxi(0, max_r - min_r))

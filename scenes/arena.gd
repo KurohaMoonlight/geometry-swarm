@@ -9,7 +9,7 @@ const GigaDrillVFXClass = preload("res://visual/giga_drill_vfx.gd")
 ## - Grid belakang di-snap ke koordinat dunia (kelipatan cell_size) sehingga TIDAK ikut bergeser
 ##   saat kapal bergerak.
 ## - Di belakang grid terdapat 3 lapis partikel bintang parallax yang sangat ringan.
-## - Mendukung efek riak & gelombang kejut grid saat Sacrificial Dart Boost [SPACE] aktif.
+## - Mendukung efek riak & gelombang kejut grid megah saat Sacrificial Dart Boost [SPACE] aktif.
 
 @onready var grid_renderer: GridRendererClass = $GridRenderer
 @onready var world_env: WorldEnvironment = $WorldEnvironment
@@ -51,6 +51,8 @@ func _ready() -> void:
 			swarm_sim.connect("GigaDrillNoseBreached", Callable(self, "_on_giga_drill_nose_breached"))
 		if swarm_sim.has_signal("BoostDartSacrificed"):
 			swarm_sim.connect("BoostDartSacrificed", Callable(self, "_on_boost_dart_sacrificed"))
+		if swarm_sim.has_signal("SwarmClashImpulse"):
+			swarm_sim.connect("SwarmClashImpulse", Callable(self, "_on_swarm_clash_impulse"))
 
 	_update_grid_size()
 	grid_renderer.bind_physics(grid_physics)
@@ -80,10 +82,16 @@ func _on_giga_drill_nose_breached(breach_pos: Vector2, aim_dir: Vector2, count: 
 		grid_physics.apply_radial_impulse(breach_pos, 2100.0, 280.0)
 	trigger_shake(11.0)
 
-func _on_boost_dart_sacrificed(nozzle_pos: Vector2, _aim_dir: Vector2, power_ratio: float) -> void:
+func _on_boost_dart_sacrificed(nozzle_pos: Vector2, aim_dir: Vector2, power_ratio: float) -> void:
 	if grid_physics:
-		grid_physics.apply_radial_impulse(nozzle_pos, 580.0 + 480.0 * power_ratio, 155.0)
-	trigger_shake(1.6 + 2.6 * power_ratio)
+		# Hentakan ledakan pengorbanan Dart di ruang bakar nozzle + gelombang kejut ke belakang
+		grid_physics.apply_radial_impulse(nozzle_pos, 920.0 + 780.0 * power_ratio, 215.0)
+		grid_physics.apply_radial_impulse(nozzle_pos - aim_dir * 75.0, 680.0 * power_ratio, 170.0)
+	trigger_shake(2.2 + 3.2 * power_ratio)
+
+func _on_swarm_clash_impulse(pos: Vector2, power: float, radius: float) -> void:
+	if grid_physics:
+		grid_physics.apply_radial_impulse(pos, power, radius)
 
 func _process(delta: float) -> void:
 	if screen_shake_intensity > 0.05:
@@ -175,10 +183,21 @@ func _process(delta: float) -> void:
 				status_text = " ★ [ GIGA DRILL LAUNCHED! ]"
 			elif is_boosting:
 				var b_pct: int = int(float(swarm_sim.get("BoostPowerRatio")) * 100.0)
-				status_text = " ⚡ [ PLASMA BOOST: %d%% ]" % b_pct
+				status_text = " ⚡ [ SACRIFICIAL PLASMA BOOST: %d%% ]" % b_pct
 				
-			var enemy_text: String = (" | ENEMY: %d" % enemies) if enemies > 0 else ""
-			swarm_label.text = "SWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d%s ]\nDARTS: %d | SCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d" % [
+			var p_hp: int = int(float(swarm_sim.get("PlayerHealth")))
+			var p_max_hp: int = int(float(swarm_sim.get("PlayerMaxHealth")))
+			var is_p_pod: bool = swarm_sim.get("IsPlayerEscapePod") == true
+			var e_hp: int = int(float(swarm_sim.get("EnemyHealth")))
+			var e_max_hp: int = int(float(swarm_sim.get("EnemyMaxHealth")))
+			var is_e_pod: bool = swarm_sim.get("IsEnemyEscapePod") == true
+
+			var p_status: String = " [⚡ ESCAPE POD]" if is_p_pod else " [HIVE]"
+			var e_status: String = " [⚡ NEMESIS POD]" if is_e_pod else " [HIVE]"
+
+			var enemy_text: String = (" | ENEMY SWARM: %d" % enemies) if enemies > 0 else ""
+			swarm_label.text = "CORE: %d/%d%s | ENEMY CORE: %d/%d%s\nSWARM: %d%s\n[ Orbit: %d | Fired: %d | Return: %d%s ]\nDARTS: %d | SCANNERS: %d | MINERS: %d | DEFENDERS: %d | CORES: %d" % [
+				p_hp, p_max_hp, p_status, e_hp, e_max_hp, e_status,
 				total, status_text, orbiting, launched, returning, enemy_text, darts, scanners, miners, guardians, cores
 			]
 

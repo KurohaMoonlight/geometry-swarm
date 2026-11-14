@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Arch.Core;
 using GeometrySwarm.Core.ECS.Components;
 using GeometrySwarm.Core.Physics;
@@ -28,8 +29,54 @@ public sealed class BoidSystem
     private readonly SpatialHashGrid _defenderSpatialGrid = new(cellSize: 24.0f, maxEntities: 4096, tableSize: 2048);
     private readonly Vector2[] _defenderPositions = new Vector2[4096];
     private readonly Vector2[] _defenderVelocities = new Vector2[4096];
+    private readonly Entity[] _defenderEntities = new Entity[4096];
     private readonly int[] _neighborBuffer = new int[32];
     private int _activeDefenderCount = 0;
+
+    // Spatial Grid untuk Musuh Aktif (Targeting & Intersepsi Swarm Pemain)
+    private readonly SpatialHashGrid _enemySpatialGrid = new(cellSize: 32.0f, maxEntities: 4096, tableSize: 2048);
+    private readonly Vector2[] _enemyPositions = new Vector2[4096];
+    private readonly Vector2[] _enemyVelocities = new Vector2[4096];
+    private readonly Entity[] _launchedEnemyEntities = new Entity[4096];
+    private int _activeEnemyCount = 0;
+
+    // Spatial Grid untuk Swarm Pemain yang Sedang Meluncur (Launched Projectiles)
+    private readonly SpatialHashGrid _launchedSpatialGrid = new(cellSize: 28.0f, maxEntities: 4096, tableSize: 2048);
+    private readonly Vector2[] _launchedPositions = new Vector2[4096];
+    private readonly int[] _launchedRoles = new int[4096];
+    private readonly bool[] _launchedHitConsumed = new bool[4096];
+    private readonly Entity[] _launchedPlayerEntities = new Entity[4096];
+    private int _activeLaunchedCount = 0;
+
+    // Spatial Grid untuk Lapisan Perisai Orbit Pemain (Ablative Swarm Armor)
+    private readonly SpatialHashGrid _playerOrbitShieldGrid = new(cellSize: 32.0f, maxEntities: 4096, tableSize: 2048);
+    private readonly Entity[] _playerOrbitEntities = new Entity[4096];
+    private int _activePlayerOrbitCount = 0;
+
+    // Spatial Grid untuk Lapisan Perisai Orbit Musuh (Ablative Swarm Armor Musuh)
+    private readonly SpatialHashGrid _enemyOrbitShieldGrid = new(cellSize: 32.0f, maxEntities: 4096, tableSize: 2048);
+    private readonly Entity[] _enemyOrbitEntities = new Entity[4096];
+    private int _activeEnemyOrbitCount = 0;
+
+    public readonly struct ClashEvent
+    {
+        public readonly Vector2 Position;
+        public readonly bool DropScrap;
+        public ClashEvent(Vector2 position, bool dropScrap = true)
+        {
+            Position = position;
+            DropScrap = dropScrap;
+        }
+    }
+
+    public readonly List<ClashEvent> ClashEvents = new(128);
+    public int EnemyCoreHitsThisFrame { get; set; } = 0;
+    public int PlayerCoreHitsThisFrame { get; set; } = 0;
+    public Vector2 LastPlayerHitVelocity { get; set; } = Vector2.Zero;
+    public Vector2 LastEnemyHitVelocity { get; set; } = Vector2.Zero;
+
+    private readonly int[] _enemyScanBuffer = new int[32];
+    private readonly int[] _launchedHitBuffer = new int[16];
 
     // Buffer asteroid terdekat yang sudah disaring sekali per frame (Zero-GC, Zero-Interop di dalam loop)
     private readonly Asteroid[] _nearbyAsteroids = new Asteroid[16];
@@ -84,7 +131,7 @@ public sealed class BoidSystem
 
     public ReadOnlySpan<float> GetSectorThreatScores() => _sectorThreatScores;
 
-    public void Update(float delta, Vector2 anchorPos, Vector2 anchorVelocity, Vector2 cursorThreatPos)
+    public void Update(float delta, Vector2 anchorPos, Vector2 anchorVelocity, Vector2 enemyCorePos, Vector2 cursorThreatPos, bool isBoostActive = false)
     {
         float dt = MathF.Min(delta, 0.033f);
         _organicWaveTime += dt;
@@ -135,9 +182,25 @@ public sealed class BoidSystem
         _defenderSpatialGrid.Clear();
         _activeDefenderCount = 0;
 
+        _enemySpatialGrid.Clear();
+        _activeEnemyCount = 0;
+
+        _launchedSpatialGrid.Clear();
+        _activeLaunchedCount = 0;
+
+        _playerOrbitShieldGrid.Clear();
+        _activePlayerOrbitCount = 0;
+
+        _enemyOrbitShieldGrid.Clear();
+        _activeEnemyOrbitCount = 0;
+
+        ClashEvents.Clear();
+        EnemyCoreHitsThisFrame = 0;
+        PlayerCoreHitsThisFrame = 0;
+
         Vector2 gridOrigin = anchorPos - new Vector2(GridWidth * CellSize * 0.5f, GridHeight * CellSize * 0.5f);
 
-        _world.Query(in _boidQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm) =>
+        _world.Query(in _boidQuery, (Entity entity, ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
             if (swarm.State == SwarmState.Dead) return;
 
@@ -148,13 +211,59 @@ public sealed class BoidSystem
 
             if (swarm.OwnerId > 0)
             {
-                _enemyCellGrid[cellIdx]++;
-                enemyCount++;
-                return;
+                if (swarm.State == SwarmState.Launched)
+                {
+                    _enemyCellGrid[cellIdx]++;
+                    enemyCount++;
+                    if (_activeEnemyCount < _enemyPositions.Length)
+                    {
+                        int eIdx = _activeEnemyCount++;
+                        _enemyPositions[eIdx] = pos.Value;
+                        _enemyVelocities[eIdx] = vel.Value;
+                        _launchedEnemyEntities[eIdx] = entity;
+                        _enemySpatialGrid.Insert(eIdx, pos.Value);
+                        swarm.SpatialEntityId = eIdx;
+                    }
+                    return;
+                }
+                else if (swarm.State == SwarmState.Orbiting)
+                {
+                    // Masukkan ke Perisai Orbit Musuh (Ablative Shield Core Musuh)
+                    if (_activeEnemyOrbitCount < 4096)
+                    {
+                        int eoIdx = _activeEnemyOrbitCount++;
+                        _enemyOrbitEntities[eoIdx] = entity;
+                        _enemyOrbitShieldGrid.Insert(eoIdx, pos.Value);
+                        swarm.SpatialEntityId = eoIdx;
+                    }
+                    return;
+                }
             }
 
-            if (swarm.State == SwarmState.Orbiting)
+            if (swarm.State == SwarmState.Launched)
             {
+                if (_activeLaunchedCount < _launchedPositions.Length)
+                {
+                    int lIdx = _activeLaunchedCount++;
+                    _launchedPositions[lIdx] = pos.Value;
+                    _launchedRoles[lIdx] = (int)swarm.Role;
+                    _launchedPlayerEntities[lIdx] = entity;
+                    _launchedHitConsumed[lIdx] = false;
+                    _launchedSpatialGrid.Insert(lIdx, pos.Value);
+                    swarm.SpatialEntityId = lIdx;
+                }
+            }
+            else if (swarm.State == SwarmState.Orbiting)
+            {
+                // Masukkan ke Perisai Orbit Pemain (Ablative Swarm Armor - menahan tembakan musuh)
+                if (_activePlayerOrbitCount < 4096)
+                {
+                    int poIdx = _activePlayerOrbitCount++;
+                    _playerOrbitEntities[poIdx] = entity;
+                    _playerOrbitShieldGrid.Insert(poIdx, pos.Value);
+                    swarm.SpatialEntityId = poIdx;
+                }
+
                 if (swarm.Role == SwarmRole.Guardian)
                 {
                     if (_activeDefenderCount < _defenderPositions.Length)
@@ -162,6 +271,7 @@ public sealed class BoidSystem
                         int defIdx = _activeDefenderCount++;
                         _defenderPositions[defIdx] = pos.Value;
                         _defenderVelocities[defIdx] = vel.Value;
+                        _defenderEntities[defIdx] = entity;
                         _defenderSpatialGrid.Insert(defIdx, pos.Value);
                     }
 
@@ -191,7 +301,7 @@ public sealed class BoidSystem
 
                 Vector2 localCursor = samplePos - gridOrigin;
                 int ccx = Math.Clamp((int)(localCursor.X * InvCellSize), 2, GridWidth - 3);
-                int ccy = Math.Clamp((int)(localCursor.Y * InvCellSize), 2, GridWidth - 3);
+                int ccy = Math.Clamp((int)(localCursor.Y * InvCellSize), 2, GridHeight - 3);
                 _enemyCellGrid[ccy * GridWidth + ccx] += 25;
                 _enemyCellGrid[ccy * GridWidth + (ccx - 1)] += 10;
                 _enemyCellGrid[ccy * GridWidth + (ccx + 1)] += 10;
@@ -243,7 +353,7 @@ public sealed class BoidSystem
         // =========================================================================
         // 3. ALOKASI SUDUT ORBIT DINAMIS OLEH CORE
         // =========================================================================
-        if (_activeDefenderCount > 0 && _sectorRebalanceTimer >= 0.04f)
+        if (!isBoostActive && _activeDefenderCount > 0 && _sectorRebalanceTimer >= 0.04f)
         {
             _sectorRebalanceTimer = 0.0f;
             ComputeSectorTargetQuotas(_activeDefenderCount, totalScannedEnemies);
@@ -296,6 +406,37 @@ public sealed class BoidSystem
 
             if (swarm.OwnerId > 0)
             {
+                if (swarm.State == SwarmState.Orbiting)
+                {
+                    Vector2 toEnemyCore = enemyCorePos - pos.Value;
+                    float distToEnemyCore = toEnemyCore.Length();
+                    Vector2 dirToEnemyCore = distToEnemyCore > 0.001f ? toEnemyCore / distToEnemyCore : Vector2.Right;
+
+                    Vector2 accel = Vector2.Zero;
+                    float distError = distToEnemyCore - swarm.OrbitDistance;
+                    accel += dirToEnemyCore * (distError * OrbitSpringWeight);
+                    Vector2 tangent = new Vector2(-dirToEnemyCore.Y, dirToEnemyCore.X);
+                    accel += tangent * (swarm.OrbitSpeed * OrbitTangentialWeight);
+
+                    vel.Value = (vel.Value + accel * dt) * decayOrbit;
+                    if (vel.Value.LengthSquared() > MaxOrbitSpeed * MaxOrbitSpeed)
+                    {
+                        vel.Value = vel.Value.Normalized() * MaxOrbitSpeed;
+                    }
+                    pos.Value += vel.Value * dt;
+                    swarm.SpinAngle = vel.Value.Angle() + Mathf.Pi * 0.5f;
+                    if (swarm.HitFlashTimer > 0.0f)
+                    {
+                        swarm.HitFlashTimer -= dt;
+                        vis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
+                    }
+                    else
+                    {
+                        vis.Color = EnemyGlowColor;
+                    }
+                    return;
+                }
+
                 swarm.LifeTime += dt;
                 vis.Color = EnemyGlowColor;
 
@@ -312,14 +453,138 @@ public sealed class BoidSystem
 
                 swarm.SpinAngle = vel.Value.Angle() + Mathf.Pi * 0.5f;
 
-                int hits = _defenderSpatialGrid.QueryNeighbors(pos.Value, 16.0f, _neighborBuffer);
+                // 1. Midfield clash dengan Swarm Pemain yang Sedang Meluncur
+                // Defender di Ballistic Shield Giga Drill punya 5 HP (tidak kebal, bisa mati jika diserang terlalu banyak)
+                // Attacker biasa (Dart/Drill) yang diluncurkan langsung 1 hit hancur
+                int launchHits = _launchedSpatialGrid.QueryNeighbors(pos.Value, 24.0f, _launchedHitBuffer);
+                if (launchHits > 0)
+                {
+                    for (int h = 0; h < launchHits; h++)
+                    {
+                        int lIdx = _launchedHitBuffer[h];
+                        if (lIdx >= 0 && lIdx < _activeLaunchedCount && !_launchedHitConsumed[lIdx])
+                        {
+                            Entity lEnt = _launchedPlayerEntities[lIdx];
+                            if (_world.IsAlive(lEnt))
+                            {
+                                ref var lSwarm = ref _world.Get<SwarmUnitComponent>(lEnt);
+                                if (lSwarm.State == SwarmState.Launched)
+                                {
+                                    _launchedHitConsumed[lIdx] = true;
+
+                                    if (lSwarm.Role == SwarmRole.Guardian)
+                                    {
+                                        lSwarm.Health--;
+                                        lSwarm.HitFlashTimer = 0.12f;
+                                        if (_world.Has<VisualComponent>(lEnt))
+                                        {
+                                            ref var lVis = ref _world.Get<VisualComponent>(lEnt);
+                                            lVis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
+                                        }
+
+                                        if (lSwarm.Health <= 0)
+                                        {
+                                            lSwarm.State = SwarmState.Dead;
+                                            ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: true));
+                                        }
+                                        else
+                                        {
+                                            ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
+                                        }
+                                    }
+                                    else
+                                    {
+                                        lSwarm.State = SwarmState.Dead;
+                                        ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: true));
+                                    }
+
+                                    swarm.State = SwarmState.Dead; // Peluru musuh selalu hancur saat menabrak
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Tabrakan dengan Perisai Swarm Pengorbit Pemain (Ablative Swarm Armor)
+                // Deteksi tubrukan kontak presisi (22px) dengan knockback kinetik
+                int shieldHits = _playerOrbitShieldGrid.QueryNeighbors(pos.Value, 22.0f, _neighborBuffer);
+                if (shieldHits > 0)
+                {
+                    int bestCandidateIdx = -1;
+                    int bestPriority = -1;
+                    float closestDistSq = float.MaxValue;
+
+                    for (int s = 0; s < shieldHits; s++)
+                    {
+                        int pIdx = _neighborBuffer[s];
+                        if (pIdx < 0 || pIdx >= _activePlayerOrbitCount) continue;
+                        Entity pEnt = _playerOrbitEntities[pIdx];
+                        if (!_world.IsAlive(pEnt)) continue;
+                        ref var pSwarm = ref _world.Get<SwarmUnitComponent>(pEnt);
+                        if (pSwarm.State != SwarmState.Orbiting) continue;
+
+                        ref var pPos = ref _world.Get<PositionComponent>(pEnt);
+                        float distSq = pos.Value.DistanceSquaredTo(pPos.Value);
+                        if (distSq > 22.0f * 22.0f) continue;
+
+                        int priority = pSwarm.Role switch
+                        {
+                            SwarmRole.Guardian => 3,
+                            SwarmRole.DartNeedle or SwarmRole.DrillDrone or SwarmRole.GigaShuriken or SwarmRole.CrescentBoomerang => 2,
+                            _ => 1
+                        };
+
+                        if (priority > bestPriority || (priority == bestPriority && distSq < closestDistSq))
+                        {
+                            bestPriority = priority;
+                            bestCandidateIdx = pIdx;
+                            closestDistSq = distSq;
+                        }
+                    }
+
+                    if (bestCandidateIdx != -1)
+                    {
+                        Entity targetEnt = _playerOrbitEntities[bestCandidateIdx];
+                        ApplyDamage(targetEnt, pos.Value, vel.Value);
+                        swarm.State = SwarmState.Dead;
+                        return;
+                    }
+                }
+
+                // 3. Kolisi langsung dengan Defender (Guardians) di lingkaran perisai kapal
+                int hits = _defenderSpatialGrid.QueryNeighbors(pos.Value, 22.0f, _neighborBuffer);
                 if (hits > 0)
                 {
+                    for (int d = 0; d < hits; d++)
+                    {
+                        int defIdx = _neighborBuffer[d];
+                        if (defIdx >= 0 && defIdx < _activeDefenderCount)
+                        {
+                            Entity defEnt = _defenderEntities[defIdx];
+                            if (!_world.IsAlive(defEnt)) continue;
+                            ref var defPos = ref _world.Get<PositionComponent>(defEnt);
+                            if (pos.Value.DistanceSquaredTo(defPos.Value) <= 22.0f * 22.0f)
+                            {
+                                ApplyDamage(defEnt, pos.Value, vel.Value);
+                                swarm.State = SwarmState.Dead;
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // 4. Tabrakan langsung ke Core (hanya jika berhasil menembus celah swarm orbit)
+                if (distToCore < 26.0f)
+                {
+                    PlayerCoreHitsThisFrame++;
+                    LastPlayerHitVelocity = vel.Value;
                     swarm.State = SwarmState.Dead;
+                    ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
                     return;
                 }
 
-                if (distToCore < 28.0f || swarm.LifeTime >= swarm.MaxLifeTime)
+                if (swarm.LifeTime >= swarm.MaxLifeTime)
                 {
                     swarm.State = SwarmState.Dead;
                     return;
@@ -338,6 +603,7 @@ public sealed class BoidSystem
             }
 
             if (MathF.Abs(swarm.SpinRate) > 0.01f
+                && !isBoostActive
                 && swarm.State != SwarmState.ChargingDrill
                 && swarm.State != SwarmState.DrillExhaust
                 && swarm.State != SwarmState.BoostThruster
@@ -352,8 +618,20 @@ public sealed class BoidSystem
                 case SwarmState.Orbiting:
                     orbitCount++;
 
-                    // Transisi mekar ukuran dan peredaman flash saat unit baru saja diluncurkan dari palka Core
-                    if (vis.Color != vis.BaseColor)
+                    // Saat Sacrificial Plasma Boost [SPACE] aktif, semua unit Orbiting dikunci penuh
+                    // ke Kubah Parabola di depan Core oleh SwarmSimulation.UpdateDartBoost!
+                    if (isBoostActive)
+                    {
+                        return;
+                    }
+
+                    // Efek flash putih saat terkena benturan (HP berkurang) atau transisi peredaman warna
+                    if (swarm.HitFlashTimer > 0.0f)
+                    {
+                        swarm.HitFlashTimer -= dt;
+                        vis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
+                    }
+                    else if (vis.Color != vis.BaseColor)
                     {
                         vis.Color = vis.Color.Lerp(vis.BaseColor, dt * 5.0f);
                     }
@@ -478,6 +756,110 @@ public sealed class BoidSystem
                     launchCount++;
                     swarm.LifeTime += dt;
 
+                    // 1. Jika DartNeedle pemain ini sudah menabrak/mengorbankan diri pada musuh:
+                    if (swarm.SpatialEntityId >= 0 && swarm.SpatialEntityId < _activeLaunchedCount && _launchedHitConsumed[swarm.SpatialEntityId])
+                    {
+                        swarm.State = SwarmState.Returning;
+                        swarm.LifeTime = 0.0f;
+                        break;
+                    }
+
+                    // =================================================================
+                    // LOGIKA INTERSEPSI DINAMIS: PRIORITASKAN MUSUH YANG MENGARAH KE KITA
+                    // =================================================================
+                    int candCount = _enemySpatialGrid.QueryNeighbors(pos.Value, 280.0f, _enemyScanBuffer);
+                    int bestEnemyIdx = -1;
+                    float highestThreatScore = -1.0f;
+                    Vector2 bestEnemyPos = Vector2.Zero;
+                    Vector2 bestEnemyVel = Vector2.Zero;
+
+                    Vector2 currentVel = vel.Value;
+                    Vector2 forwardDir = currentVel.LengthSquared() > 10.0f ? currentVel.Normalized() : swarm.TargetDirection;
+
+                    for (int c = 0; c < candCount; c++)
+                    {
+                        int eIdx = _enemyScanBuffer[c];
+                        if (eIdx < 0 || eIdx >= _activeEnemyCount) continue;
+                        Entity eEnt = _launchedEnemyEntities[eIdx];
+                        if (!_world.IsAlive(eEnt)) continue;
+                        ref var eSwarm = ref _world.Get<SwarmUnitComponent>(eEnt);
+                        if (eSwarm.State == SwarmState.Dead) continue;
+
+                        Vector2 ePos = _enemyPositions[eIdx];
+                        Vector2 eVel = _enemyVelocities[eIdx];
+
+                        Vector2 toEnemy = ePos - pos.Value;
+                        float distToEnemy = toEnemy.Length();
+                        if (distToEnemy < 1.0f) continue;
+                        Vector2 dirToEnemy = toEnemy / distToEnemy;
+
+                        // A. SENSOR ARC / CONE (~75 derajat):
+                        // Musuh dari arah samping/belakang tidak dikejar agar BISA LOLOS (defender berguna)!
+                        float fwdDot = forwardDir.Dot(dirToEnemy);
+                        if (fwdDot < 0.25f) continue;
+
+                        // B. MUSUH MENGARAH KE KITA (Approach Rate):
+                        Vector2 toOurCore = anchorPos - ePos;
+                        float distToCore = toOurCore.Length();
+                        if (distToCore < 1.0f) continue;
+                        Vector2 dirToOurCore = toOurCore / distToCore;
+
+                        // Kecepatan mendekati Core kita
+                        float approachSpeed = eVel.Dot(dirToOurCore);
+
+                        // C. ZONA PERTAHANAN DEFENDER:
+                        // Jika musuh sudah masuk perimeter dekat (< ShieldRadius + 20px),
+                        // serahkan ke Guardian defender agar swarm tidak berbalik arah 180 derajat ke markas.
+                        if (distToCore < ShieldRadius + 20.0f) continue;
+
+                        // Evaluasi musuh yang aktif melaju ke Core kita!
+                        if (approachSpeed > 15.0f)
+                        {
+                            float tti = distToCore / approachSpeed; // Time-to-Impact
+
+                            // Skor Ancaman: prioritas tinggi untuk TTI kecil (segera tabrak core) + jarak terdekat
+                            float threatScore = (350.0f / (tti + 0.15f)) + (180.0f / (distToEnemy + 25.0f));
+
+                            if (threatScore > highestThreatScore)
+                            {
+                                highestThreatScore = threatScore;
+                                bestEnemyIdx = eIdx;
+                                bestEnemyPos = ePos;
+                                bestEnemyVel = eVel;
+                            }
+                        }
+                    }
+
+                    Vector2 desiredDirection;
+                    if (bestEnemyIdx != -1)
+                    {
+                        // Lead Pursuit: Prediksi posisi temu musuh
+                        float hitTime = Math.Clamp(pos.Value.DistanceTo(bestEnemyPos) / BulletMaxSpeed, 0.04f, 0.35f);
+
+                        // Jitter dispersion alami: sedikit ketidaksempurnaan matematis
+                        // agar tidak 100% laser-lock (musuh berkecepatan tinggi atau menyilang berpeluang lolos)
+                        float dispersion = MathF.Sin(pos.Value.X * 0.04f + swarm.OrbitAngle) * 10.0f;
+                        Vector2 leadPos = bestEnemyPos + bestEnemyVel * hitTime + new Vector2(-forwardDir.Y, forwardDir.X) * (dispersion * 0.06f);
+
+                        desiredDirection = (leadPos - pos.Value).Normalized();
+                    }
+                    else
+                    {
+                        // Tidak ada ancaman musuh yang mengarah ke kita -> Lanjut menuju Core/target sasaran!
+                        if (swarm.TargetPosition.DistanceSquaredTo(Vector2.Zero) > 1.0f)
+                        {
+                            Vector2 toTargetPos = swarm.TargetPosition - pos.Value;
+                            desiredDirection = toTargetPos.LengthSquared() > 16.0f ? toTargetPos.Normalized() : swarm.TargetDirection;
+                        }
+                        else
+                        {
+                            desiredDirection = swarm.TargetDirection;
+                        }
+                    }
+
+                    // Smooth Steering dengan laju belok finite (12.0 rad/s)
+                    swarm.TargetDirection = swarm.TargetDirection.Slerp(desiredDirection, MathF.Min(1.0f, 12.0f * dt)).Normalized();
+
                     if (swarm.Role == SwarmRole.CrescentBoomerang)
                     {
                         swarm.TargetDirection = swarm.TargetDirection.Rotated(2.2f * dt);
@@ -500,6 +882,51 @@ public sealed class BoidSystem
                         vel.Value = vel.Value.Normalized() * BulletMaxSpeed;
                     }
 
+                    // 5. Cek tabrakan dengan Perisai Swarm Pengorbit Core Musuh (Ablative Swarm Armor Musuh)
+                    int enemyShieldHits = _enemyOrbitShieldGrid.QueryNeighbors(pos.Value, 22.0f, _neighborBuffer);
+                    if (enemyShieldHits > 0)
+                    {
+                        for (int s = 0; s < enemyShieldHits; s++)
+                        {
+                            int eoIdx = _neighborBuffer[s];
+                            if (eoIdx >= 0 && eoIdx < _activeEnemyOrbitCount)
+                            {
+                                Entity eoEnt = _enemyOrbitEntities[eoIdx];
+                                if (!_world.IsAlive(eoEnt)) continue;
+                                ref var eoPos = ref _world.Get<PositionComponent>(eoEnt);
+                                if (pos.Value.DistanceSquaredTo(eoPos.Value) > 22.0f * 22.0f) continue;
+
+                                if (ApplyDamage(eoEnt, pos.Value, vel.Value))
+                                {
+                                    if (swarm.Role == SwarmRole.DartNeedle)
+                                    {
+                                        swarm.State = SwarmState.Returning;
+                                        swarm.LifeTime = 0.0f;
+                                    }
+                                    else
+                                    {
+                                        swarm.State = SwarmState.Dead;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if (swarm.State == SwarmState.Returning || swarm.State == SwarmState.Dead) break;
+                    }
+
+                    // 6. Cek tabrakan langsung ke Core Musuh (hanya jika berhasil menembus celah swarm orbit musuh)
+                    Vector2 toEnemyCore = enemyCorePos - pos.Value;
+                    float distToEnemyCore = toEnemyCore.Length();
+                    if (distToEnemyCore < 36.0f)
+                    {
+                        EnemyCoreHitsThisFrame++;
+                        LastEnemyHitVelocity = vel.Value;
+                        swarm.State = SwarmState.Returning;
+                        swarm.LifeTime = 0.0f;
+                        ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
+                        break;
+                    }
+
                     if (swarm.LifeTime >= swarm.MaxLifeTime)
                     {
                         swarm.State = SwarmState.Returning;
@@ -513,6 +940,10 @@ public sealed class BoidSystem
 
                 case SwarmState.Returning:
                     returnCount++;
+                    if (isBoostActive)
+                    {
+                        return;
+                    }
                     vis.Color = ReturnGlowColor;
                     vis.Scale = (swarm.Role == SwarmRole.Guardian) ? 1.15f : 0.9f;
 
@@ -533,6 +964,9 @@ public sealed class BoidSystem
                     {
                         swarm.State = SwarmState.Orbiting;
                         swarm.LifeTime = 0.0f;
+                        swarm.MaxHealth = SwarmUnitComponent.GetMaxHealthForRole(swarm.Role, SwarmState.Orbiting);
+                        swarm.Health = swarm.MaxHealth;
+                        swarm.HitFlashTimer = 0.0f;
                         vis.Color = vis.BaseColor;
                     }
                     break;
@@ -598,28 +1032,16 @@ public sealed class BoidSystem
                         Vector2 toCore = anchorPos - pos.Value;
                         float distCore = toCore.Length();
 
-                        // Jika arah tarikan menuju Core terhalang oleh dinding batu (toCore berlawanan dengan hitNormal)
-                        if (toCore.Dot(hitNormal) < 0.0f)
+                        if (distCore > 4.0f)
                         {
-                            Vector2 tangentA = new Vector2(-hitNormal.Y, hitNormal.X);
-                            Vector2 tangent = (tangentA.Dot(toCore) >= 0.0f) ? tangentA : -tangentA;
+                            Vector2 dirToCore = toCore / distCore;
+                            Vector2 n1 = new Vector2(-hitNormal.Y, hitNormal.X);
+                            Vector2 n2 = -n1;
 
-                            // Berikan dorongan meluncur tangensial sepanjang kontur asteroid + pantulan keluar dinding
-                            vel.Value += (tangent * 620.0f + hitNormal * 240.0f) * dt;
-
-                            if (distCore > swarm.OrbitDistance + 50.0f)
-                            {
-                                swarm.State = SwarmState.Returning;
-                            }
-                        }
-
-                        // Anti-terjepit di ceruk sempit: jika kecepatan sangat rendah saat bersentuhan dengan asteroid
-                        if (vel.Value.LengthSquared() < 70.0f * 70.0f)
-                        {
-                            Vector2 unstuckDir = hitNormal.LengthSquared() > 0.01f ? hitNormal : (pos.Value - _nearbyAsteroids[a].CachedPosition).Normalized();
-                            Vector2 slideSide = new Vector2(-unstuckDir.Y, unstuckDir.X);
-                            vel.Value += unstuckDir * 320.0f + slideSide * 280.0f;
-                            swarm.State = SwarmState.Returning;
+                            // Pilih arah tangen yang paling searah menuju Core agar drone memutari sudut batu
+                            Vector2 slideTangent = (n1.Dot(dirToCore) >= n2.Dot(dirToCore)) ? n1 : n2;
+                            float slideSpeed = MathF.Max(vel.Value.Length(), 310.0f);
+                            vel.Value = (slideTangent * 0.82f + hitNormal * 0.18f).Normalized() * slideSpeed;
                         }
                     }
                     break;
@@ -633,65 +1055,120 @@ public sealed class BoidSystem
         EnemyCount = enemyCount;
     }
 
+    private bool ApplyDamage(Entity targetEnt, Vector2 hitPos, Vector2 impactVelocity)
+    {
+        if (!_world.IsAlive(targetEnt)) return false;
+        ref var targetSwarm = ref _world.Get<SwarmUnitComponent>(targetEnt);
+        if (targetSwarm.State == SwarmState.Dead) return false;
+
+        targetSwarm.Health--;
+        targetSwarm.HitFlashTimer = 0.12f;
+
+        // Impuls kinetik flinch/knockback pada unit yang tertabrak
+        if (_world.Has<VelocityComponent>(targetEnt))
+        {
+            ref var targetVel = ref _world.Get<VelocityComponent>(targetEnt);
+            targetVel.Value += impactVelocity * 0.40f;
+        }
+
+        if (_world.Has<VisualComponent>(targetEnt))
+        {
+            ref var targetVis = ref _world.Get<VisualComponent>(targetEnt);
+            targetVis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
+        }
+
+        if (targetSwarm.Health <= 0)
+        {
+            targetSwarm.State = SwarmState.Dead;
+            ClashEvents.Add(new ClashEvent(hitPos, dropScrap: true));
+            return true;
+        }
+        else
+        {
+            ClashEvents.Add(new ClashEvent(hitPos, dropScrap: false));
+            return true;
+        }
+    }
+
     private void ComputeSectorTargetQuotas(int totalDefenders, int totalEnemies)
     {
-        Span<float> weights = stackalloc float[SectorCount];
+        if (totalEnemies <= 0)
+        {
+            int basePerSector = totalDefenders / SectorCount;
+            int rem = totalDefenders % SectorCount;
+            for (int s = 0; s < SectorCount; s++)
+            {
+                _sectorTargetQuotas[s] = basePerSector + (s < rem ? 1 : 0);
+            }
+            return;
+        }
+
+        int baselineTotal = Math.Max(0, (int)(totalDefenders * 0.24f));
+        int baseEach = baselineTotal / SectorCount;
+        int dynamicPool = totalDefenders - (baseEach * SectorCount);
+
+        float[] smoothedWeights = new float[SectorCount];
         float weightSum = 0.0f;
 
         for (int s = 0; s < SectorCount; s++)
         {
-            float w = (totalEnemies > 0) ? 0.22f : 1.0f;
-
-            if (totalEnemies > 0)
-            {
-                int prevSec = (s + SectorCount - 1) % SectorCount;
-                int nextSec = (s + 1) % SectorCount;
-
-                float directEnemy = _sectorEnemyCounts[s];
-                float positiveThreat = MathF.Max(0.0f, _sectorThreatScores[s]);
-                float neighborEnemy = (_sectorEnemyCounts[prevSec] + _sectorEnemyCounts[nextSec]) * 0.35f;
-
-                w += directEnemy * 2.8f + positiveThreat * 1.8f + neighborEnemy * 1.4f;
-            }
-
-            weights[s] = w;
+            int prev = (s + SectorCount - 1) % SectorCount;
+            int next = (s + 1) % SectorCount;
+            float w = _sectorEnemyCounts[s] * 1.0f
+                    + _sectorEnemyCounts[prev] * 0.42f
+                    + _sectorEnemyCounts[next] * 0.42f;
+            smoothedWeights[s] = w;
             weightSum += w;
         }
 
         int allocated = 0;
         for (int s = 0; s < SectorCount; s++)
         {
-            int q = (int)MathF.Floor((weights[s] / MathF.Max(0.001f, weightSum)) * totalDefenders);
-            _sectorTargetQuotas[s] = q;
-            allocated += q;
+            int share = weightSum > 0.001f
+                ? (int)MathF.Round((smoothedWeights[s] / weightSum) * dynamicPool)
+                : (dynamicPool / SectorCount);
+            _sectorTargetQuotas[s] = baseEach + share;
+            allocated += _sectorTargetQuotas[s];
         }
 
-        int remainder = totalDefenders - allocated;
-        while (remainder > 0)
+        int diff = totalDefenders - allocated;
+        while (diff != 0)
         {
-            int bestSec = 0;
-            float bestPriority = -99999.0f;
+            int targetSec = 0;
+            float bestScore = -999999.0f;
             for (int s = 0; s < SectorCount; s++)
             {
-                float priority = weights[s] - _sectorTargetQuotas[s] * (weightSum / totalDefenders);
-                if (priority > bestPriority)
+                float score = diff > 0 ? smoothedWeights[s] : _sectorTargetQuotas[s];
+                if (score > bestScore)
                 {
-                    bestPriority = priority;
-                    bestSec = s;
+                    bestScore = score;
+                    targetSec = s;
                 }
             }
-            _sectorTargetQuotas[bestSec]++;
-            remainder--;
+
+            if (diff > 0)
+            {
+                _sectorTargetQuotas[targetSec]++;
+                diff--;
+            }
+            else if (_sectorTargetQuotas[targetSec] > 0)
+            {
+                _sectorTargetQuotas[targetSec]--;
+                diff++;
+            }
+            else
+            {
+                break;
+            }
         }
     }
 
     private static int AngleToSector(float angleRad)
     {
-        float norm = angleRad + Mathf.Pi;
-        if (norm < 0.0f) norm += Mathf.Tau;
-        if (norm >= Mathf.Tau) norm -= Mathf.Tau;
-        int sec = (int)(norm / SectorArc);
-        return Math.Clamp(sec, 0, SectorCount - 1);
+        float normalized = (angleRad + Mathf.Pi) / Mathf.Tau;
+        normalized -= MathF.Floor(normalized);
+        int sector = (int)(normalized * SectorCount);
+        return Math.Clamp(sector, 0, SectorCount - 1);
     }
 
     private static float SectorToCenterAngle(int sector)

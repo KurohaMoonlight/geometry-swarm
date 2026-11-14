@@ -14,10 +14,26 @@ namespace GeometrySwarm.Gameplay;
 /// </summary>
 public partial class PlayerCore : CharacterBody2D
 {
+    [Signal]
+    public delegate void CoreDamageTakenEventHandler(float currentHealth, float maxHealth);
+
+    [Signal]
+    public delegate void EscapePodEjectedEventHandler(Vector2 ejectionPos, Vector2 ejectionVelocity);
+
+    [Signal]
+    public delegate void CoreDestroyedEventHandler();
+
     [Export] public float Acceleration { get; set; } = 2200.0f;
     [Export] public float Friction { get; set; } = 0.91f;
     [Export] public float MaxSpeed { get; set; } = 420.0f;
     [Export] public float BoostMaxSpeed { get; set; } = 1050.0f;
+
+    [Export] public float BaseHealthPerCell { get; set; } = 600.0f;
+    public float MaxHealth => MathF.Max(600.0f, _hexCellOffsets.Count * BaseHealthPerCell);
+    public float Health { get; private set; } = 600.0f;
+    public bool IsEscapePod { get; private set; } = false;
+    public float InvulnerableTimer { get; private set; } = 0.0f;
+    public float HitFlashTimer { get; private set; } = 0.0f;
 
     public bool IsBoosting { get; set; } = false;
     public Vector2 BoostThrustVector { get; set; } = Vector2.Zero;
@@ -125,6 +141,8 @@ public partial class PlayerCore : CharacterBody2D
         _hexCellOffsets.Add(Vector2.Zero);
         _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
 
+        Health = MaxHealth;
+
         CollisionLayer = 1;
         CollisionMask = 1;
 
@@ -229,6 +247,13 @@ public partial class PlayerCore : CharacterBody2D
 
         _reservedAxials.Remove(_mitosisChosenAxial);
 
+        if (IsEscapePod)
+        {
+            IsEscapePod = false;
+        }
+        Health = MathF.Min(MaxHealth, Health + BaseHealthPerCell);
+        EmitSignal(SignalName.CoreDamageTaken, Health, MaxHealth);
+
         if (_mitosisQueue.Count > 0)
         {
             var next = _mitosisQueue.Dequeue();
@@ -239,6 +264,73 @@ public partial class PlayerCore : CharacterBody2D
             IsMitosisActive = false;
         }
 
+        QueueRedraw();
+    }
+
+    /// <summary>
+    /// Menerima kerusakan benturan swarm musuh atau proyektil.
+    /// Mengembalikan true jika sistem memicu peluncuran Escape Pod darurat.
+    /// </summary>
+    public bool TakeDamage(float amount, Vector2 impactDir)
+    {
+        if (InvulnerableTimer > 0.0f) return false;
+
+        Health = MathF.Max(0.0f, Health - amount);
+        HitFlashTimer = 0.12f;
+        EmitSignal(SignalName.CoreDamageTaken, Health, MaxHealth);
+
+        if (Health <= 0.0f)
+        {
+            if (!IsEscapePod)
+            {
+                TriggerEmergencyEscape(impactDir);
+                return true;
+            }
+            else
+            {
+                EmitSignal(SignalName.CoreDestroyed);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Protokol Penyelamatan Darurat (Escape Pod / Micro-Core Reboot):
+    /// Saat lambung kapal induk hancur, cluster sarang lebah meledak menjadi serpihan scrap,
+    /// dan satu sel inti (Micro-Core, 16px) terlontar cepat ke arah berlawanan sambil
+    /// segera memanggil 1 Emergency Mining Droid untuk memulai rekonstruksi dari nol!
+    /// </summary>
+    public void TriggerEmergencyEscape(Vector2 impactDir)
+    {
+        IsEscapePod = true;
+
+        _occupiedAxials.Clear();
+        _hexCellOffsets.Clear();
+        _cachedHexPolylines.Clear();
+        _reservedAxials.Clear();
+        _mitosisQueue.Clear();
+        IsMitosisActive = false;
+
+        _occupiedAxials.Add(Vector2I.Zero);
+        _hexCellOffsets.Add(Vector2.Zero);
+        _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
+
+        if (_circleShape != null)
+        {
+            _circleShape.Radius = HexRadius * 0.92f;
+        }
+
+        Health = BaseHealthPerCell;
+        InvulnerableTimer = 2.5f;
+
+        Vector2 escapeDir = impactDir.LengthSquared() > 0.01f
+            ? -impactDir.Normalized()
+            : new Vector2(GD.Randf() - 0.5f, GD.Randf() - 0.5f).Normalized();
+
+        Velocity = escapeDir * 720.0f;
+
+        EmitSignal(SignalName.EscapePodEjected, GlobalPosition, Velocity);
         QueueRedraw();
     }
 
@@ -254,6 +346,17 @@ public partial class PlayerCore : CharacterBody2D
         try
         {
             float dt = (float)delta;
+
+            if (InvulnerableTimer > 0.0f)
+            {
+                InvulnerableTimer -= dt;
+                QueueRedraw();
+            }
+            if (HitFlashTimer > 0.0f)
+            {
+                HitFlashTimer -= dt;
+                QueueRedraw();
+            }
 
             // Pembaruan Animasi Fabrikasi Swarm (Hologram 3D Nanite Print)
             if (_fabricationBursts.Count > 0)
@@ -387,6 +490,10 @@ public partial class PlayerCore : CharacterBody2D
     {
         try
         {
+            bool isHit = HitFlashTimer > 0.0f;
+            Color activeLineColor = isHit ? new Color(4.8f, 4.8f, 4.2f, 1.0f) : CoreLineColor;
+            Color activeAuraColor = isHit ? new Color(3.5f, 3.5f, 2.5f, 0.85f) : CoreAuraColor;
+
             // 1. Gambar semua sel hexagon aktif yang sudah mengkristal permanen
             for (int i = 0; i < _hexCellOffsets.Count; i++)
             {
@@ -395,9 +502,25 @@ public partial class PlayerCore : CharacterBody2D
                     ? _cachedHexPolylines[i]
                     : BuildHexPoints(offset, HexRadius);
 
-                DrawPolyline(points, CoreAuraColor, 2.8f, false);
-                DrawPolyline(points, CoreLineColor, 1.4f, false);
+                DrawPolyline(points, activeAuraColor, 2.8f, false);
+                DrawPolyline(points, activeLineColor, 1.4f, false);
                 DrawCircle(offset, 2.6f, CenterPulseColor);
+            }
+
+            // Perisai Darurat Invulnerability Flash
+            if (InvulnerableTimer > 0.0f)
+            {
+                float invPulse = 0.5f + 0.5f * MathF.Sin(InvulnerableTimer * 26.0f);
+                Color invColor = new Color(1.2f, 3.8f, 4.8f, 0.45f + 0.35f * invPulse);
+                DrawArc(Vector2.Zero, HexRadius * 1.55f, 0.0f, Mathf.Tau, 32, invColor, 2.4f);
+            }
+
+            // Strobe Peringatan Bahaya jika sedang menjadi Escape Pod tunggal
+            if (IsEscapePod)
+            {
+                float alarm = 0.5f + 0.5f * MathF.Sin((float)Time.GetTicksMsec() * 0.014f);
+                Color alarmCol = new Color(4.2f, 1.8f, 0.3f, alarm * 0.75f);
+                DrawArc(Vector2.Zero, HexRadius * 1.25f, 0.0f, Mathf.Tau, 24, alarmCol, 1.6f);
             }
 
             // 2. Gambar Animasi Mitosis Dinamis (Proses Biologis-Geometris Pembelahan Sel)
