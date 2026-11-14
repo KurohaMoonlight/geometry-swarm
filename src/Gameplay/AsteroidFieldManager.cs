@@ -24,8 +24,8 @@ public partial class AsteroidFieldManager : Node2D
     [Export] public Vector2 SectorSize { get; set; } = new(12000.0f, 12000.0f);
     [Export] public int TotalAsteroids { get; set; } = 32;
     [Export] public int TargetAsteroidCount { get; set; } = 32;
-    [Export] public float RiftCheckIntervalMin { get; set; } = 42.0f;
-    [Export] public float RiftCheckIntervalMax { get; set; } = 58.0f;
+    [Export] public float RiftCheckIntervalMin { get; set; } = 14.0f;
+    [Export] public float RiftCheckIntervalMax { get; set; } = 20.0f;
 
     public const float RiftOrbitRadius = 1550.0f;
 
@@ -47,9 +47,8 @@ public partial class AsteroidFieldManager : Node2D
     private readonly List<float> _gravHeatList = new(16);
 
     private readonly List<CosmicRift> _cosmicRifts = new();
-    private float _riftEjectionTimer = 2.5f;
+    private float _riftEjectionTimer = 25.0f;
     private int _nextRiftIndex = 0;
-    private bool _hasTriggeredInitialDemo = false;
 
     private Rect2 _sectorBounds;
     private static readonly Color PerimeterColor = new(0.35f, 0.15f, 0.55f, 0.45f);
@@ -70,7 +69,7 @@ public partial class AsteroidFieldManager : Node2D
     {
         _cosmicRifts.Clear();
 
-        float[] baseAngles = new float[] { 0.0f, Mathf.Tau / 3.0f, (Mathf.Tau * 2.0f) / 3.0f };
+        float[] baseAngles = new float[] { -0.155f, Mathf.Tau / 3.0f, (Mathf.Tau * 2.0f) / 3.0f };
 
         for (int i = 0; i < 3; i++)
         {
@@ -110,16 +109,14 @@ public partial class AsteroidFieldManager : Node2D
         if (_riftEjectionTimer <= 0.0f && _cosmicRifts.Count > 0)
         {
             int currentAsteroidCount = Asteroid.ActiveAsteroids.Count;
-            bool shouldTrigger = (currentAsteroidCount < TargetAsteroidCount) || !_hasTriggeredInitialDemo;
-
-            if (shouldTrigger)
+            // Hanya aktif saat jumlah asteroid batu di arena berkurang di bawah target (< TargetAsteroidCount)
+            if (currentAsteroidCount < TargetAsteroidCount)
             {
                 var rift = _cosmicRifts[_nextRiftIndex];
                 _nextRiftIndex = (_nextRiftIndex + 1) % _cosmicRifts.Count;
 
                 if (rift.TriggerEjectionSequence())
                 {
-                    _hasTriggeredInitialDemo = true;
                     _riftEjectionTimer = (float)GD.RandRange(RiftCheckIntervalMin, RiftCheckIntervalMax);
                 }
                 else
@@ -129,6 +126,7 @@ public partial class AsteroidFieldManager : Node2D
             }
             else
             {
+                // Jika populasi asteroid di arena masih cukup, tunda cek selama 14 detik
                 _riftEjectionTimer = 14.0f;
             }
         }
@@ -184,9 +182,8 @@ public partial class AsteroidFieldManager : Node2D
         rng.Randomize();
 
         // Cosmic Rift melontarkan asteroid batu mineral baru untuk menggantikan asteroid yang habis dipanen
-        // (Bintang Aether bereinkarnasi secara abadi melalui siklus Aether Seed)
         SwarmRole role = PickRandomMineralRole(rng);
-        float radius = (float)GD.RandRange(350.0, 520.0);
+        float radius = (float)GD.RandRange(320.0, 520.0);
 
         var asteroid = new Asteroid
         {
@@ -214,12 +211,19 @@ public partial class AsteroidFieldManager : Node2D
         var placedAsteroids = new List<(Vector2 Pos, float EffRadius)>();
 
         const float InterAsteroidPadding = 260.0f;
-        const float PlayerSafeZoneRadius = 1100.0f;
         float halfSector = SectorSize.X * 0.5f;
+        Vector2 playerSpawnPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
 
         bool IsLocationClear(Vector2 candPos, float effRadius)
         {
-            if (candPos.Length() < PlayerSafeZoneRadius + effRadius)
+            // Jaga zona aman bebas asteroid di sekitar posisi kapal pemain saat spawn
+            if (candPos.DistanceTo(playerSpawnPos) < effRadius + 450.0f)
+            {
+                return false;
+            }
+
+            // Jaga pusat semesta (Origin Safe Zone)
+            if (candPos.Length() < 550.0f + effRadius)
             {
                 return false;
             }

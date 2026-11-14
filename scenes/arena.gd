@@ -38,8 +38,9 @@ func _ready() -> void:
 	
 	if swarm_sim:
 		player_core = swarm_sim.get_node_or_null("PlayerCore")
-		if player_core:
-			player_core.global_position = Vector2(1100.0, 0.0)
+		if player_core and player_camera:
+			player_camera.global_position = player_core.global_position
+			player_camera.reset_smoothing()
 			
 		giga_vfx = GigaDrillVFXClass.new()
 		add_child(giga_vfx)

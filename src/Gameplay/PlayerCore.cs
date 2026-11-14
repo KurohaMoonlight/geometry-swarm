@@ -99,6 +99,25 @@ public partial class PlayerCore : CharacterBody2D
     private CollisionShape2D? _collisionShape;
     private CircleShape2D? _circleShape;
 
+    // Status Distorsi Gravitasi Bintang Aether pada Kapal Pemain (Tidal Spaghettification & Pull)
+    private float _gravityTidalStress = 0.0f;
+    private float _gravityTidalActiveTimer = 0.0f;
+    private Vector2 _gravityStarWorldPos = Vector2.Zero;
+    private float _gravityPulseTimer = 0.0f;
+
+    /// <summary>
+    /// Dipanggil oleh Bintang Aether saat kapal pemain berada di dalam sumur gravitasi maut.
+    /// Mengaktifkan efek peregangan spageti (tidal shear) & mengurangi redaman gesekan terhadap hisapan gravitasi.
+    /// </summary>
+    public void ApplyGravityWellTidalStress(Vector2 starWorldPos, float pullRatio, float dt)
+    {
+        _gravityStarWorldPos = starWorldPos;
+        _gravityTidalActiveTimer = 0.16f;
+        float targetStress = Mathf.Clamp(pullRatio, 0.0f, 1.0f);
+        _gravityTidalStress = Mathf.Max(_gravityTidalStress, Mathf.MoveToward(_gravityTidalStress, targetStress, dt * 4.2f));
+        QueueRedraw();
+    }
+
     public Vector2 GetCellOffset(int index)
     {
         if (_hexCellOffsets.Count == 0) return Vector2.Zero;
@@ -156,6 +175,13 @@ public partial class PlayerCore : CharacterBody2D
 
     public override void _Ready()
     {
+        // Spawn acak di Inner Belt (R ~ 1.350 - 1.850 px dari pusat semesta)
+        var rng = new RandomNumberGenerator();
+        rng.Randomize();
+        float spawnAngle = rng.Randf() * Mathf.Tau;
+        float spawnDist = rng.RandfRange(1350.0f, 1850.0f);
+        GlobalPosition = new Vector2(MathF.Cos(spawnAngle), MathF.Sin(spawnAngle)) * spawnDist;
+
         _occupiedAxials.Add(Vector2I.Zero);
         _hexCellOffsets.Add(Vector2.Zero);
         _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
@@ -384,6 +410,17 @@ public partial class PlayerCore : CharacterBody2D
                 HitFlashTimer -= dt;
                 QueueRedraw();
             }
+            if (_gravityTidalActiveTimer > 0.0f)
+            {
+                _gravityTidalActiveTimer -= dt;
+                _gravityPulseTimer += dt * (8.0f + _gravityTidalStress * 14.0f);
+                QueueRedraw();
+            }
+            else if (_gravityTidalStress > 0.0f)
+            {
+                _gravityTidalStress = Mathf.MoveToward(_gravityTidalStress, 0.0f, dt * 2.5f);
+                QueueRedraw();
+            }
 
             // Pembaruan Animasi Fabrikasi Swarm (Hologram 3D Nanite Print)
             if (_fabricationBursts.Count > 0)
@@ -454,10 +491,15 @@ public partial class PlayerCore : CharacterBody2D
                 Velocity *= MathF.Pow(0.85f, dt * 60.0f);
             }
 
-            float activeFriction = (IsEscapePod && EscapeBurstTimer > 0.0f) ? 0.985f : Friction;
+            // Saat berada di medan gravitasi Bintang Aether, kurangi redaman gesekan agar tarikan bintang
+            // benar-benar mengakumulasi momentum hisap yang kuat pada kapal pemain!
+            float baseFriction = (IsEscapePod && EscapeBurstTimer > 0.0f) ? 0.985f : Friction;
+            float activeFriction = _gravityTidalStress > 0.02f
+                ? Mathf.Lerp(baseFriction, 0.972f, Mathf.Clamp(_gravityTidalStress * 1.15f, 0.0f, 1.0f))
+                : baseFriction;
             Velocity *= MathF.Pow(activeFriction, dt * 60.0f);
 
-            float baseMaxSpd = IsEscapePod ? EscapePodMaxSpeed : MaxSpeed;
+            float baseMaxSpd = (IsEscapePod ? EscapePodMaxSpeed : MaxSpeed) + (_gravityTidalStress * 340.0f);
             float activeMaxSpeed = (IsEscapePod && EscapeBurstTimer > 0.0f)
                 ? 1220.0f
                 : (IsBoosting ? BoostMaxSpeed : baseMaxSpd);

@@ -15,11 +15,14 @@ uniform float instability : hint_range(0.0, 1.0) = 0.0;
 uniform float hit_angle : hint_range(-3.1416, 3.1416) = 0.0;
 uniform float hit_cavitation : hint_range(0.0, 1.0) = 0.0;
 
-// Palet Warna Kosmik Aether & Plasma Fusi (HDR Multiplier > 1.0 memicu Bloom WorldEnvironment)
-uniform vec4 core_color : source_color = vec4(3.8, 3.2, 1.15, 1.0);        // Aether White-Gold Pijar
-uniform vec4 corona_color : source_color = vec4(2.6, 1.3, 0.30, 0.95);     // Api Fusi Emas-Amber
-uniform vec4 rim_electric_color : source_color = vec4(0.55, 2.3, 3.8, 0.90); // Busur Medan Magnetik Sian-Ungu
-uniform vec4 critical_overload_color : source_color = vec4(5.2, 4.9, 3.8, 1.0); // Pijar Putih Menyilaukan saat Overload
+// =========================================================================
+// PALET WARNA: VOID LIGHTNING DENGAN PETIR MAGENTA (HIGH DYNAMIC RANGE BLOOM)
+// =========================================================================
+uniform vec4 void_core_color : source_color = vec4(0.012, 0.006, 0.026, 1.0);        // Obsidian Void Core (Inti Gelap Pekat)
+uniform vec4 nebula_violet_color : source_color = vec4(1.7, 0.22, 2.9, 0.88);         // Korona Deep Nebula Violet
+uniform vec4 electric_magenta_color : source_color = vec4(5.4, 0.42, 4.3, 1.0);       // Petir & Rim Neon Magenta Supercharged
+uniform vec4 hot_pink_accent : source_color = vec4(6.2, 2.2, 5.8, 1.0);              // Kilatan Putih-Pink Pijar Petir Inti
+uniform vec4 critical_overload_color : source_color = vec4(6.5, 0.8, 5.5, 1.0);      // Overload Hyper-Magenta
 
 // --- FUNGSI PROCEDURAL NOISE CEPAT (Tanpa texture eksternal) ---
 float hash21(vec2 p) {
@@ -61,16 +64,14 @@ void fragment() {
     float angle = atan(rel.y, rel.x);
 
     // 0. BOUNDARY ALPHA MASK: 100% Transparan di luar jangkauan korona & cincin akresi
-    // Tanpa BackBufferCopy yang menghitamkan layar, sehingga lengkungan Grid Ungu & Bintang Parallax
-    // di belakang bintang terlihat tembus sepenuhnya sampai ke tepi inti bintang!
     float boundary_mask = smoothstep(0.46, 0.28, dist);
     if (boundary_mask <= 0.001) {
         discard;
     }
 
-    // 1. INSTABILITAS GETARAN KOSMIK
-    float shake = instability * 0.02 * sin(TIME * 45.0 + dist * 35.0);
-    float pulse = 1.0 + 0.06 * sin(TIME * (3.5 + instability * 18.0));
+    // 1. INSTABILITAS GETARAN KOSMIK & PULSA
+    float shake = instability * 0.025 * sin(TIME * 45.0 + dist * 35.0);
+    float pulse = 1.0 + 0.05 * sin(TIME * (3.2 + instability * 16.0));
 
     // 2. EFEK TERGERUS DI TITIK LASER (Local Cavitation / Scoop Dent)
     float ang_diff = abs(atan(sin(angle - hit_angle), cos(angle - hit_angle)));
@@ -79,66 +80,79 @@ void fragment() {
 
     float flare_dist = dist / active_radius;
 
-    // 3. PUSARAN PIRINGAN AKRESI MATERI EKSOTIS (Translucent Exotic Matter Vortex)
-    float spiral_phase = angle * 3.0 - log(max(dist, 0.005)) * 6.5 + TIME * (2.4 + instability * 3.0);
+    // 3. PUSARAN PIRINGAN AKRESI NEBULA VIOLET (Swirling Void Vortex)
+    float spiral_phase = angle * 3.0 - log(max(dist, 0.005)) * 6.5 + TIME * (2.2 + instability * 2.8);
     float vortex_arms = 0.5 + 0.5 * sin(spiral_phase);
-    float accretion_zone = smoothstep(2.45, 1.02, flare_dist) * smoothstep(0.75, 1.15, flare_dist);
-    float einstein_ring = exp(-pow((flare_dist - 1.32) / 0.18, 2.0));
+    float accretion_zone = smoothstep(2.45, 1.02, flare_dist) * smoothstep(0.72, 1.15, flare_dist);
+    float einstein_ring = exp(-pow((flare_dist - 1.28) / 0.16, 2.0));
 
-    // 4. KORONA PLASMA SURYA & PUSARAN FUSI (Solar Prominence / Flares)
+    // 4. KORONA PLASMA VOID & KELAP-KELIP ELEKTRIK
     vec2 polar_coords = vec2(angle * 2.5 + TIME * (0.8 + instability * 2.0), dist * 10.0 - TIME * 1.5);
     float plasma_noise = fbm(polar_coords);
     float corona_mask = smoothstep(1.78, 0.94, flare_dist + (plasma_noise - 0.5) * 0.42);
 
-    // 5. INTI FUSI PADAT (Micro-Star Core)
-    float core_mask = smoothstep(1.02, 0.80, flare_dist);
-    float center_hotspot = smoothstep(0.45, 0.0, flare_dist);
+    // 5. INTI VOID PEKAT (Event Horizon Void Singularity - BUKAN PUTIH MENYILAU KAN!)
+    // Inti menyerap cahaya (Obsidian Void), dikelilingi batas ergosfer neon yang tajam
+    float core_mask = smoothstep(1.02, 0.78, flare_dist);
+    float event_horizon = smoothstep(0.92, 0.62, flare_dist);
 
-    // Pendaran medan magnet di tepi fusi
-    float magnetic_rim = smoothstep(1.20, 0.96, flare_dist) * smoothstep(0.82, 1.02, flare_dist);
-    magnetic_rim += 0.38 * sin(angle * 12.0 + TIME * 8.0) * magnetic_rim;
+    // 6. FILAMEN PETIR MAGENTA PROCEDURAL DI SEPANJANG RIM & KORONA
+    vec2 lightning_uv1 = vec2(angle * 4.0 + sin(TIME * 7.5) * 0.6, flare_dist * 7.0 - TIME * 4.5);
+    float lightning_noise1 = fbm(lightning_uv1);
+    float arc_filaments = smoothstep(0.47, 0.52, lightning_noise1) * smoothstep(0.57, 0.52, lightning_noise1);
+    float rim_arcs = arc_filaments * smoothstep(1.52, 0.88, flare_dist) * smoothstep(0.60, 0.95, flare_dist);
 
-    // 6. EFEK PERCIKAN TERGERUS DI AREA DENT
+    // Sambaran percikan petir kedua berkecepatan tinggi (Micro-Arcs)
+    float micro_spark = hash21(vec2(floor(angle * 14.0 + sin(TIME * 15.0)), floor(TIME * 22.0)));
+    float spark_flash = smoothstep(0.72, 1.0, micro_spark) * smoothstep(1.22, 0.92, flare_dist) * smoothstep(0.72, 0.96, flare_dist);
+
+    // Pendaran cincin magnetik neon magenta di tepi event horizon
+    float magnetic_rim = smoothstep(1.22, 0.96, flare_dist) * smoothstep(0.80, 1.02, flare_dist);
+    magnetic_rim += 0.42 * sin(angle * 10.0 + TIME * 9.0) * magnetic_rim;
+
+    // 7. EFEK PERCIKAN PETIR TERGERUS DI AREA DENT (Laser Contact)
     float dent_sparks = 0.0;
-    if (hit_cavitation > 0.05 && ang_diff < 0.6) {
-        float spark_noise = hash21(vec2(angle * 20.0, floor(TIME * 30.0)));
-        dent_sparks = smoothstep(0.65, 1.0, spark_noise) * hit_cavitation * 2.5;
+    if (hit_cavitation > 0.05 && ang_diff < 0.65) {
+        float spark_noise = hash21(vec2(angle * 24.0, floor(TIME * 35.0)));
+        dent_sparks = smoothstep(0.52, 1.0, spark_noise) * hit_cavitation * 2.8;
     }
 
-    // 7. KOMPOSISI WARNA & ALPHA TRANSPARAN MURNI (BEBAS LINGKARAN HITAM!)
-    vec4 dynamic_core = mix(core_color, critical_overload_color, instability * 0.85);
-    vec4 dynamic_corona = mix(corona_color, core_color, instability * 0.5);
-
+    // 8. KOMPOSISI WARNA & ALPHA TRANSPARAN MURNI
     vec3 rgb = vec3(0.0);
     float alpha = 0.0;
 
-    // A. Aura Akresi Materi Eksotis & Cincin Foton (tipis & tembus pandang agar grid di belakang tetap terlihat)
-    vec3 accretion_rgb = mix(vec3(0.55, 0.18, 1.15), rim_electric_color.rgb, vortex_arms * 0.65);
-    float accretion_alpha = (accretion_zone * (0.14 + 0.18 * vortex_arms) + einstein_ring * 0.28) * clamp(lensing_strength * 5.5, 0.25, 1.25);
-    rgb += accretion_rgb * accretion_alpha * 1.8;
+    // A. Aura Akresi Materi Void & Cincin Einstein Magenta-Violet
+    vec3 accretion_rgb = mix(nebula_violet_color.rgb, electric_magenta_color.rgb, vortex_arms * 0.75);
+    float accretion_alpha = (accretion_zone * (0.16 + 0.22 * vortex_arms) + einstein_ring * 0.32) * clamp(lensing_strength * 5.5, 0.25, 1.25);
+    rgb += accretion_rgb * accretion_alpha * 1.6;
     alpha = max(alpha, accretion_alpha);
 
-    // B. Pendaran Korona Plasma
-    vec3 corona_rgb = dynamic_corona.rgb * (0.72 + 0.62 * plasma_noise);
-    float c_alpha = corona_mask * dynamic_corona.a;
+    // B. Pendaran Korona Plasma Nebula Violet
+    vec3 corona_rgb = nebula_violet_color.rgb * (0.68 + 0.58 * plasma_noise);
+    float c_alpha = corona_mask * nebula_violet_color.a;
     rgb = mix(rgb, corona_rgb, c_alpha);
     alpha = max(alpha, c_alpha);
 
-    // C. Cincin Magnetik Sian-Elektrik
-    rgb += rim_electric_color.rgb * (magnetic_rim * 1.55);
-    alpha = max(alpha, clamp(magnetic_rim * 0.85, 0.0, 1.0));
+    // C. Cincin Magnetik Neon Magenta & Filamen Petir
+    vec3 rim_rgb = electric_magenta_color.rgb * (magnetic_rim * 1.75);
+    vec3 lightning_rgb = hot_pink_accent.rgb * (rim_arcs * 3.4 + spark_flash * 2.4);
+    rgb += rim_rgb + lightning_rgb;
+    alpha = max(alpha, clamp(magnetic_rim * 0.88 + rim_arcs * 0.95, 0.0, 1.0));
 
-    // D. Inti Fusi Putih-Emas Padat
-    vec3 core_rgb = mix(dynamic_corona.rgb, dynamic_core.rgb, core_mask);
-    core_rgb += vec3(1.5, 1.5, 1.5) * center_hotspot;
-    core_rgb += vec3(2.0, 2.0, 2.0) * dent_sparks;
+    // D. Inti Void Gelap (Obsidian Void Core) - Menutupi bagian dalam dengan kegelapan kosmik
+    vec3 core_rgb = void_core_color.rgb;
+    // Tepi dalam event horizon diberi pendaran tipis ungu-magenta
+    core_rgb += nebula_violet_color.rgb * 0.18 * (1.0 - event_horizon);
+    core_rgb += hot_pink_accent.rgb * (dent_sparks * 2.2);
+
     rgb = mix(rgb, core_rgb, core_mask);
     alpha = max(alpha, core_mask);
 
-    // E. Efek Kilau Kritis saat Overload
-    if (instability > 0.7) {
-        float crit_flash = sin(TIME * 35.0) * 0.5 + 0.5;
-        rgb += critical_overload_color.rgb * (crit_flash * (instability - 0.7) * 2.2 * core_mask);
+    // E. Efek Kilau Kritis saat Overload (Supernova Magenta Surge)
+    if (instability > 0.65) {
+        float crit_flash = sin(TIME * 36.0) * 0.5 + 0.5;
+        float crit_ratio = (instability - 0.65) / 0.35;
+        rgb += critical_overload_color.rgb * (crit_flash * crit_ratio * 2.5 * core_mask);
     }
 
     COLOR = vec4(rgb, clamp(alpha * boundary_mask, 0.0, 1.0));

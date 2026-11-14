@@ -148,6 +148,7 @@ public partial class Asteroid : RigidBody2D
     [Export] public bool IsEnergyAsteroid { get; set; } = false;
     [Export] public bool IsScanned { get; set; } = false;
     [Export] public bool IsBirthAnimationActive { get; set; } = false;
+    [Export] public bool IsGravitationalShowcaseTarget { get; set; } = false;
     public Vector2 BirthRiftOrigin { get; set; } = Vector2.Zero;
     public Vector2 BirthEjectDirection { get; set; } = Vector2.Right;
 
@@ -236,10 +237,52 @@ public partial class Asteroid : RigidBody2D
 
     // Animasi Kelahiran Asteroid dari White Hole (Efek Jin Aladdin / Genie Effect)
     private float _birthAnimTimer = 0.0f;
-    private const float BirthAnimDuration = 1.65f;
+    private const float BirthAnimDuration = 2.40f;
     private float _birthGlow = 0.0f;
     private float _birthLongitudinalScale = 1.0f;
     private float _birthLateralScale = 1.0f;
+    private float _birthEjectSpeed = 280.0f;
+    private float _postBirthCoastTimer = 0.0f;
+    private float _inStarGravityFieldTimer = 0.0f;
+    private bool _hasTriggeredUmbilicalSnap = false;
+    private float _genieWavePhase = 0.0f;
+
+    // Pre-allocated buffers untuk DrawGenieUmbilicalFunnel (Zero GC per frame)
+    private const int FunnelSliceCount = 16;
+    private readonly Vector2[] _funnelOuterPoly = new Vector2[(FunnelSliceCount + 1) * 2];
+    private readonly Vector2[] _funnelMidPoly = new Vector2[(FunnelSliceCount + 1) * 2];
+    private readonly Vector2[] _funnelCorePoly = new Vector2[(FunnelSliceCount + 1) * 2];
+    private readonly Vector2[] _funnelSpineCenters = new Vector2[FunnelSliceCount + 1];
+    private readonly float[] _funnelSliceWidths = new float[FunnelSliceCount + 1];
+
+    // Pre-allocated buffers untuk Petir Magenta (Void Lightning Arcs - Zero GC)
+    private const int MaxLightningSegments = 12;
+    private readonly Vector2[] _lightningArcBuffer = new Vector2[MaxLightningSegments + 1];
+
+    // Sistem Akresi Korosi Voxel Asteroid (Zero GC per frame)
+    private struct AccretionVoxelParticle
+    {
+        public Vector2 WorldPos;
+        public Vector2 Velocity;
+        public Color Color;
+        public float Size;
+        public float OrbitAngle;
+        public float OrbitRadius;
+        public float InfallSpeed;
+        public float AngularSpeed;
+        public bool HasCapturedOrbit;
+        public float Lifetime;
+        public float MaxLifetime;
+        public float Rotation;
+        public float RotSpeed;
+    }
+
+    private float _accretionErodeTimer = 0.0f;
+    private const float AccretionErodeInterval = 0.14f;
+    private readonly List<(Vector2 worldCenter, VoxelType type)> _erodedVoxelBuffer = new(8);
+    private readonly List<AccretionVoxelParticle> _accretionVoxels = new(64);
+    private readonly Vector2[] _voxelQuadBuffer = new Vector2[4];
+    private readonly Vector2[] _voxelOutlineBuffer = new Vector2[5];
 
     // Komponen Visual Bintang Mini & Gravitational Lensing (Shader Anomali Singularitas)
     private BackBufferCopy? _energyBackBuffer;
@@ -267,7 +310,7 @@ public partial class Asteroid : RigidBody2D
             ResourceType.Quartz => new Color(0.3f, 2.4f, 3.1f, 1.0f),     // Sian Elektrik
             ResourceType.Carbide => new Color(3.3f, 0.65f, 0.22f, 1.0f),  // Merah Bara
             ResourceType.Vortexum => new Color(0.35f, 2.9f, 1.25f, 1.0f), // Hijau Zamrud
-            ResourceType.Aether => new Color(3.8f, 3.2f, 1.15f, 1.0f),    // Putih-Emas Menyala
+            ResourceType.Aether => new Color(5.4f, 0.42f, 4.3f, 1.0f),    // Neon Magenta Menyala (Void Lightning)
             _ => new Color(2.3f, 2.5f, 0.35f, 1.0f)
         };
     }
@@ -457,8 +500,11 @@ public partial class Asteroid : RigidBody2D
         {
             _birthGlow = 1.0f;
             _birthAnimTimer = 0.0f;
-            _birthLongitudinalScale = 0.12f;
-            _birthLateralScale = 0.06f;
+            _birthEjectSpeed = MathF.Max(260.0f, LinearVelocity.Length());
+            _postBirthCoastTimer = 5.5f;
+            _hasTriggeredUmbilicalSnap = false;
+            _birthLongitudinalScale = 0.08f;
+            _birthLateralScale = 0.04f;
             if (_collisionShape != null)
             {
                 _collisionShape.SetDeferred(CollisionShape2D.PropertyName.Disabled, true);
@@ -494,7 +540,8 @@ public partial class Asteroid : RigidBody2D
                 CustomMinimumSize = new Vector2(boxSize, boxSize),
                 Size = new Vector2(boxSize, boxSize),
                 Position = new Vector2(-boxSize * 0.5f, -boxSize * 0.5f),
-                MouseFilter = Control.MouseFilterEnum.Ignore
+                MouseFilter = Control.MouseFilterEnum.Ignore,
+                ShowBehindParent = true
             };
             AddChild(_energyStarRect);
         }
@@ -511,9 +558,9 @@ public partial class Asteroid : RigidBody2D
 
         Color[] photonPalette = new Color[]
         {
-            new(3.8f, 3.2f, 1.15f, 0.95f), // Aether White-Gold
-            new(0.45f, 2.8f, 3.9f, 0.95f), // Electric Cyan
-            new(2.2f, 1.4f, 3.6f, 0.90f)   // Cosmic Indigo-Violet
+            new(5.4f, 0.42f, 4.3f, 0.95f), // Electric Neon Magenta
+            new(2.4f, 0.35f, 3.8f, 0.90f), // Cosmic Void Violet
+            new(6.2f, 2.2f, 5.8f, 0.95f)  // Hot Pink Accent
         };
 
         for (int i = 0; i < InfallPhotonCount; i++)
@@ -1265,40 +1312,49 @@ public partial class Asteroid : RigidBody2D
             float dt = (float)delta;
             bool needsRedraw = false;
 
-            // Animasi Kelahiran Asteroid dari White Hole: EFEK JIN ALADDIN / MAC OS GENIE EFFECT
+            // Animasi Kelahiran Asteroid dari White Hole: UPGRADED ALADDIN LAMP / MAC OS GENIE EFFECT
             if (IsBirthAnimationActive)
             {
                 _birthAnimTimer += dt;
+                _genieWavePhase += dt * 12.5f;
                 float p = Mathf.Clamp(_birthAnimTimer / BirthAnimDuration, 0.0f, 1.0f);
 
-                // Genie Effect Non-Uniform Taffy Stretch:
-                // Sambil ditarik keluar sepanjang sumbu lontaran:
-                // 1. Sumbu Membujur (Longitudinal): ditarik memanjang ke depan seperti asap lampu jin (hingga 1.55x)
-                // 2. Sumbu Melintang (Lateral): diperas sangat tipis di leher lubang (0.06x -> 0.48x),
-                //    kemudian menggelembung mekar seperti balon saat keluar dari White Hole (hingga 1.24x),
-                //    lalu tali plasma putus pada p=0.75 dan asteroid membal (elastic harmonic wobble) ke bentuk stabil.
-                if (p < 0.45f)
+                // Selama fase keluar dari mulut White Hole (p < 0.76), jaga laju lontaran agar corong Genie
+                // benar-benar memanjang keluar dengan megah sebelum tali pusar putus!
+                if (p < 0.42f)
                 {
-                    float t1 = p / 0.45f;
-                    _birthLongitudinalScale = Mathf.Lerp(0.12f, 1.55f, MathF.Sqrt(t1));
-                    _birthLateralScale = Mathf.Lerp(0.06f, 0.48f, t1 * t1);
+                    float t1 = p / 0.42f;
+                    _birthLongitudinalScale = Mathf.Lerp(0.08f, 1.95f, MathF.Sqrt(t1));
+                    _birthLateralScale = Mathf.Lerp(0.04f, 0.58f, t1 * t1);
+                    LinearVelocity = LinearVelocity.Lerp(BirthEjectDirection * _birthEjectSpeed, dt * 3.5f);
                 }
-                else if (p < 0.75f)
+                else if (p < 0.76f)
                 {
-                    float t2 = (p - 0.45f) / 0.30f;
-                    _birthLongitudinalScale = Mathf.Lerp(1.55f, 1.05f, t2);
-                    _birthLateralScale = Mathf.Lerp(0.48f, 1.24f, MathF.Sqrt(t2));
+                    float t2 = (p - 0.42f) / 0.34f;
+                    _birthLongitudinalScale = Mathf.Lerp(1.95f, 1.10f, t2);
+                    _birthLateralScale = Mathf.Lerp(0.58f, 1.36f, MathF.Sqrt(t2));
+                    LinearVelocity = LinearVelocity.Lerp(BirthEjectDirection * (_birthEjectSpeed * 0.88f), dt * 2.8f);
                 }
                 else
                 {
-                    // Tali pusar putus: getaran elastis damped harmonic settling
-                    float t3 = (p - 0.75f) / 0.25f;
-                    float wobble = MathF.Sin(t3 * Mathf.Tau * 1.5f) * MathF.Exp(-t3 * 3.2f) * 0.16f;
-                    _birthLongitudinalScale = Mathf.Lerp(1.05f, 1.0f, t3) - wobble;
-                    _birthLateralScale = Mathf.Lerp(1.24f, 1.0f, t3) + wobble;
+                    // Tali pusar plasma PUTUS pada p = 0.76! Berikan hentakan elastis ke depan + efek recoil
+                    if (!_hasTriggeredUmbilicalSnap)
+                    {
+                        _hasTriggeredUmbilicalSnap = true;
+                        Vector2 snapPos = GlobalPosition - BirthEjectDirection * (Radius * 0.65f);
+                        LinearVelocity += BirthEjectDirection * 125.0f;
+                        PlayerCamera.Instance?.TriggerShake(14.0f);
+                        SwarmSimulation.Instance?.TriggerGenieUmbilicalSnapFx(snapPos, BirthRiftOrigin, ResourceGlowColor);
+                    }
+
+                    // Getaran elastis (damped harmonic jelly settling) setelah terlepas dari corong
+                    float t3 = (p - 0.76f) / 0.24f;
+                    float wobble = MathF.Sin(t3 * Mathf.Tau * 2.4f) * MathF.Exp(-t3 * 3.2f) * 0.26f;
+                    _birthLongitudinalScale = Mathf.Lerp(1.10f, 1.0f, t3) - wobble;
+                    _birthLateralScale = Mathf.Lerp(1.36f, 1.0f, t3) + wobble;
                 }
 
-                _birthGlow = 1.0f - p;
+                _birthGlow = MathF.Pow(1.0f - p, 0.75f);
 
                 if (_birthAnimTimer >= BirthAnimDuration)
                 {
@@ -1312,6 +1368,10 @@ public partial class Asteroid : RigidBody2D
                     }
                 }
                 needsRedraw = true;
+            }
+            else if (_postBirthCoastTimer > 0.0f)
+            {
+                _postBirthCoastTimer -= dt;
             }
 
             // =========================================================================
@@ -1339,18 +1399,42 @@ public partial class Asteroid : RigidBody2D
                 }
             }
 
-            // Jaga kecepatan hanyut tetap pelan & stabil khas objek kosmik (antara 4.0 - 14.0 px/s)
-            float currentSpeed = LinearVelocity.Length();
-            if (currentSpeed > 14.0f)
+            if (_inStarGravityFieldTimer > 0.0f)
             {
-                LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 12.0f, dt * 2.0f);
-            }
-            else if (currentSpeed < 3.5f && currentSpeed > 0.01f)
-            {
-                LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 5.0f, dt * 2.0f);
+                _inStarGravityFieldTimer -= dt;
             }
 
-            // Perlindungan Batas Sektor (12.000 x 12.000 px) & Area Kapal Induk Pemain (Pusat 0,0)
+            // Jaga kecepatan hanyut tetap pelan & stabil HANYA jika asteroid tidak sedang dalam proses
+            // Kelahiran Genie, meluncur pasca-kelahiran, atau ditarik gravitasi Bintang Aether!
+            bool isUnderDynamicTrajectory = IsBirthAnimationActive
+                || _postBirthCoastTimer > 0.0f
+                || _inStarGravityFieldTimer > 0.0f
+                || IsGravitationalShowcaseTarget;
+
+            float currentSpeed = LinearVelocity.Length();
+            if (!isUnderDynamicTrajectory)
+            {
+                if (currentSpeed > 14.0f)
+                {
+                    LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 12.0f, dt * 2.0f);
+                }
+                else if (currentSpeed < 3.5f && currentSpeed > 0.01f)
+                {
+                    LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 5.0f, dt * 2.0f);
+                }
+            }
+            else if (!IsBirthAnimationActive && _inStarGravityFieldTimer <= 0.0f && currentSpeed > 65.0f)
+            {
+                // Deselerasi kosmik mulus pasca-lontaran White Hole
+                LinearVelocity = LinearVelocity.Normalized() * Mathf.Lerp(currentSpeed, 48.0f, dt * 0.65f);
+            }
+            else if (_inStarGravityFieldTimer > 0.0f && currentSpeed > 360.0f)
+            {
+                // Batas kecepatan maksimal saat terhisap ke dalam sumur gravitasi bintang
+                LinearVelocity = LinearVelocity.Normalized() * 360.0f;
+            }
+
+            // Perlindungan Batas Sektor (12.000 x 12.000 px)
             float maxBoundary = 5700.0f - OuterBoundRadius;
             Vector2 pos = GlobalPosition;
             if (MathF.Abs(pos.X) > maxBoundary || MathF.Abs(pos.Y) > maxBoundary)
@@ -1358,17 +1442,21 @@ public partial class Asteroid : RigidBody2D
                 Vector2 toCenter = (-pos).Normalized();
                 LinearVelocity = LinearVelocity.Lerp(toCenter * 8.0f, dt * 1.5f);
             }
-            float distToPlayerSpawn = pos.Length();
-            if (distToPlayerSpawn < 950.0f)
+            if (!isUnderDynamicTrajectory)
             {
-                Vector2 awayFromCenter = pos.LengthSquared() > 1.0f ? pos.Normalized() : Vector2.Right;
-                LinearVelocity = LinearVelocity.Lerp(awayFromCenter * 10.0f, dt * 2.0f);
+                float distToPlayerSpawn = pos.Length();
+                if (distToPlayerSpawn < 850.0f)
+                {
+                    Vector2 awayFromCenter = pos.LengthSquared() > 1.0f ? pos.Normalized() : Vector2.Right;
+                    LinearVelocity = LinearVelocity.Lerp(awayFromCenter * 10.0f, dt * 2.0f);
+                }
             }
 
             // Asteroid Energy (ActiveStar): Update Visual Shader Bintang Mini & Gravitational Lensing
             if (IsEnergyAsteroid)
             {
                 _energyPulseTimer += dt * 3.2f;
+                needsRedraw = true; // Animasi petir magenta dinamis setiap frame
 
                 if (_energyStarMaterial != null)
                 {
@@ -1406,45 +1494,8 @@ public partial class Asteroid : RigidBody2D
                     _energyStarMaterial.SetShaderParameter("hit_angle", _energyLaserHitAngle);
                     _energyStarMaterial.SetShaderParameter("hit_cavitation", _energyLaserCavitation);
 
-                    // MEDAN GRAVITASI MAUT (Gravitational Hazard & Event Horizon Pull)
-                    float gravityRadius = Radius * 4.5f;
-                    float eventHorizonRadius = Radius * 0.42f;
-
-                    if (PlayerCore.Instance != null && IsInstanceValid(PlayerCore.Instance))
-                    {
-                        float playerDist = CachedPosition.DistanceTo(PlayerCore.Instance.GlobalPosition);
-                        if (playerDist < gravityRadius)
-                        {
-                            Vector2 pullDir = (CachedPosition - PlayerCore.Instance.GlobalPosition).Normalized();
-                            float pullRatio = 1.0f - (playerDist / gravityRadius);
-                            float pullForce = Mathf.Lerp(60.0f, 520.0f, pullRatio * pullRatio);
-                            PlayerCore.Instance.Velocity += pullDir * (pullForce * dt);
-
-                            if (playerDist < eventHorizonRadius)
-                            {
-                                PlayerCore.Instance.TakeDamage(99999.0f, -pullDir);
-                            }
-                        }
-                    }
-
-                    for (int a = 0; a < ActiveAsteroids.Count; a++)
-                    {
-                        var other = ActiveAsteroids[a];
-                        if (other == this || other._isDestroyed || other.IsInSeedCycle || !IsInstanceValid(other)) continue;
-                        float aDist = CachedPosition.DistanceTo(other.CachedPosition);
-                        if (aDist < gravityRadius + other.OuterBoundRadius)
-                        {
-                            Vector2 toStar = (CachedPosition - other.CachedPosition).Normalized();
-                            float f = Mathf.Lerp(40.0f, 320.0f, 1.0f - (aDist / (gravityRadius + other.OuterBoundRadius)));
-                            other.LinearVelocity += toStar * (f * dt);
-
-                            if (aDist < eventHorizonRadius + other.OuterBoundRadius * 0.35f)
-                            {
-                                other.DestroyAsteroid();
-                                _energyAccumulatedHeat = Mathf.Min(0.95f, _energyAccumulatedHeat + 0.15f);
-                            }
-                        }
-                    }
+                    // MEDAN GRAVITASI MAUT SUPER-KUAT (Player Pull + Asteroid Spaghettification & Consumption)
+                    ExecuteAetherStarGravitationalField(dt, currentInstability, 1.0f);
                 }
 
                 if (_crystalSpires.Length > 0)
@@ -1527,6 +1578,7 @@ public partial class Asteroid : RigidBody2D
         _activeHeatedIndices.Clear();
         _heatedThisFrame.Clear();
         _seedDriftTrailWorld.Clear();
+        _accretionVoxels.Clear();
 
         LinearVelocity = Vector2.Zero;
         AngularVelocity = 0.0f;
@@ -1875,6 +1927,13 @@ public partial class Asteroid : RigidBody2D
                     }
                 }
 
+                // Selama paruh kedua Spacetime Infall, bintang yang sedang lahir kembali mulai menarik objek sekitar
+                if (p > 0.35f)
+                {
+                    float infallScale = (p - 0.35f) / 0.65f;
+                    ExecuteAetherStarGravitationalField(dt, p * 0.5f, infallScale * 0.75f);
+                }
+
                 if (_seedStageTimer >= SpacetimeInfallDuration)
                 {
                     ReincarnateAsNewAetherStar();
@@ -1950,12 +2009,17 @@ public partial class Asteroid : RigidBody2D
 
             if (PolygonVertices.Length < 3) return;
 
-            // RENDER KHUSUS ASTEROID ENERGY (MINI STAR SINGULARITY SHADER / FALLBACK VECTOR)
+            // RENDER KHUSUS ASTEROID ENERGY (MINI STAR SINGULARITY SHADER / VOID LIGHTNING)
             if (IsEnergyAsteroid)
             {
                 if (_energyStarMaterial == null)
                 {
                     DrawEnergyCrystalSpireCluster();
+                }
+                else
+                {
+                    DrawVoidLightningBolts();
+                    DrawAccretionVoxels();
                 }
                 return;
             }
@@ -1967,41 +2031,59 @@ public partial class Asteroid : RigidBody2D
                 RebuildBatchedRenderGeometry();
             }
 
-            // Genie Effect Transform Matrix:
-            // Mentransformasikan seluruh geometri tubuh asteroid (batu, vein, dinding terowongan, outline)
-            // dengan distorsi non-uniform taffy stretch (seperti efek lampu Aladdin / macOS Genie)
-            // tanpa mengubah skala RigidBody2D fisik Godot!
-            bool isGenieActive = IsBirthAnimationActive && (_birthLongitudinalScale != 1.0f || _birthLateralScale != 1.0f);
+            // =========================================================================
+            // DEFORMASI MATRIKS 2D UNIFIKASI (ZERO GC, ZERO SPIKES, 100% GODOT BATCHING)
+            // =========================================================================
+            bool isGenieActive = IsBirthAnimationActive;
+            bool hasDeformation = isGenieActive;
+
+            Transform2D deformXform = Transform2D.Identity;
+            Vector2 localEjectDir = Vector2.Zero;
+            Vector2 genieLead = Vector2.Zero;
+
             if (isGenieActive)
             {
-                float localAngle = BirthEjectDirection.Angle() - CachedRotation;
-                Transform2D rotTo = new Transform2D(-localAngle, Vector2.Zero);
-                Transform2D scaleMat = Transform2D.Identity.Scaled(new Vector2(_birthLongitudinalScale, _birthLateralScale));
-                Transform2D rotBack = new Transform2D(localAngle, Vector2.Zero);
-
-                // Sedikit pergeseran titik tumpu maju agar ujung depan asteroid memimpin keluar
-                Vector2 localDir = BirthEjectDirection.Rotated(-CachedRotation);
+                localEjectDir = BirthEjectDirection.Rotated(-CachedRotation);
+                float angle = localEjectDir.Angle();
+                Vector2 localPerp = new Vector2(-localEjectDir.Y, localEjectDir.X);
                 float p = Mathf.Clamp(_birthAnimTimer / BirthAnimDuration, 0.0f, 1.0f);
-                float leadOffset = (1.0f - _birthLongitudinalScale) * Radius * 0.25f * (1.0f - p);
-                Transform2D leadShift = Transform2D.Identity.Translated(localDir * leadOffset);
+                float snakeWave = MathF.Sin(p * Mathf.Tau * 1.4f - _genieWavePhase * 0.5f) * (1.0f - p * 0.75f) * (Radius * 0.36f);
+                genieLead = localEjectDir * (Radius * (1.0f - _birthLateralScale) * 0.45f) + localPerp * snakeWave;
 
-                DrawSetTransformMatrix(leadShift * rotBack * scaleMat * rotTo);
+                Transform2D rotTo = new Transform2D(-angle, Vector2.Zero);
+                Transform2D scaleMat = Transform2D.Identity.Scaled(new Vector2(_birthLongitudinalScale, _birthLateralScale));
+                Transform2D rotBack = new Transform2D(angle, Vector2.Zero);
+                Transform2D shiftMat = Transform2D.Identity.Translated(genieLead);
+                deformXform = shiftMat * rotBack * scaleMat * rotTo;
+
+                // 0b. Gambar corong tali pusar White Hole (Genie Umbilical Funnel)
+                DrawGenieUmbilicalFunnel(localEjectDir, genieLead);
+            }
+
+            // Terapkan matriks deformasi agar seluruh elemen tubuh asteroid
+            // (batu utuh, voxel ukiran, kristal resource, dinding gua, garis batas)
+            // bertransformasi secara serempak & presisi 100% pada hardware GPU tanpa distorsi lipatan!
+            if (hasDeformation)
+            {
+                DrawSetTransformMatrix(deformXform);
             }
 
             // 1. Gambar Badan Asteroid Batu Biasa
+            Color activeRockColor = _rockBodyColor;
+
             if (_carvedVoxelCount == 0)
             {
-                DrawColoredPolygon(PolygonVertices, _rockBodyColor);
+                DrawColoredPolygon(PolygonVertices, activeRockColor);
             }
             else
             {
                 for (int i = 0; i < _mergedRockRects.Count; i++)
                 {
-                    DrawRect(_mergedRockRects[i], _rockBodyColor, true);
+                    DrawRect(_mergedRockRects[i], activeRockColor, true);
                 }
             }
 
-            // 2. Gambar Patch Resource
+            // 2. Gambar Patch Resource (tetap memakai DrawRect agar 100% ter-batch oleh GPU Godot!)
             float scanRatio;
             if (CurrentScannerCount <= 0)
             {
@@ -2011,6 +2093,11 @@ public partial class Asteroid : RigidBody2D
             {
                 float norm = Mathf.Clamp((float)CurrentScannerCount / 65.0f, 0.0f, 1.0f);
                 scanRatio = 0.05f + 0.95f * MathF.Pow(norm, 1.35f);
+            }
+
+            if (isGenieActive)
+            {
+                scanRatio = MathF.Max(scanRatio, _birthGlow * 0.85f);
             }
 
             for (int t = 0; t < ResourceCount; t++)
@@ -2106,7 +2193,9 @@ public partial class Asteroid : RigidBody2D
             }
 
             // 6. Garis Kontur Luar Asteroid
-            Color outlineColor = _unscannedBorderColor;
+            Color outlineColor = isGenieActive
+                ? _unscannedBorderColor.Lerp(new Color(1.2f, 3.8f, 5.0f, 1.0f), _birthGlow * 0.8f)
+                : _unscannedBorderColor;
             float borderWidth = 2.2f;
 
             if (_carvedVoxelCount == 0)
@@ -2131,24 +2220,21 @@ public partial class Asteroid : RigidBody2D
                 DrawCircle(Vector2.Zero, Radius * progress * 0.68f, new Color(fractureColor.R, fractureColor.G, fractureColor.B, 0.28f * (1.0f - progress)));
             }
 
-            // 8. Render Pendaran Panas Super-Heated saat Asteroid Baru Lahir dari White Hole
+            // 8. Render Pendaran Panas Super-Heated & Cincin Plasma saat Asteroid Baru Lahir dari White Hole
             if (_birthGlow > 0.01f)
             {
-                Color birthThermal = new Color(5.5f, 4.8f, 3.2f, _birthGlow * 0.85f);
-                DrawCircle(Vector2.Zero, Radius * 0.96f, birthThermal);
-                DrawArc(Vector2.Zero, Radius * 1.05f, 0.0f, Mathf.Tau, 48, new Color(5.5f, 5.2f, 4.8f, _birthGlow), 3.5f, false);
+                Color birthThermal = new Color(5.5f, 4.8f, 3.2f, _birthGlow * 0.55f);
+                DrawCircle(Vector2.Zero, Radius * 0.55f, birthThermal);
+                if (_closedOutlinePoints.Length >= 3)
+                {
+                    DrawPolyline(_closedOutlinePoints, new Color(5.5f, 5.0f, 3.8f, _birthGlow * 0.85f), 3.6f, false);
+                }
             }
 
-            // Reset matrix transform kembali ke koordinat lokal normal untuk rendering tali pusar
-            if (isGenieActive)
+            // Kembalikan matriks transform ke Identity
+            if (hasDeformation)
             {
                 DrawSetTransformMatrix(Transform2D.Identity);
-            }
-
-            // 9. TALI PUSAR PLASMA KELAHIRAN JIN (Genie Umbilical Funnel)
-            if (IsBirthAnimationActive && _birthAnimTimer < BirthAnimDuration * 0.78f)
-            {
-                DrawGenieUmbilicalFunnel();
             }
         }
         catch (Exception ex)
@@ -2157,95 +2243,514 @@ public partial class Asteroid : RigidBody2D
         }
     }
 
-    private void DrawGenieUmbilicalFunnel()
+    private void DrawGenieUmbilicalFunnel(Vector2 localEjectDir, Vector2 leadShift)
     {
-        float p = Mathf.Clamp(_birthAnimTimer / (BirthAnimDuration * 0.78f), 0.0f, 1.0f);
-        float funnelAlpha = 1.0f - p;
-        if (funnelAlpha <= 0.01f) return;
-
+        float totalP = Mathf.Clamp(_birthAnimTimer / BirthAnimDuration, 0.0f, 1.0f);
         Vector2 riftLocal = FastWorldToLocal(BirthRiftOrigin);
-        Vector2 localEjectDir = BirthEjectDirection.Rotated(-CachedRotation);
+        Vector2 localPerp = new Vector2(-localEjectDir.Y, localEjectDir.X);
 
-        // Pangkal belakang asteroid (tempat menempelnya corong jin)
-        Vector2 asteroidBase = -localEjectDir * (Radius * _birthLongitudinalScale * 0.75f);
-        Vector2 spine = asteroidBase - riftLocal;
+        if (totalP >= 0.76f)
+        {
+            float recoilT = (totalP - 0.76f) / 0.24f;
+            float recoilAlpha = 1.0f - recoilT;
+            if (recoilAlpha <= 0.02f) return;
+
+            Vector2 severPoint = -localEjectDir * (Radius * 0.85f) + leadShift;
+            Vector2 retractEnd = severPoint.Lerp(riftLocal, MathF.Sqrt(recoilT));
+
+            const int WhipSegs = 12;
+            Vector2 prevPt = riftLocal;
+            for (int i = 1; i <= WhipSegs; i++)
+            {
+                float u = (float)i / WhipSegs;
+                float whipWave = MathF.Sin(u * Mathf.Pi * 3.5f + recoilT * 26.0f) * (1.0f - recoilT) * 32.0f * u;
+                Vector2 curPt = riftLocal.Lerp(retractEnd, u) + localPerp * whipWave;
+                float w = Mathf.Lerp(18.0f, 3.5f, u) * recoilAlpha;
+                DrawLine(prevPt, curPt, new Color(5.8f, 4.8f, 2.2f, recoilAlpha * 0.92f), w);
+                DrawLine(prevPt, curPt, new Color(0.85f, 3.8f, 5.5f, recoilAlpha * 0.88f), w * 0.45f);
+                prevPt = curPt;
+            }
+
+            float snapRingR = Mathf.Lerp(14.0f, Radius * 0.75f, MathF.Sqrt(recoilT));
+            DrawArc(severPoint, snapRingR, 0.0f, Mathf.Tau, 28, new Color(5.8f, 5.2f, 2.8f, recoilAlpha), 3.5f * recoilAlpha, true);
+            return;
+        }
+
+        float p = totalP / 0.76f;
+        float funnelAlpha = Mathf.Clamp(1.15f - p * 0.65f, 0.0f, 1.0f);
+
+        Vector2 asteroidTail = -localEjectDir * (Radius * _birthLongitudinalScale * 0.85f) + leadShift;
+        Vector2 spine = asteroidTail - riftLocal;
         float spineLen = spine.Length();
-        if (spineLen < 6.0f) return;
+        if (spineLen < 4.0f) return;
 
         Vector2 spineDir = spine / spineLen;
         Vector2 spinePerp = new Vector2(-spineDir.Y, spineDir.X);
 
-        // Lebar corong: sempit di mulut white hole, melebar di pangkal asteroid (efek terompet/lampu jin)
-        float mouthWidth = Mathf.Lerp(24.0f, 12.0f, p);
-        float baseWidth = Radius * 2.0f * _birthLateralScale * 0.65f;
+        // Mulut corong White Hole lebar dan menyembur kuat (trumpet flare)
+        float mouthWidth = Mathf.Lerp(48.0f, 12.0f, p * p);
+        float baseWidth = MathF.Max(26.0f, Radius * 2.0f * _birthLateralScale * 0.65f);
 
-        const int SliceCount = 8;
-        Vector2[] polyPts = new Vector2[(SliceCount + 1) * 2];
-        Vector2[] corePolyPts = new Vector2[(SliceCount + 1) * 2];
-
-        for (int i = 0; i <= SliceCount; i++)
+        for (int i = 0; i <= FunnelSliceCount; i++)
         {
-            float u = (float)i / SliceCount; // 0 di white hole, 1 di asteroid base
-            Vector2 ptCenter = riftLocal.Lerp(asteroidBase, u);
-            // Non-linear cubic flare: ramping di pangkal lubang, melebar cepat mendekati asteroid
-            float flare = u * u * (3.0f - 2.0f * u);
-            float currentWidth = Mathf.Lerp(mouthWidth, baseWidth, flare);
+            float u = (float)i / FunnelSliceCount;
+            // Aliran fluida gelombang S-curve khas asap teko lampu jin
+            float sWave = MathF.Sin(u * Mathf.Pi * 2.2f - _genieWavePhase) * MathF.Sin(u * Mathf.Pi) * (36.0f * (1.0f - p * 0.40f));
+            Vector2 ptCenter = riftLocal.Lerp(asteroidTail, u) + spinePerp * sWave;
+            _funnelSpineCenters[i] = ptCenter;
 
-            Vector2 offset = spinePerp * (currentWidth * 0.5f);
-            polyPts[i] = ptCenter + offset;
-            polyPts[(SliceCount + 1) * 2 - 1 - i] = ptCenter - offset;
+            float trumpetFlare = u * MathF.Sqrt(u);
+            float peristalticPulse = 1.0f + 0.22f * MathF.Sin(u * 14.0f - _genieWavePhase * 1.8f);
+            float currentWidth = Mathf.Lerp(mouthWidth, baseWidth, trumpetFlare) * peristalticPulse;
 
-            Vector2 coreOffset = spinePerp * (currentWidth * 0.22f);
-            corePolyPts[i] = ptCenter + coreOffset;
-            corePolyPts[(SliceCount + 1) * 2 - 1 - i] = ptCenter - coreOffset;
-        }
-
-        // 1. Lapisan plasma luar: warna magma aetherik keemasan/cyan
-        Color sheathColor = new Color(3.6f, 2.2f, 0.8f, funnelAlpha * 0.75f);
-        DrawColoredPolygon(polyPts, sheathColor);
-
-        // 2. Lapisan inti putih-perak ultra panas di tengah corong
-        Color coreColor = new Color(5.5f, 5.2f, 4.6f, funnelAlpha * 0.95f);
-        DrawColoredPolygon(corePolyPts, coreColor);
-
-        // 3. Garis filament tegangan ruang-waktu di tepi corong
-        Color filamentCol = new Color(0.75f, 2.8f, 4.5f, funnelAlpha * 0.85f);
-        for (int i = 0; i < SliceCount; i++)
-        {
-            DrawLine(polyPts[i], polyPts[i + 1], filamentCol, 1.8f);
-            int idxR1 = (SliceCount + 1) * 2 - 1 - i;
-            int idxR2 = idxR1 - 1;
-            DrawLine(polyPts[idxR1], polyPts[idxR2], filamentCol, 1.8f);
-        }
-
-        // 4. Percikan plasma saat tali meregang mendekati batas putus
-        if (p > 0.45f)
-        {
-            float sparkRatio = (p - 0.45f) / 0.55f;
-            int sparkCount = 6;
-            for (int s = 0; s < sparkCount; s++)
+            if (p > 0.52f)
             {
-                float su = 0.30f + 0.60f * ((s * 0.17f + p * 1.8f) % 1.0f);
-                Vector2 sPos = riftLocal.Lerp(asteroidBase, su) + spinePerp * (MathF.Sin(s * 3.1f + p * 12.0f) * 14.0f * (1.0f - su));
-                DrawCircle(sPos, 2.4f * (1.0f - sparkRatio * 0.4f), new Color(5.0f, 4.5f, 2.5f, funnelAlpha));
+                float pinchProgress = (p - 0.52f) / 0.48f;
+                float du = (u - 0.42f) / 0.24f;
+                float pinchZone = MathF.Exp(-du * du);
+                currentWidth *= Mathf.Lerp(1.0f, 0.12f, pinchProgress * pinchZone);
             }
+
+            _funnelSliceWidths[i] = currentWidth;
+            int revIdx = (FunnelSliceCount + 1) * 2 - 1 - i;
+
+            Vector2 outerOff = spinePerp * (currentWidth * 0.54f);
+            _funnelOuterPoly[i] = ptCenter + outerOff;
+            _funnelOuterPoly[revIdx] = ptCenter - outerOff;
+
+            Vector2 midOff = spinePerp * (currentWidth * 0.35f);
+            _funnelMidPoly[i] = ptCenter + midOff;
+            _funnelMidPoly[revIdx] = ptCenter - midOff;
+
+            Vector2 coreOff = spinePerp * (currentWidth * 0.16f);
+            _funnelCorePoly[i] = ptCenter + coreOff;
+            _funnelCorePoly[revIdx] = ptCenter - coreOff;
+        }
+
+        Color resCol = ResourceGlowColor;
+        Color sheathColor = new Color(4.2f, 2.6f, 0.95f, funnelAlpha * 0.72f).Lerp(new Color(resCol.R, resCol.G, resCol.B, funnelAlpha * 0.72f), 0.35f);
+        DrawColoredPolygon(_funnelOuterPoly, sheathColor);
+        DrawColoredPolygon(_funnelMidPoly, new Color(0.85f, 3.4f, 5.2f, funnelAlpha * 0.82f));
+        DrawColoredPolygon(_funnelCorePoly, new Color(6.0f, 5.6f, 4.8f, funnelAlpha * 0.98f));
+
+        Vector2 prevHelixA = _funnelSpineCenters[0];
+        Vector2 prevHelixB = _funnelSpineCenters[0];
+        Color helixColA = new Color(5.8f, 5.0f, 2.4f, funnelAlpha * 0.95f);
+        Color helixColB = new Color(0.85f, 4.2f, 5.8f, funnelAlpha * 0.95f);
+
+        for (int i = 1; i <= FunnelSliceCount; i++)
+        {
+            float u = (float)i / FunnelSliceCount;
+            float phase = u * Mathf.Tau * 2.4f - _genieWavePhase * 1.5f;
+            float w = _funnelSliceWidths[i] * 0.48f;
+            float sinP = MathF.Sin(phase) * w;
+            Vector2 curA = _funnelSpineCenters[i] + spinePerp * sinP;
+            Vector2 curB = _funnelSpineCenters[i] - spinePerp * sinP;
+
+            DrawLine(prevHelixA, curA, helixColA, 2.4f);
+            DrawLine(prevHelixB, curB, helixColB, 2.2f);
+            prevHelixA = curA;
+            prevHelixB = curB;
+        }
+
+        for (int r = 0; r < 5; r++)
+        {
+            float ru = ((r * 0.2f) + (_genieWavePhase * 0.12f)) % 1.0f;
+            int idx = Math.Clamp((int)(ru * FunnelSliceCount), 0, FunnelSliceCount);
+            Vector2 rCenter = _funnelSpineCenters[idx];
+            float rHalfW = _funnelSliceWidths[idx] * 0.54f;
+            Color ringCol = new Color(5.8f, 5.4f, 3.8f, funnelAlpha * (1.0f - MathF.Abs(ru - 0.5f) * 1.4f));
+            DrawLine(rCenter - spinePerp * rHalfW, rCenter + spinePerp * rHalfW, ringCol, 3.2f);
+        }
+
+        DrawCircle(riftLocal, mouthWidth * 0.78f, new Color(6.0f, 5.6f, 5.2f, funnelAlpha * 0.95f));
+        DrawArc(riftLocal, mouthWidth * 1.20f, 0.0f, Mathf.Tau, 28, new Color(0.85f, 3.8f, 5.5f, funnelAlpha * 0.88f), 3.0f, true);
+    }
+
+    // =========================================================================
+    // SISTEM GRAVITASI BINTANG AETHER & TIDAL SPAGHETTIFICATION
+    // =========================================================================
+
+    private void ExecuteAetherStarGravitationalField(float dt, float currentInstability, float stageMultiplier)
+    {
+        float playerGravityRadius = MathF.Max(Radius * 9.0f, 940.0f) * (1.0f + currentInstability * 0.30f) * stageMultiplier;
+        float asteroidGravityRadius = MathF.Max(Radius * 12.0f, 1240.0f) * (1.0f + currentInstability * 0.35f) * stageMultiplier;
+        float eventHorizonRadius = Radius * 0.52f;
+
+        // 1. TARIKAN GRAVITASI & DISTORSI TIDAL PADA KAPAL PEMAIN (PLAYER CORE)
+        if (PlayerCore.Instance != null && IsInstanceValid(PlayerCore.Instance))
+        {
+            Vector2 toStarFromPlayer = CachedPosition - PlayerCore.Instance.GlobalPosition;
+            float playerDist = toStarFromPlayer.Length();
+            if (playerDist < playerGravityRadius && playerDist > 0.001f)
+            {
+                Vector2 pullDir = toStarFromPlayer / playerDist;
+                Vector2 swirlDir = new Vector2(-pullDir.Y, pullDir.X);
+                float pullRatio = Mathf.Clamp(1.0f - (playerDist / playerGravityRadius), 0.0f, 1.0f);
+
+                // Kurva gravitasi 2-tahap:
+                // - Sabuk luar: tarikan & pusaran orbit yang langsung terasa menggoyang arah terbang kapal
+                // - Zona dalam (pullRatio > 0.50): lonjakan kuadratik ekstrem yang menyedot kapal ke Event Horizon!
+                float basePull = Mathf.Lerp(240.0f, 1280.0f, pullRatio * pullRatio);
+                float innerSurge = pullRatio > 0.50f
+                    ? MathF.Pow((pullRatio - 0.50f) / 0.50f, 1.85f) * 1850.0f
+                    : 0.0f;
+                float totalPullAccel = (basePull + innerSurge) * (1.0f + currentInstability * 0.35f) * stageMultiplier;
+                float swirlAccel = Mathf.Lerp(95.0f, 480.0f, pullRatio * pullRatio) * stageMultiplier;
+
+                PlayerCore.Instance.Velocity += (pullDir * totalPullAccel + swirlDir * swirlAccel) * dt;
+                PlayerCore.Instance.ApplyGravityWellTidalStress(CachedPosition, pullRatio * stageMultiplier, dt);
+
+                if (playerDist < eventHorizonRadius && stageMultiplier >= 0.85f)
+                {
+                    PlayerCore.Instance.TakeDamage(99999.0f, -pullDir);
+                }
+            }
+        }
+
+        // 2. AKRESI KOROSI VOXEL PADA ASTEROID TERDEKAT (ACCRETION SURFACE EROSION)
+        UpdateAccretionVoxelErosion(dt, asteroidGravityRadius, stageMultiplier);
+    }
+
+    private void UpdateAccretionVoxelErosion(float dt, float maxReach, float stageMultiplier)
+    {
+        float captureR = OuterBoundRadius * 1.35f;
+        float eventHorizonR = OuterBoundRadius * 0.42f;
+
+        // 1. UPDATE SEMUA VOXEL AKRESI YANG SEDANG TERBANG & BERPUTAR
+        for (int i = _accretionVoxels.Count - 1; i >= 0; i--)
+        {
+            var p = _accretionVoxels[i];
+            p.Lifetime += dt;
+
+            if (!p.HasCapturedOrbit)
+            {
+                Vector2 toStar = CachedPosition - p.WorldPos;
+                float d = toStar.Length();
+                if (d <= captureR || p.Lifetime > 2.2f)
+                {
+                    p.HasCapturedOrbit = true;
+                    p.OrbitRadius = MathF.Max(captureR * 0.98f, d);
+                    p.OrbitAngle = (p.WorldPos - CachedPosition).Angle();
+                    p.AngularSpeed = (float)GD.RandRange(4.8, 8.2);
+                    p.InfallSpeed = (float)GD.RandRange(38.0, 75.0);
+                }
+                else
+                {
+                    Vector2 dir = toStar / MathF.Max(0.001f, d);
+                    Vector2 tang = new Vector2(-dir.Y, dir.X); // Arah pusaran orbit
+                    float accel = Mathf.Lerp(450.0f, 1250.0f, Mathf.Clamp(1.0f - d / maxReach, 0.0f, 1.0f));
+                    p.Velocity += (dir * accel + tang * (accel * 0.42f)) * dt;
+                    float curSpd = p.Velocity.Length();
+                    if (curSpd > 650.0f) p.Velocity = (p.Velocity / curSpd) * 650.0f;
+                    p.WorldPos += p.Velocity * dt;
+                    p.Rotation += p.RotSpeed * dt;
+                }
+            }
+            else
+            {
+                // Spiral Keplerian: semakin dekat ke inti void, kecepatan sudut semakin melonjak
+                p.OrbitRadius -= p.InfallSpeed * dt;
+                float keplerMult = MathF.Sqrt(captureR / MathF.Max(12.0f, p.OrbitRadius));
+                p.OrbitAngle += p.AngularSpeed * keplerMult * dt;
+                p.WorldPos = CachedPosition + new Vector2(MathF.Cos(p.OrbitAngle), MathF.Sin(p.OrbitAngle)) * p.OrbitRadius;
+                p.Rotation += p.RotSpeed * keplerMult * dt;
+
+                float sizeRatio = Mathf.Clamp((p.OrbitRadius - eventHorizonR) / (captureR - eventHorizonR), 0.0f, 1.0f);
+                p.Size = MathF.Max(1.5f, VoxelSize * 0.85f * MathF.Pow(sizeRatio, 0.65f));
+
+                if (p.OrbitRadius <= eventHorizonR)
+                {
+                    // Ditelan ke dalam Void Event Horizon!
+                    _energyAccumulatedHeat = MathF.Min(1.0f, _energyAccumulatedHeat + 0.005f);
+                    _energyLaserCavitation = MathF.Min(1.0f, _energyLaserCavitation + 0.12f);
+                    _accretionVoxels.RemoveAt(i);
+                    continue;
+                }
+            }
+
+            if (p.Lifetime >= p.MaxLifetime)
+            {
+                _accretionVoxels.RemoveAt(i);
+            }
+            else
+            {
+                _accretionVoxels[i] = p;
+            }
+        }
+
+        // 2. TARIKAN GRAVITASI HALUS PADA ASTEROID DI SEKITAR BINTANG
+        float maxReachSq = maxReach * maxReach;
+
+        for (int a = 0; a < ActiveAsteroids.Count; a++)
+        {
+            var other = ActiveAsteroids[a];
+            if (other == this || other._isDestroyed || other.IsEnergyAsteroid || other.IsInSeedCycle || !IsInstanceValid(other)) continue;
+            if (other.IsBirthAnimationActive && other._birthAnimTimer < 0.4f) continue;
+
+            Vector2 toStarVec = CachedPosition - other.CachedPosition;
+            float aDist = toStarVec.Length();
+            if (aDist < maxReach && aDist > 1.0f)
+            {
+                Vector2 toStarDir = toStarVec / aDist;
+                Vector2 tangDir = new Vector2(-toStarDir.Y, toStarDir.X);
+                float pullRatio = Mathf.Clamp(1.0f - (aDist / maxReach), 0.0f, 1.0f);
+
+                // Gravitasi dinamis: asteroid meluncur perlahan menuju bintang
+                float pullAccel = Mathf.Lerp(75.0f, 340.0f, pullRatio * pullRatio) * stageMultiplier;
+                float swirlAccel = Mathf.Lerp(25.0f, 130.0f, pullRatio) * stageMultiplier;
+
+                other.LinearVelocity += (toStarDir * pullAccel + tangDir * swirlAccel) * dt;
+                other._inStarGravityFieldTimer = 0.35f;
+
+                // Torsi rotasi kosmik pelan
+                other.AngularVelocity = Mathf.Lerp(other.AngularVelocity, 0.45f, dt * 2.5f);
+
+                // Jika asteroid menembus cakrawala peristiwa inti Void -> langsung hancur lebur!
+                if (aDist < Radius * 0.95f && !other._isDestroying)
+                {
+                    other.StartDestructionSequence();
+                }
+            }
+        }
+
+        // 3. TIMING PRETELIN VOXEL DARI ASTEROID TERDEKAT
+        _accretionErodeTimer += dt;
+        if (_accretionErodeTimer < AccretionErodeInterval) return;
+        _accretionErodeTimer = 0.0f;
+
+        // Cari asteroid batu terdekat yang masuk jangkauan gravitasi bintang
+        Asteroid? closestAsteroid = null;
+        float closestDistSq = float.MaxValue;
+
+        for (int a = 0; a < ActiveAsteroids.Count; a++)
+        {
+            var other = ActiveAsteroids[a];
+            if (other == this || other._isDestroyed || other.IsEnergyAsteroid || other.IsInSeedCycle || !IsInstanceValid(other)) continue;
+            if (other.IsBirthAnimationActive && other._birthAnimTimer < 0.4f) continue;
+
+            float dSq = CachedPosition.DistanceSquaredTo(other.CachedPosition);
+            if (dSq < maxReachSq && dSq < closestDistSq)
+            {
+                closestDistSq = dSq;
+                closestAsteroid = other;
+            }
+        }
+
+        if (closestAsteroid == null) return;
+
+        // Gunakan FindClosestSolidVoxel: 100% akurat menemukan voxel terdekat ke bintang & terjamin dicungkil!
+        if (closestAsteroid.FindClosestSolidVoxel(CachedPosition, out Vector2 closestVoxelPos, out VoxelType vType))
+        {
+            _erodedVoxelBuffer.Clear();
+            int carved = closestAsteroid.CarveVoxelCircle(closestVoxelPos, VoxelSize * 1.45f, _erodedVoxelBuffer);
+            if (carved > 0)
+            {
+                for (int v = 0; v < _erodedVoxelBuffer.Count; v++)
+                {
+                    var vox = _erodedVoxelBuffer[v];
+                    Color vCol;
+                    if (TryGetResourceType(vox.type, out ResourceType resT))
+                    {
+                        vCol = GetResourceColor(resT) * 1.6f;
+                        vCol.A = 1.0f;
+                    }
+                    else
+                    {
+                        vCol = closestAsteroid._rockBodyColor.Lerp(new Color(5.4f, 0.42f, 4.3f, 1.0f), 0.35f);
+                    }
+
+                    Vector2 toStar = CachedPosition - vox.worldCenter;
+                    Vector2 launchDir = toStar.Normalized();
+                    Vector2 perp = new Vector2(-launchDir.Y, launchDir.X);
+
+                    _accretionVoxels.Add(new AccretionVoxelParticle
+                    {
+                        WorldPos = vox.worldCenter,
+                        Velocity = launchDir * 240.0f + perp * ((GD.Randf() - 0.5f) * 110.0f),
+                        Color = vCol,
+                        Size = VoxelSize * 0.85f,
+                        OrbitAngle = 0.0f,
+                        OrbitRadius = 0.0f,
+                        InfallSpeed = 0.0f,
+                        AngularSpeed = 0.0f,
+                        HasCapturedOrbit = false,
+                        Lifetime = 0.0f,
+                        MaxLifetime = 3.6f,
+                        Rotation = GD.Randf() * Mathf.Tau,
+                        RotSpeed = (float)GD.RandRange(-8.0, 8.0)
+                    });
+                }
+            }
+        }
+    }
+
+    private void DrawAccretionVoxels()
+    {
+        if (_accretionVoxels.Count == 0) return;
+
+        for (int i = 0; i < _accretionVoxels.Count; i++)
+        {
+            var p = _accretionVoxels[i];
+            Vector2 localPos = FastWorldToLocal(p.WorldPos);
+            float halfSz = p.Size * 0.5f;
+
+            // Gambar jejak pendaran komet/meteor di belakang voxel
+            Vector2 trailDir = !p.HasCapturedOrbit
+                ? -p.Velocity.Normalized()
+                : (CachedPosition - p.WorldPos).Rotated(-Mathf.Pi * 0.5f).Normalized();
+            Vector2 trailStart = localPos + trailDir * (p.Size * 1.8f);
+            Color trailCol = new Color(p.Color.R, p.Color.G, p.Color.B, 0.38f);
+            DrawLine(trailStart, localPos, trailCol, p.Size * 0.65f);
+
+            // Hitung orientasi kotak voxel
+            float cos = MathF.Cos(p.Rotation);
+            float sin = MathF.Sin(p.Rotation);
+            Vector2 u = new Vector2(cos, sin) * halfSz;
+            Vector2 v = new Vector2(-sin, cos) * halfSz;
+
+            _voxelQuadBuffer[0] = localPos - u - v;
+            _voxelQuadBuffer[1] = localPos + u - v;
+            _voxelQuadBuffer[2] = localPos + u + v;
+            _voxelQuadBuffer[3] = localPos - u + v;
+
+            DrawColoredPolygon(_voxelQuadBuffer, p.Color);
+
+            // Garis tepi tipis neon untuk menegaskan estetika voxel geometri
+            Color edgeColor = new Color(p.Color.R * 1.4f, p.Color.G * 1.4f, p.Color.B * 1.4f, 1.0f);
+            _voxelOutlineBuffer[0] = _voxelQuadBuffer[0];
+            _voxelOutlineBuffer[1] = _voxelQuadBuffer[1];
+            _voxelOutlineBuffer[2] = _voxelQuadBuffer[2];
+            _voxelOutlineBuffer[3] = _voxelQuadBuffer[3];
+            _voxelOutlineBuffer[4] = _voxelQuadBuffer[0];
+            DrawPolyline(_voxelOutlineBuffer, edgeColor, 1.2f, false);
+        }
+    }
+
+    private void DrawVoidLightningBolts()
+    {
+        // Ukuran radius visual bintang aktif di layar
+        float baseR = OuterBoundRadius * 0.70f;
+        if (baseR < 12.0f) baseR = 12.0f;
+
+        float instability = _isDestroying ? 1.0f : Mathf.Clamp(_energyAccumulatedHeat, 0.0f, 1.0f);
+        float pulseRate = 1.0f + instability * 2.5f;
+
+        Color magentaBolt = new Color(5.4f, 0.42f, 4.3f, 0.95f);
+        Color hotPinkCore = new Color(6.2f, 2.2f, 5.8f, 0.98f);
+        Color darkVioletAura = new Color(2.6f, 0.25f, 3.8f, 0.50f);
+
+        // 0. Cincin Batas Ergosfer Void (Tipis & Tajam - Menegaskan Kontras Inti Gelap)
+        DrawArc(Vector2.Zero, baseR * 0.94f, 0.0f, Mathf.Tau, 32, new Color(5.4f, 0.42f, 4.3f, 0.40f), 1.6f, true);
+        DrawArc(Vector2.Zero, baseR * 1.08f, 0.0f, Mathf.Tau, 32, new Color(2.6f, 0.25f, 3.8f, 0.25f), 2.2f, true);
+
+        // 1. Busur Petir Melingkar (Coronal Tesla Loops) di sekeliling permukaan void
+        int arcCount = 4 + (int)(instability * 3.0f);
+        for (int a = 0; a < arcCount; a++)
+        {
+            float seedOffset = a * 1.87f;
+            float startAngle = _energyPulseTimer * (0.85f + a * 0.25f) * pulseRate + seedOffset;
+            float arcSpan = Mathf.Pi * (0.24f + 0.16f * MathF.Sin(_energyPulseTimer * 4.0f + a));
+            float endAngle = startAngle + arcSpan;
+
+            int segs = 8;
+            Vector2 prevP = new Vector2(MathF.Cos(startAngle), MathF.Sin(startAngle)) * baseR;
+            _lightningArcBuffer[0] = prevP;
+
+            for (int s = 1; s <= segs; s++)
+            {
+                float t = (float)s / segs;
+                float curAng = Mathf.Lerp(startAngle, endAngle, t);
+                // Jitter tajam berfrekuensi tinggi (simulasi petir berliku-liku)
+                float jitter = MathF.Sin(t * 22.0f + _energyPulseTimer * 28.0f + a * 6.5f) * (baseR * (0.10f + instability * 0.08f));
+                float curR = baseR + jitter;
+                Vector2 curP = new Vector2(MathF.Cos(curAng), MathF.Sin(curAng)) * curR;
+                _lightningArcBuffer[s] = curP;
+            }
+
+            // Gambar aura ungu gelap lalu garis inti petir magenta
+            for (int s = 0; s < segs; s++)
+            {
+                DrawLine(_lightningArcBuffer[s], _lightningArcBuffer[s + 1], darkVioletAura, 3.4f);
+                DrawLine(_lightningArcBuffer[s], _lightningArcBuffer[s + 1], magentaBolt, 1.8f);
+                DrawLine(_lightningArcBuffer[s], _lightningArcBuffer[s + 1], hotPinkCore, 0.8f);
+            }
+        }
+
+        // 2. Kilatan Petir Menjalar Radial ke Luar Angkasa (Radial Lightning Leaps)
+        int radialCount = 3 + (int)(instability * 3.0f);
+        for (int r = 0; r < radialCount; r++)
+        {
+            float rAngle = (r * Mathf.Tau / radialCount) + MathF.Sin(_energyPulseTimer * 1.8f + r * 2.3f) * 0.85f;
+            float flash = MathF.Sin(_energyPulseTimer * 22.0f + r * 8.0f);
+            if (flash < 0.20f) continue; // Flicker cepat: petir menyambar dan padam sesaat
+
+            Vector2 dir = new Vector2(MathF.Cos(rAngle), MathF.Sin(rAngle));
+            Vector2 perp = new Vector2(-dir.Y, dir.X);
+
+            Vector2 prevP = dir * (baseR * 0.92f);
+            float maxReach = baseR * (1.28f + 0.38f * flash + instability * 0.35f);
+            int segs = 6;
+
+            for (int s = 1; s <= segs; s++)
+            {
+                float t = (float)s / segs;
+                float zig = MathF.Sin(t * 16.0f + _energyPulseTimer * 32.0f + r * 4.0f) * (12.0f * (1.0f - t * 0.45f));
+                Vector2 curP = dir * Mathf.Lerp(baseR * 0.92f, maxReach, t) + perp * zig;
+
+                DrawLine(prevP, curP, magentaBolt, 2.4f * (1.0f - t * 0.5f));
+                DrawLine(prevP, curP, hotPinkCore, 1.1f * (1.0f - t * 0.5f));
+
+                // Percabangan kecil (fork branch) di tengah jalan
+                if (s == 3)
+                {
+                    Vector2 forkDir = dir.Rotated((r % 2 == 0 ? 0.48f : -0.48f));
+                    Vector2 forkEnd = curP + forkDir * (baseR * 0.22f * flash);
+                    DrawLine(curP, forkEnd, magentaBolt, 1.4f);
+                }
+
+                prevP = curP;
+            }
+        }
+
+        // 3. Reaksi Petir Terhadap Laser Pemain (Cavitation Lightning Overcharge)
+        if (_energyLaserCavitation > 0.04f)
+        {
+            Vector2 hitDir = new Vector2(MathF.Cos(_energyLaserHitAngle), MathF.Sin(_energyLaserHitAngle));
+            Vector2 hitPerp = new Vector2(-hitDir.Y, hitDir.X);
+            Vector2 hitCenter = hitDir * baseR;
+
+            // Percikan petir liar menyambar dari sekeliling bintang menuju titik tembakan laser
+            int sparkArcs = 4;
+            for (int sp = 0; sp < sparkArcs; sp++)
+            {
+                float angOff = ((sp - 1.5f) * 0.38f) + MathF.Sin(_energyPulseTimer * 32.0f + sp) * 0.12f;
+                Vector2 sparkOrigin = new Vector2(MathF.Cos(_energyLaserHitAngle + angOff), MathF.Sin(_energyLaserHitAngle + angOff)) * (baseR * 1.18f);
+
+                DrawLine(sparkOrigin, hitCenter + hitPerp * (MathF.Sin(_energyPulseTimer * 38.0f + sp) * 9.0f), hotPinkCore, 2.4f);
+            }
+            DrawCircle(hitCenter, 7.5f * (0.8f + _energyLaserCavitation * 0.6f), magentaBolt);
+            DrawCircle(hitCenter, 3.5f * (0.8f + _energyLaserCavitation * 0.6f), hotPinkCore);
         }
     }
 
     private void DrawAetherSeedLifecycle()
     {
         float pulse = 0.88f + 0.12f * MathF.Sin(_energyPulseTimer * 2.6f);
-        Color seedGold = new Color(3.8f, 3.2f, 1.25f, 0.92f);
-        Color seedCyan = new Color(0.45f, 2.65f, 3.85f, 0.85f);
+        Color seedMagenta = new Color(5.4f, 0.42f, 4.3f, 0.95f);
+        Color seedViolet = new Color(2.4f, 0.35f, 3.8f, 0.85f);
+        Color seedHotPink = new Color(6.2f, 2.2f, 5.8f, 0.98f);
+        Color seedDarkObsidian = new Color(0.04f, 0.02f, 0.08f, 0.95f);
 
         if (SeedStage == AetherSeedStage.DormantSeed)
         {
-            // Tahap 1: Dormant Seed (10s) - Pendaran lembut dan tenang di titik nol ledakan
+            // Tahap 1: Dormant Seed (10s) - Biji Void gelap dengan pendaran korona neon magenta lembut
             float haloR = 32.0f * pulse;
-            DrawCircle(Vector2.Zero, haloR * 1.45f, new Color(0.4f, 1.8f, 2.8f, 0.14f));
-            DrawCircle(Vector2.Zero, haloR, new Color(2.6f, 2.1f, 0.8f, 0.24f));
-            DrawArc(Vector2.Zero, 22.0f * pulse, 0.0f, Mathf.Tau, 32, new Color(seedCyan.R, seedCyan.G, seedCyan.B, 0.55f), 1.6f, true);
-            DrawCircle(Vector2.Zero, 8.5f * pulse, seedGold);
+            DrawCircle(Vector2.Zero, haloR * 1.45f, new Color(0.4f, 0.05f, 0.6f, 0.18f));
+            DrawCircle(Vector2.Zero, haloR, new Color(2.6f, 0.25f, 3.8f, 0.25f));
+            DrawArc(Vector2.Zero, 22.0f * pulse, 0.0f, Mathf.Tau, 32, new Color(seedMagenta.R, seedMagenta.G, seedMagenta.B, 0.65f), 1.6f, true);
+            DrawCircle(Vector2.Zero, 10.5f * pulse, seedDarkObsidian);
+            DrawCircle(Vector2.Zero, 5.5f * pulse, seedHotPink);
         }
         else if (SeedStage == AetherSeedStage.CosmicDrift)
         {
@@ -2261,7 +2766,7 @@ public partial class Asteroid : RigidBody2D
                 // Efek visual ruang terkompresi sangat gila: pusaran garis foton menyusut ke titik singularitas
                 float compRatio = Mathf.Clamp(_seedTeleportStateTimer / SeedTeleportCompressDuration, 0.0f, 1.0f);
                 float compR = Mathf.Lerp(42.0f, 3.5f, compRatio);
-                DrawCircle(Vector2.Zero, compR, new Color(3.8f, 3.2f, 1.25f, 0.95f * (1.0f - compRatio * 0.45f)));
+                DrawCircle(Vector2.Zero, compR, new Color(5.4f, 0.42f, 4.3f, 0.95f * (1.0f - compRatio * 0.45f)));
 
                 int rayCount = 8;
                 for (int r = 0; r < rayCount; r++)
@@ -2270,7 +2775,7 @@ public partial class Asteroid : RigidBody2D
                     Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
                     Vector2 pOuter = dir * (compR * 3.6f);
                     Vector2 pInner = dir * compR;
-                    DrawLine(pOuter, pInner, new Color(0.45f, 2.85f, 4.2f, 0.85f * compRatio), 2.2f);
+                    DrawLine(pOuter, pInner, new Color(2.4f, 0.35f, 3.8f, 0.85f * compRatio), 2.2f);
                 }
                 return;
             }
@@ -2281,9 +2786,9 @@ public partial class Asteroid : RigidBody2D
                 float expRatio = Mathf.Clamp(_seedTeleportStateTimer / SeedTeleportExpandDuration, 0.0f, 1.0f);
                 float bloomR = Mathf.Lerp(64.0f, 14.0f, MathF.Sqrt(expRatio));
                 float alpha = (1.0f - expRatio);
-                DrawCircle(Vector2.Zero, bloomR * 1.55f, new Color(0.45f, 2.5f, 3.8f, 0.35f * alpha));
-                DrawCircle(Vector2.Zero, bloomR, new Color(3.8f, 3.2f, 1.25f, 0.75f * alpha));
-                DrawArc(Vector2.Zero, bloomR * 2.1f, 0.0f, Mathf.Tau, 32, new Color(3.8f, 3.2f, 1.25f, alpha), 2.4f, true);
+                DrawCircle(Vector2.Zero, bloomR * 1.55f, new Color(2.4f, 0.35f, 3.8f, 0.35f * alpha));
+                DrawCircle(Vector2.Zero, bloomR, new Color(5.4f, 0.42f, 4.3f, 0.75f * alpha));
+                DrawArc(Vector2.Zero, bloomR * 2.1f, 0.0f, Mathf.Tau, 32, new Color(6.2f, 2.2f, 5.8f, alpha), 2.4f, true);
             }
 
             // Jejak pendaran ekor bintang meluncur cepat
@@ -2294,16 +2799,17 @@ public partial class Asteroid : RigidBody2D
                     float t = (float)(i + 1) / _seedDriftTrailWorld.Count;
                     Vector2 pA = FastWorldToLocal(_seedDriftTrailWorld[i]);
                     Vector2 pB = FastWorldToLocal(_seedDriftTrailWorld[i + 1]);
-                    Color trailCol = new Color(0.45f, 2.35f, 3.55f, t * 0.55f);
+                    Color trailCol = new Color(5.4f, 0.42f, 4.3f, t * 0.55f);
                     DrawLine(pA, pB, trailCol, 1.5f + t * 2.2f);
                 }
             }
 
             float haloR = 36.0f * pulse;
-            DrawCircle(Vector2.Zero, haloR, new Color(0.45f, 2.2f, 3.4f, 0.26f));
-            DrawArc(Vector2.Zero, 24.0f * pulse, _energyPulseTimer, _energyPulseTimer + Mathf.Pi * 1.35f, 24, seedCyan, 2.0f, true);
-            DrawArc(Vector2.Zero, 18.0f * pulse, -_energyPulseTimer * 1.2f, -_energyPulseTimer * 1.2f + Mathf.Pi * 1.35f, 24, seedGold, 1.8f, true);
-            DrawCircle(Vector2.Zero, 10.0f * pulse, seedGold);
+            DrawCircle(Vector2.Zero, haloR, new Color(2.4f, 0.35f, 3.8f, 0.26f));
+            DrawArc(Vector2.Zero, 24.0f * pulse, _energyPulseTimer, _energyPulseTimer + Mathf.Pi * 1.35f, 24, seedMagenta, 2.0f, true);
+            DrawArc(Vector2.Zero, 18.0f * pulse, -_energyPulseTimer * 1.2f, -_energyPulseTimer * 1.2f + Mathf.Pi * 1.35f, 24, seedHotPink, 1.8f, true);
+            DrawCircle(Vector2.Zero, 10.0f * pulse, seedDarkObsidian);
+            DrawCircle(Vector2.Zero, 5.0f * pulse, seedHotPink);
         }
         else if (SeedStage == AetherSeedStage.SpacetimeInfall)
         {
@@ -2321,8 +2827,8 @@ public partial class Asteroid : RigidBody2D
                 float curR = Mathf.Lerp(16.0f, maxInfallR, invPhase);
                 float alpha = MathF.Sin(ringPhase * Mathf.Pi) * (0.32f + 0.45f * smoothP);
                 Color ringCol = (r % 2 == 0)
-                    ? new Color(0.45f, 2.45f, 3.65f, alpha)
-                    : new Color(3.6f, 2.9f, 1.1f, alpha);
+                    ? new Color(5.4f, 0.42f, 4.3f, alpha)
+                    : new Color(2.4f, 0.35f, 3.8f, alpha);
                 DrawArc(Vector2.Zero, curR, 0.0f, Mathf.Tau, 40, ringCol, 1.8f + smoothP * 1.6f, true);
             }
 
@@ -2339,13 +2845,14 @@ public partial class Asteroid : RigidBody2D
                 Color streakCol = ph.Color;
                 streakCol.A = Mathf.Clamp((1.0f - ph.Distance / ph.MaxDistance) * (0.55f + 0.45f * smoothP), 0.12f, 0.98f);
                 DrawLine(tailPos, headPos, streakCol, ph.Size * (0.75f + 0.5f * smoothP));
-                DrawCircle(headPos, ph.Size * 0.65f, seedGold);
+                DrawCircle(headPos, ph.Size * 0.65f, seedHotPink);
             }
 
             // 3. Biji mengembang dan mekar di pusat pusaran
             float bloomR = Mathf.Lerp(12.0f, _crystalCoreRadius * 1.05f, smoothP) * pulse;
-            DrawCircle(Vector2.Zero, bloomR * 1.55f, new Color(0.45f, 2.2f, 3.5f, 0.22f + 0.25f * smoothP));
-            DrawCircle(Vector2.Zero, bloomR, new Color(3.8f, 3.2f, 1.25f, 0.75f + 0.20f * smoothP));
+            DrawCircle(Vector2.Zero, bloomR * 1.55f, new Color(2.4f, 0.35f, 3.8f, 0.22f + 0.25f * smoothP));
+            DrawCircle(Vector2.Zero, bloomR, new Color(0.04f, 0.02f, 0.08f, 0.95f));
+            DrawArc(Vector2.Zero, bloomR * 1.05f, 0.0f, Mathf.Tau, 32, seedMagenta, 2.4f, true);
         }
     }
 
@@ -2757,6 +3264,49 @@ public partial class Asteroid : RigidBody2D
         if (found)
         {
             closestVoxelWorldCenter = FastLocalToWorld(bestLocal);
+        }
+        return found;
+    }
+
+    public bool FindClosestSolidVoxel(Vector2 worldTargetPos, out Vector2 closestVoxelWorldCenter, out VoxelType voxelType)
+    {
+        closestVoxelWorldCenter = worldTargetPos;
+        voxelType = VoxelType.Empty;
+        if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
+
+        Vector2 localTarget = FastWorldToLocal(worldTargetPos);
+        float bestDistSq = float.MaxValue;
+        Vector2 bestLocalCenter = Vector2.Zero;
+        bool found = false;
+
+        for (int gy = 0; gy < GridSide; gy++)
+        {
+            float cy = GridOriginLocal.Y + (gy + 0.5f) * VoxelSize;
+            int rowOffset = gy * GridSide;
+
+            for (int gx = 0; gx < GridSide; gx++)
+            {
+                VoxelType vt = _voxels[rowOffset + gx];
+                if (vt == VoxelType.Empty) continue;
+
+                float cx = GridOriginLocal.X + (gx + 0.5f) * VoxelSize;
+                float dx = cx - localTarget.X;
+                float dy = cy - localTarget.Y;
+                float dSq = dx * dx + dy * dy;
+
+                if (dSq < bestDistSq)
+                {
+                    bestDistSq = dSq;
+                    bestLocalCenter = new Vector2(cx, cy);
+                    voxelType = vt;
+                    found = true;
+                }
+            }
+        }
+
+        if (found)
+        {
+            closestVoxelWorldCenter = FastLocalToWorld(bestLocalCenter);
         }
         return found;
     }

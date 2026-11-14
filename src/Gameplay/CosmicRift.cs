@@ -35,13 +35,15 @@ public partial class CosmicRift : Node2D
     [Export] public float OrbitAngle { get; set; } = 0.0f;
     [Export] public float OrbitSpeed { get; set; } = 0.012f; // ~0.68 deg/sec
     [Export] public int RiftId { get; set; } = 0;
+    [Export] public Vector2 CustomEjectDirection { get; set; } = Vector2.Zero;
+    [Export] public float CustomEjectSpeed { get; set; } = 0.0f;
 
     public RiftState State { get; private set; } = RiftState.Dormant;
     public bool IsEjecting => State != RiftState.Dormant;
 
-    public const float InfallDuration = 3.8f;
-    public const float EruptionDuration = 1.35f;
-    public const float CoolingDuration = 2.6f;
+    public const float InfallDuration = 2.6f;
+    public const float EruptionDuration = 1.75f;
+    public const float CoolingDuration = 2.4f;
 
     private float _stateTimer = 0.0f;
     private float _pulseTimer = 0.0f;
@@ -211,21 +213,95 @@ public partial class CosmicRift : Node2D
 
         // 1. Gelombang Kejut Radial Dahsyat pada Grid saat White Hole Terbuka
         EmitSignal(SignalName.RiftErupted, GlobalPosition, 4600.0f, 850.0f);
+        PlayerCamera.Instance?.TriggerShake(18.0f);
 
-        // 2. Hitung Vektor Lontaran Spiral Archimedes
-        Vector2 radialDir = GlobalPosition.LengthSquared() > 1.0f ? GlobalPosition.Normalized() : Vector2.Right;
-        float spinDir = (RiftId % 2 == 0) ? 1.0f : -1.0f;
-        Vector2 tangentDir = new Vector2(-radialDir.Y, radialDir.X) * spinDir;
-
-        float radialSpeed = (float)GD.RandRange(240.0, 320.0);
-        float tangentSpeed = (float)GD.RandRange(95.0, 145.0);
-        Vector2 ejectVel = (radialDir * radialSpeed) + (tangentDir * tangentSpeed);
+        // 2. Hitung Trajektori Lontaran Teraman Bebas Tabrakan dengan Asteroid Lain
+        Vector2 ejectVel = (CustomEjectDirection.LengthSquared() > 0.01f)
+            ? (CustomEjectDirection.Normalized() * (CustomEjectSpeed > 1.0f ? CustomEjectSpeed : 320.0f))
+            : CalculateSafestEjectionTrajectory();
 
         // Asteroid lahir tepat di pusat White Hole (GlobalPosition)!
         Vector2 spawnPos = GlobalPosition;
 
         // 3. Minta AsteroidFieldManager melahirkan asteroid baru
         EmitSignal(SignalName.RiftSpawnAsteroidRequested, spawnPos, ejectVel);
+    }
+
+    /// <summary>
+    /// Memindai koridor 360 derajat di sekitar portal untuk menemukan trajektori lontaran terbersih,
+    /// memastikan asteroid baru tidak langsung menabrak asteroid lain atau menumpuk di arena.
+    /// </summary>
+    private Vector2 CalculateSafestEjectionTrajectory()
+    {
+        Vector2 riftPos = GlobalPosition;
+        Vector2 outward = riftPos.LengthSquared() > 1.0f ? riftPos.Normalized() : Vector2.Right;
+        float baseAngle = outward.Angle();
+
+        const int CandidateCount = 20;
+        const float MaxLookahead = 4500.0f;
+        const float EstimatedNewRadius = 380.0f;
+        const float SafetyPadding = 180.0f;
+
+        Vector2 bestDir = outward;
+        float bestScore = -1.0f;
+
+        for (int i = 0; i < CandidateCount; i++)
+        {
+            // Rentang sudut: menyapu sektor keluar (-140 hingga +140 derajat dari vektor radial)
+            float angleOffset = Mathf.Lerp(-Mathf.Pi * 0.78f, Mathf.Pi * 0.78f, (float)i / (CandidateCount - 1));
+            float testAngle = baseAngle + angleOffset;
+            Vector2 candDir = new Vector2(MathF.Cos(testAngle), MathF.Sin(testAngle));
+
+            float clearDist = MaxLookahead;
+
+            // Pindai semua asteroid aktif di sepanjang koridor trajectory
+            var asteroids = Asteroid.ActiveAsteroids;
+            for (int a = 0; a < asteroids.Count; a++)
+            {
+                var ast = asteroids[a];
+                if (ast == null || !IsInstanceValid(ast) || !ast.IsActiveInTree) continue;
+
+                Vector2 toAst = ast.CachedPosition - riftPos;
+                float projT = toAst.Dot(candDir);
+
+                // Abaikan yang berada di belakang portal atau terlalu jauh di luar jangkauan scan
+                if (projT <= 60.0f || projT >= clearDist) continue;
+
+                // Jarak tegak lurus dari asteroid ke garis tengah koridor lontaran
+                float perpDist = (toAst - candDir * projT).Length();
+                float totalClearanceNeeded = EstimatedNewRadius + ast.OuterBoundRadius + SafetyPadding;
+
+                if (perpDist < totalClearanceNeeded)
+                {
+                    // Potensi tabrakan terdeteksi pada jarak projT
+                    clearDist = projT;
+                }
+            }
+
+            // Periksa batas arena sektor (agar tidak langsung terlempar menabrak batas dinding)
+            Vector2 endPt = riftPos + candDir * clearDist;
+            if (MathF.Abs(endPt.X) > 5600.0f || MathF.Abs(endPt.Y) > 5600.0f)
+            {
+                float tX = (candDir.X > 0 ? (5600.0f - riftPos.X) : (-5600.0f - riftPos.X)) / (MathF.Abs(candDir.X) > 0.001f ? candDir.X : 0.001f);
+                float tY = (candDir.Y > 0 ? (5600.0f - riftPos.Y) : (-5600.0f - riftPos.Y)) / (MathF.Abs(candDir.Y) > 0.001f ? candDir.Y : 0.001f);
+                float boundT = MathF.Min(MathF.Max(0.0f, tX), MathF.Max(0.0f, tY));
+                if (boundT < clearDist) clearDist = boundT;
+            }
+
+            // Skoring: Semakin jauh koridor bebas asteroid + bonus arah ke sabuk luar
+            float outwardFactor = MathF.Max(0.0f, candDir.Dot(outward));
+            float score = clearDist * (1.0f + outwardFactor * 0.50f);
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestDir = candDir;
+            }
+        }
+
+        // Kecepatan lontaran bertenaga tinggi (310 - 365 px/s) agar asteroid meluncur bebas ke orbit kosong
+        float ejectSpeed = (float)GD.RandRange(310.0, 365.0);
+        return bestDir * ejectSpeed;
     }
 
     public override void _Draw()
@@ -392,6 +468,21 @@ public partial class CosmicRift : Node2D
             float shockRadius2 = Mathf.Lerp(whiteR, 320.0f, p * (2.0f - p));
             Color shockCol2 = new Color(0.75f, 3.2f, 5.0f, 0.85f * (1.0f - p));
             DrawArc(Vector2.Zero, shockRadius2, 0.0f, Mathf.Tau, 48, shockCol2, 2.6f * (1.0f - p * 0.5f), true);
+
+            // Pusaran Leher Lampu Jin White Hole (Genie Vortex Aperture Swirls)
+            int swirlArms = 10;
+            for (int s = 0; s < swirlArms; s++)
+            {
+                float a0 = -_spinAngle * 1.2f + s * (Mathf.Tau / swirlArms);
+                float a1 = a0 + 1.35f;
+                float rOuter = whiteR * (2.4f - 0.8f * p);
+                Vector2 p0 = new Vector2(MathF.Cos(a0), MathF.Sin(a0)) * (whiteR * 0.65f);
+                Vector2 p1 = new Vector2(MathF.Cos(a1), MathF.Sin(a1)) * rOuter;
+                Color swirlCol = (s % 2 == 0)
+                    ? new Color(5.5f, 4.6f, 2.2f, 0.85f * (1.0f - p))
+                    : new Color(0.85f, 3.6f, 5.2f, 0.85f * (1.0f - p));
+                DrawLine(p0, p1, swirlCol, 3.0f * (1.0f - p * 0.4f));
+            }
 
             // Berkas sinar White Hole radial (Relativistic Light Beams)
             int rayCount = 20;

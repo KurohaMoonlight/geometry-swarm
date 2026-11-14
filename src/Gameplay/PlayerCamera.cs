@@ -12,6 +12,8 @@ namespace GeometrySwarm.Gameplay;
 /// </summary>
 public partial class PlayerCamera : Camera2D
 {
+    public static PlayerCamera? Instance { get; private set; }
+
     [Export] public NodePath PlayerCorePath { get; set; } = "../SwarmSimulation/PlayerCore";
     [Export] public NodePath SwarmSimPath { get; set; } = "../SwarmSimulation";
 
@@ -27,6 +29,7 @@ public partial class PlayerCamera : Camera2D
 
     public override void _Ready()
     {
+        Instance = this;
         PositionSmoothingEnabled = true;
         PositionSmoothingSpeed = 7.5f;
 

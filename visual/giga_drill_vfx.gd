@@ -9,9 +9,15 @@ extends Node2D
 ##    skala otomatis membesar secara megah sesuai jumlah swarm yang terlibat!
 ## 4. Efek Core-Ramming Overdrive & Supernova Detonation Spektakuler (maupun ledakan kawah kecil di asteroid)
 
+const IonBeamShader = preload("res://visual/giga_drill_ion_beam.gdshader")
+
 var swarm_sim: Node2D = null
 var player_core: Node2D = null
 var arena: Node2D = null
+
+# Komponen GPU Shader Ion Beam Rocket Exhaust
+var ion_beam_mesh: MeshInstance2D = null
+var ion_beam_mat: ShaderMaterial = null
 
 # Partikel loncatan ion exhaust
 var ion_particles: Array[Dictionary] = []
@@ -29,6 +35,15 @@ var supernova_flashes: Array[Dictionary] = []
 
 func _ready() -> void:
 	z_index = 6 # Tepat di atas MultiMesh swarm agar kilau HDR ion beam menyatu
+	ion_beam_mesh = MeshInstance2D.new()
+	var quad: QuadMesh = QuadMesh.new()
+	quad.size = Vector2(1.0, 1.0)
+	ion_beam_mesh.mesh = quad
+	ion_beam_mat = ShaderMaterial.new()
+	ion_beam_mat.shader = IonBeamShader
+	ion_beam_mesh.material = ion_beam_mat
+	ion_beam_mesh.visible = false
+	add_child(ion_beam_mesh)
 
 func setup(p_arena: Node2D, p_sim: Node2D, p_core: Node2D) -> void:
 	arena = p_arena
@@ -44,6 +59,9 @@ func _process(delta: float) -> void:
 	var total_units: int = int(swarm_sim.get("GigaDrillTotalUnits"))
 	var swarm_scale: float = clampf(total_units / 45.0, 0.75, 4.5)
 	
+	# Update Shader Ion Beam Cyclone
+	_update_ion_beam_shader(is_charging, is_active, swarm_scale)
+	
 	# Update partikel ion exhaust
 	_update_ion_particles(delta, is_charging, is_active, swarm_scale)
 	
@@ -56,6 +74,36 @@ func _process(delta: float) -> void:
 	
 	if is_charging or is_active or ion_particles.size() > 0 or detonation_rings.size() > 0 or breach_rings.size() > 0 or breach_shards.size() > 0 or supernova_flashes.size() > 0:
 		queue_redraw()
+
+func _update_ion_beam_shader(is_charging: bool, is_active: bool, swarm_scale: float) -> void:
+	if not ion_beam_mesh or not ion_beam_mat or not swarm_sim:
+		return
+		
+	var charge_ratio: float = float(swarm_sim.get("DrillChargeRatio"))
+	if not (is_active or (is_charging and charge_ratio > 0.28)):
+		ion_beam_mesh.visible = false
+		return
+		
+	var beam_power: float = 1.0 if is_active else clampf((charge_ratio - 0.28) / 0.72, 0.0, 1.0)
+	var base_beam_len: float = lerpf(75.0, 260.0, beam_power) if is_charging else (360.0 + 120.0 * swarm_scale)
+	var beam_len: float = base_beam_len
+	var base_pos: Vector2 = swarm_sim.get("GigaDrillBasePosition")
+	var aim_dir: Vector2 = swarm_sim.get("GigaDrillDirection")
+	var drill_r: float = float(swarm_sim.get("GigaDrillRadius"))
+	var spin_time: float = float(swarm_sim.get("GigaDrillSpinTime"))
+	var exhaust_dir: Vector2 = -aim_dir
+	var plume_width: float = (drill_r * 2.85) * (1.0 + 0.35 * swarm_scale)
+	
+	ion_beam_mesh.visible = true
+	ion_beam_mesh.global_position = base_pos + exhaust_dir * (beam_len * 0.5)
+	ion_beam_mesh.global_rotation = exhaust_dir.angle()
+	ion_beam_mesh.scale = Vector2(beam_len, plume_width)
+	
+	ion_beam_mat.set_shader_parameter("power", beam_power)
+	ion_beam_mat.set_shader_parameter("spin_time", spin_time)
+	ion_beam_mat.set_shader_parameter("rpm", 28.0)
+	ion_beam_mat.set_shader_parameter("swarm_scale", swarm_scale)
+	ion_beam_mat.set_shader_parameter("diamond_count", clampf(5.0 + 3.2 * swarm_scale, 5.0, 13.0))
 
 func trigger_launch_shake() -> void:
 	if arena and arena.has_method("trigger_shake"):
@@ -318,7 +366,7 @@ func _draw() -> void:
 	
 	var total_units: int = int(swarm_sim.get("GigaDrillTotalUnits"))
 	var def_units: int = int(swarm_sim.get("GigaDrillDefenderCoreCount"))
-	var swarm_scale: float = clampf(total_units / 45.0, 0.75, 4.5)
+	var _swarm_scale: float = clampf(total_units / 45.0, 0.75, 4.5)
 	
 	# =========================================================================
 	# 1. EFEK CHARGING MEGAH: ACCRETION VORTEX, MULTI-POINT LIGHTNING, SOLAR APEX
@@ -400,88 +448,9 @@ func _draw() -> void:
 			arena.trigger_shake(charge_ratio * 4.2)
 
 	# =========================================================================
-	# 2. EFEK TRAIL & ION BEAM ROCKET EXHAUST BERSKALA (MEGAH SESUAI JUMLAH SWARM)
+	# 2. EFEK TRAIL & ION BEAM ROCKET EXHAUST BERSKALA
+	# Di-render secara volumetrik & ultra-smooth oleh GPU Shader Mesh (ion_beam_mesh)
 	# =========================================================================
-	if is_active or (is_charging and charge_ratio > 0.3):
-		var beam_power: float = 1.0 if is_active else clampf((charge_ratio - 0.3) / 0.7, 0.0, 1.0)
-		
-		# Skala panjang & lebar trail tumbuh signifikan berdasar jumlah swarm!
-		var base_beam_len: float = lerpf(55.0, 240.0, beam_power) if is_charging else (340.0 + 110.0 * swarm_scale)
-		var beam_len: float = base_beam_len
-		var exhaust_dir: Vector2 = -aim_dir
-		var plume_width_mult: float = 1.0 + 0.35 * swarm_scale
-		
-		# (a) Corong Plasma Luar (Ion Sheath Flare) Berskala
-		var flare_pts: PackedVector2Array = [
-			base_pos + tangent * (drill_r * 0.9),
-			base_pos + exhaust_dir * (beam_len * 0.45) + tangent * (drill_r * 1.55 * plume_width_mult),
-			base_pos + exhaust_dir * beam_len + tangent * (drill_r * 0.35 * plume_width_mult),
-			base_pos + exhaust_dir * beam_len - tangent * (drill_r * 0.35 * plume_width_mult),
-			base_pos + exhaust_dir * (beam_len * 0.45) - tangent * (drill_r * 1.55 * plume_width_mult),
-			base_pos - tangent * (drill_r * 0.9)
-		]
-		var flare_colors: PackedColorArray = [
-			Color(0.2, 2.6, 5.2, 0.65 * beam_power),
-			Color(1.4, 0.5, 4.5, 0.45 * beam_power),
-			Color(2.2, 0.8, 5.0, 0.0),
-			Color(2.2, 0.8, 5.0, 0.0),
-			Color(1.4, 0.5, 4.5, 0.45 * beam_power),
-			Color(0.2, 2.6, 5.2, 0.65 * beam_power)
-		]
-		draw_polygon(flare_pts, flare_colors)
-		
-		# (b) Mach Shock Diamonds Ganda Berskala (Aerospike Disks sepanjang sumbu exhaust)
-		var diamond_count: int = clampi(int(5 + 3.2 * swarm_scale), 5, 14) if is_active else 4
-		var diamond_spacing: float = beam_len / (diamond_count + 1)
-		for d in range(1, diamond_count + 1):
-			var d_center: Vector2 = base_pos + exhaust_dir * (diamond_spacing * d)
-			var d_ratio: float = 1.0 - (float(d) / (diamond_count + 1))
-			var pulse: float = 1.0 + 0.32 * sin(d * 2.2 - spin_time * 28.0)
-			var dw: float = (9.0 + drill_r * 0.38) * d_ratio * pulse * clampf(swarm_scale * 0.8, 0.9, 2.2)
-			var dh: float = (6.0 + drill_r * 0.28) * d_ratio * pulse * clampf(swarm_scale * 0.8, 0.9, 2.2)
-			
-			var d_outer_pts: PackedVector2Array = [
-				d_center + exhaust_dir * dw,
-				d_center + tangent * dh,
-				d_center - exhaust_dir * dw,
-				d_center - tangent * dh
-			]
-			var d_inner_pts: PackedVector2Array = [
-				d_center + exhaust_dir * (dw * 0.55),
-				d_center + tangent * (dh * 0.55),
-				d_center - exhaust_dir * (dw * 0.55),
-				d_center - tangent * (dh * 0.55)
-			]
-			
-			# Lapisan luar sian-magenta HDR
-			draw_polyline(d_outer_pts + PackedVector2Array([d_outer_pts[0]]), Color(2.6, 5.0, 6.5, 0.95 * beam_power), 1.6, true)
-			# Lapisan inti putih menyilaukan
-			draw_colored_polygon(d_inner_pts, Color(5.5, 5.5, 6.5, 0.95 * beam_power))
-			
-		# (c) Balok Laser Inti Berkecepatan Tinggi (Core Ion Laser Stream)
-		var laser_w: float = (4.8 + 1.8 * swarm_scale) * beam_power
-		draw_line(base_pos, base_pos + exhaust_dir * beam_len, Color(5.5, 5.5, 6.5, 1.0), laser_w, true)
-		draw_line(base_pos, base_pos + exhaust_dir * (beam_len * 0.70), Color(2.2, 5.0, 6.5, 0.9), laser_w * 2.2, true)
-		
-		# (d) Pita Corkscrew Plasma Multi-Untai (4 Untai jika swarm banyak!)
-		var strand_count: int = 4 if swarm_scale > 1.3 else 2
-		var ribbon_steps: int = 28
-		var step_len: float = beam_len / ribbon_steps
-		
-		for s in range(strand_count):
-			var strand_phase: float = s * (TAU / strand_count)
-			var strand_col: Color = Color(2.2, 5.0, 6.5, 0.9 * beam_power) if (s % 2 == 0) else Color(4.2, 1.0, 5.0, 0.9 * beam_power)
-			var ribbon_pts: PackedVector2Array = []
-			ribbon_pts.resize(ribbon_steps + 1)
-			
-			for st in range(ribbon_steps + 1):
-				var dist_along: float = st * step_len
-				var wave: float = sin(dist_along * 0.08 + spin_time * 26.0 + strand_phase)
-				var w_amp: float = (drill_r * 0.85 * plume_width_mult) * (1.0 - (dist_along / beam_len) * 0.45)
-				var p_center: Vector2 = base_pos + exhaust_dir * dist_along
-				ribbon_pts[st] = p_center + tangent * (wave * w_amp)
-				
-			draw_polyline(ribbon_pts, strand_col, 1.8, true)
 
 	# =========================================================================
 	# 3. EFEK SUPERSONIC BOW SHOCK & CORE-RAMMING OVERDRIVE SAAT MELUNCUR

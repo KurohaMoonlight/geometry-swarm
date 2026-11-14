@@ -208,6 +208,10 @@ public partial class SwarmSimulation : Node2D
     private readonly List<DartThrusterJet> _activeBrakeJets = new(MaxBrakeSlots);
     private readonly List<Vector2> _activeBrakeDartPositions = new(MaxBrakeSlots);
 
+    // Komponen GPU Shader Aerospike Afterburner Plasma Boost [SPACE]
+    private MeshInstance2D? _plasmaBoostMesh;
+    private ShaderMaterial? _plasmaBoostMat;
+
     public bool IsBoostActive => _isBoostActive;
     public bool IsBrakeActive => _isBrakeActive;
     public Vector2 BoostNozzlePosition { get; private set; } = Vector2.Zero;
@@ -360,6 +364,23 @@ public partial class SwarmSimulation : Node2D
         InitializeTacticalSlots();
         CallDeferred(MethodName.BuildInteractiveFoundryGui);
         SpawnStartingSwarm();
+
+        // Inisialisasi Shader Mesh Aerospike Plasma Boost [SPACE]
+        var boostShader = GD.Load<Shader>("res://visual/plasma_boost_beam.gdshader");
+        if (boostShader != null)
+        {
+            _plasmaBoostMat = new ShaderMaterial { Shader = boostShader };
+            var quad = new QuadMesh { Size = new Vector2(1.0f, 1.0f) };
+            _plasmaBoostMesh = new MeshInstance2D
+            {
+                Name = "PlasmaBoostBeamMesh",
+                Mesh = quad,
+                Material = _plasmaBoostMat,
+                Visible = false,
+                ZIndex = 5
+            };
+            AddChild(_plasmaBoostMesh);
+        }
 
         // Mode Eksplorasi Kosmik Murni: EnemyCore debug dinonaktifkan
         _enemyCore = null;
@@ -2187,6 +2208,27 @@ public partial class SwarmSimulation : Node2D
         // =========================================================================
         UpdateParabolicFrontDome(dt, corePos, shipVel, aimDir, tangent, coreRadius, power);
 
+        // =========================================================================
+        // 7. UPDATE GPU SHADER MESH AEROSPIKE PLASMA BOOST BEAM [SPACE]
+        // =========================================================================
+        if (_plasmaBoostMesh != null && _plasmaBoostMat != null)
+        {
+            float pulse = _boostPulseTimer;
+            float mainJetLen = Mathf.Lerp(175.0f, 360.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.2f));
+            float plumeWidth = (34.0f + 26.0f * power);
+            Vector2 midPos = focalChamberPos + backDir * (mainJetLen * 0.5f);
+
+            _plasmaBoostMesh.Visible = true;
+            _plasmaBoostMesh.GlobalPosition = midPos;
+            _plasmaBoostMesh.GlobalRotation = backDir.Angle();
+            _plasmaBoostMesh.Scale = new Vector2(mainJetLen, plumeWidth);
+
+            _plasmaBoostMat.SetShaderParameter("power", power);
+            _plasmaBoostMat.SetShaderParameter("time", pulse);
+            _plasmaBoostMat.SetShaderParameter("flash_boost", _boostSacrificeFlash);
+            _plasmaBoostMat.SetShaderParameter("diamond_count", 6.8f);
+        }
+
         QueueRedraw();
     }
 
@@ -2373,6 +2415,11 @@ public partial class SwarmSimulation : Node2D
         _activeParabolaSwarmCount = 0;
         _activeThrusterJets.Clear();
         _activeThrusterDartPositions.Clear();
+
+        if (_plasmaBoostMesh != null)
+        {
+            _plasmaBoostMesh.Visible = false;
+        }
 
         if (_playerCore != null)
         {
@@ -4507,6 +4554,188 @@ public partial class SwarmSimulation : Node2D
         QueueRedraw();
     }
 
+    /// <summary>
+    /// Efek letupan plasma & gelombang kejut saat tali pusar Genie Effect putus dari mulut White Hole.
+    /// </summary>
+    public void TriggerGenieUmbilicalSnapFx(Vector2 snapPos, Vector2 riftOrigin, Color resourceColor)
+    {
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = snapPos,
+            Radius = 10.0f,
+            StartRadius = 10.0f,
+            MaxRadius = 210.0f,
+            Life = 0.42f,
+            MaxLife = 0.42f,
+            Color1 = new Color(5.2f, 4.6f, 2.2f, 0.95f),
+            Color2 = new Color(0.75f, 3.2f, 4.8f, 0.88f),
+            IsEnergy = true,
+            IsInward = false
+        });
+
+        Vector2 toRift = (riftOrigin - snapPos);
+        Vector2 snapDir = toRift.LengthSquared() > 1.0f ? toRift.Normalized() : Vector2.Left;
+        Vector2 perp = new Vector2(-snapDir.Y, snapDir.X);
+
+        for (int i = 0; i < 18; i++)
+        {
+            float spread = (GD.Randf() - 0.5f) * 2.2f;
+            Vector2 vel = (snapDir * (GD.Randf() > 0.4f ? 1.0f : -0.6f) + perp * spread).Normalized() * (140.0f + GD.Randf() * 240.0f);
+            float life = 0.65f + GD.Randf() * 0.55f;
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = snapPos + perp * ((GD.Randf() - 0.5f) * 24.0f),
+                Velocity = vel,
+                Color = (i % 2 == 0) ? new Color(5.0f, 4.4f, 2.0f, 0.95f) : resourceColor * 1.4f,
+                Life = life,
+                MaxLife = life,
+                Size = 3.2f + GD.Randf() * 2.8f,
+                IsCrystalMatter = false,
+                Rotation = GD.Randf() * Mathf.Tau,
+                RotSpeed = (GD.Randf() - 0.5f) * 18.0f,
+                IsQuantumGlass = true,
+                IsPlasmaPuff = true
+            });
+        }
+
+        EmitSignal(SignalName.SwarmClashImpulse, snapPos, 1850.0f, 360.0f);
+        QueueRedraw();
+    }
+
+    /// <summary>
+    /// Memancarkan aliran partikel materi spageti (batu & kristal mineral) yang terkoyak dari ujung asteroid
+    /// dan tersedot melengkung masuk ke dalam inti Bintang Aether.
+    /// </summary>
+    public void EmitTidalSpaghettiStream(Vector2 tipWorldPos, Vector2 starWorldPos, Color rockColor, Color mineralColor, float intensity, float orbitSpinDir)
+    {
+        if (_miningDebris.Count > 420) return;
+
+        Vector2 toStar = starWorldPos - tipWorldPos;
+        float dist = toStar.Length();
+        if (dist < 8.0f) return;
+
+        Vector2 dir = toStar / dist;
+        Vector2 tang = new Vector2(-dir.Y, dir.X) * orbitSpinDir;
+
+        int count = intensity > 0.65f ? 7 : (intensity > 0.35f ? 4 : 2);
+        for (int i = 0; i < count; i++)
+        {
+            float latJitter = (GD.Randf() - 0.5f) * 36.0f * (1.0f - intensity * 0.4f);
+            Vector2 spawnPos = tipWorldPos + tang * latJitter;
+            float speed = Mathf.Lerp(320.0f, 760.0f, intensity) + GD.Randf() * 140.0f;
+            Vector2 streamVel = (dir * 0.82f + tang * (0.44f + (GD.Randf() - 0.5f) * 0.22f)).Normalized() * speed;
+            float life = Mathf.Clamp(dist / MathF.Max(120.0f, speed), 0.18f, 0.95f);
+
+            bool isMineralShard = GD.Randf() < (0.45f + intensity * 0.35f);
+            Color shardCol = isMineralShard
+                ? mineralColor.Lerp(new Color(5.8f, 5.2f, 2.2f, 1.0f), intensity * 0.65f)
+                : rockColor.Lerp(new Color(4.8f, 2.2f, 0.6f, 0.98f), intensity * 0.75f);
+
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = spawnPos,
+                Velocity = streamVel,
+                Color = shardCol,
+                Life = life,
+                MaxLife = life,
+                Size = isMineralShard ? (3.6f + GD.Randf() * 3.2f) : (3.0f + GD.Randf() * 2.8f),
+                IsCrystalMatter = false,
+                Rotation = streamVel.Angle(),
+                RotSpeed = orbitSpinDir * 18.0f,
+                IsQuantumGlass = isMineralShard,
+                IsPlasmaPuff = !isMineralShard
+            });
+        }
+        QueueRedraw();
+    }
+
+    /// <summary>
+    /// Efek klimaks saat asteroid selesai mengalami Spaghettification dan hancur lebur ditelan Bintang Aether.
+    /// </summary>
+    public void TriggerTidalSpaghettiConsumptionFx(Vector2 starPos, Vector2 asteroidLastPos, float originalRadius, Color resourceColor, ResourceType primaryRes)
+    {
+        // 0. Shake kamera sinematik dahsyat saat singularitas menelan asteroid
+        PlayerCamera.Instance?.TriggerShake(26.0f);
+
+        // 1. Cincin kilatan putih menyilaukan (Event Horizon Consumption Flash)
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = starPos,
+            Radius = 14.0f,
+            StartRadius = 14.0f,
+            MaxRadius = originalRadius * 2.8f,
+            Life = 0.52f,
+            MaxLife = 0.52f,
+            Color1 = new Color(6.5f, 6.0f, 5.0f, 1.0f),
+            Color2 = new Color(5.2f, 3.8f, 1.4f, 0.95f),
+            IsEnergy = true,
+            IsInward = false
+        });
+
+        // 2. Cincin implosi hisapan spageti ke dalam Bintang Aether
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = starPos,
+            Radius = originalRadius * 1.45f,
+            StartRadius = originalRadius * 1.45f,
+            MaxRadius = 14.0f,
+            Life = 0.44f,
+            MaxLife = 0.44f,
+            Color1 = resourceColor * 1.5f,
+            Color2 = new Color(3.8f, 3.2f, 1.25f, 0.95f),
+            IsEnergy = true,
+            IsInward = true
+        });
+
+        // 2. Cincin semburan akresi balik (Accretion Flare Burst) dari korona Bintang Aether
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = starPos,
+            Radius = 18.0f,
+            StartRadius = 18.0f,
+            MaxRadius = originalRadius * 2.1f,
+            Life = 0.68f,
+            MaxLife = 0.68f,
+            Color1 = new Color(5.2f, 4.4f, 1.8f, 0.98f),
+            Color2 = new Color(0.65f, 3.2f, 4.8f, 0.92f),
+            IsEnergy = true,
+            IsInward = false
+        });
+
+        // 3. Lontaran kristal mineral & Aether di sekitar orbit bintang hasil koyakan pasang-surut
+        int lootCount = GD.RandRange(10, 16);
+        for (int i = 0; i < lootCount; i++)
+        {
+            float angle = (float)i / lootCount * Mathf.Tau + (GD.Randf() - 0.5f) * 0.35f;
+            Vector2 dir = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+            Vector2 tang = new Vector2(-dir.Y, dir.X);
+            float speed = 95.0f + GD.Randf() * 145.0f;
+            float life = 24.0f + GD.Randf() * 8.0f;
+
+            ResourceType dropType = (i % 3 == 0) ? ResourceType.Aether : primaryRes;
+            Color col = Asteroid.GetResourceColor(dropType);
+
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = starPos + dir * 72.0f,
+                Velocity = (dir * 0.65f + tang * 0.75f).Normalized() * speed,
+                Color = col,
+                Life = life,
+                MaxLife = life,
+                Size = 4.0f + GD.Randf() * 1.4f,
+                IsCrystalMatter = true,
+                MatterType = dropType,
+                Rotation = GD.Randf() * Mathf.Tau,
+                RotSpeed = (GD.Randf() - 0.5f) * 16.0f,
+                IsQuantumGlass = true,
+                IsPlasmaPuff = false
+            });
+        }
+
+        EmitSignal(SignalName.SwarmClashImpulse, starPos, -2950.0f, 620.0f);
+        QueueRedraw();
+    }
+
     public override void _Draw()
     {
         try
@@ -4848,103 +5077,9 @@ public partial class SwarmSimulation : Node2D
         DrawCircle(focalPos, orbRad * 0.52f, new Color(5.5f, 5.4f, 4.2f, 0.98f));
 
         // =========================================================================
-        // C. SEMBURAN JET PLASMA UTAMA TERPUSAT & MACH SHOCK DIAMONDS
+        // C. SEMBURAN JET PLASMA UTAMA TERPUSAT (AEROSPIKE AFTERBURNER)
+        // Di-render secara volumetrik & ultra-smooth oleh GPU Shader Mesh (_plasmaBoostMesh)
         // =========================================================================
-        float mainJetLen = Mathf.Lerp(165.0f, 340.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.2f));
-        float throatW = 7.0f + 5.5f * power;
-        float midW = 18.0f + 14.0f * power;
-        Vector2 jetEnd = focalPos + backDir * mainJetLen;
-
-        // 1. Selubung Luar Plasma (Outer Ionized Plume Envelope)
-        var outerPlumePts = new Vector2[]
-        {
-            focalPos + tangent * throatW,
-            focalPos + backDir * (mainJetLen * 0.28f) + tangent * midW,
-            focalPos + backDir * (mainJetLen * 0.72f) + tangent * (midW * 0.62f),
-            jetEnd,
-            focalPos + backDir * (mainJetLen * 0.72f) - tangent * (midW * 0.62f),
-            focalPos + backDir * (mainJetLen * 0.28f) - tangent * midW,
-            focalPos - tangent * throatW
-        };
-        var outerPlumeCols = new Color[]
-        {
-            new(0.4f, 2.6f, 4.8f, 0.62f * power),
-            new(0.8f, 1.8f, 4.4f, 0.42f * power),
-            new(2.2f, 0.6f, 3.2f, 0.22f * power),
-            new(2.8f, 0.2f, 1.8f, 0.0f),
-            new(2.2f, 0.6f, 3.2f, 0.22f * power),
-            new(0.8f, 1.8f, 4.4f, 0.42f * power),
-            new(0.4f, 2.6f, 4.8f, 0.62f * power)
-        };
-        DrawPolygon(outerPlumePts, outerPlumeCols);
-
-        // 2. Inti Jet Kecepatan Tinggi (High-Velocity Core Beam)
-        float coreBeamLen = mainJetLen * 0.82f;
-        DrawLine(focalPos, focalPos + backDir * coreBeamLen, new Color(1.2f, 3.8f, 5.4f, 0.78f * power), 6.8f * power, false);
-        DrawLine(focalPos, focalPos + backDir * (coreBeamLen * 0.78f), new Color(4.6f, 5.0f, 5.8f, 0.94f * power), 3.0f * power, false);
-
-        // 3. Cincin & Poligon Mach Shock Diamonds di Sepanjang Ekor Jet
-        int diamondCount = 4 + (int)(power * 3.0f);
-        float spacing = (mainJetLen * 0.78f) / (diamondCount + 0.5f);
-
-        for (int d = 0; d < diamondCount; d++)
-        {
-            float flowOffset = ((pulse * 0.35f) % 1.0f) * spacing * 0.35f;
-            float dist = (d + 0.65f) * spacing + flowOffset;
-            float t = dist / mainJetLen;
-            if (t >= 0.92f) continue;
-
-            float fade = 1.0f - t;
-            Vector2 dCenter = focalPos + backDir * dist;
-            float dHalfLen = spacing * 0.36f * (0.7f + 0.3f * fade);
-            float dHalfWidth = (8.5f + 7.5f * power) * fade;
-
-            var diamondPts = new Vector2[]
-            {
-                dCenter - backDir * dHalfLen,
-                dCenter + tangent * dHalfWidth,
-                dCenter + backDir * dHalfLen,
-                dCenter - tangent * dHalfWidth
-            };
-            Color dCol = new Color(
-                Mathf.Lerp(4.8f, 2.8f, t),
-                Mathf.Lerp(5.0f, 2.2f, t),
-                5.6f,
-                0.78f * fade * power
-            );
-            var diamondCols = new Color[] { dCol, dCol * 0.65f, dCol * 0.45f, dCol * 0.65f };
-            DrawPolygon(diamondPts, diamondCols);
-
-            // Cincin elips kompresi di simpul Mach Diamond
-            DrawLine(dCenter - tangent * (dHalfWidth * 1.15f), dCenter + tangent * (dHalfWidth * 1.15f), new Color(5.2f, 5.0f, 3.8f, 0.82f * fade), 1.8f, false);
-        }
-
-        // 4. Pita Heliks Magnetik Kembar (Twin Magnetic Containment Helices)
-        const int helixSteps = 18;
-        Vector2 prevH1 = Vector2.Zero;
-        Vector2 prevH2 = Vector2.Zero;
-        for (int h = 0; h <= helixSteps; h++)
-        {
-            float ht = (float)h / helixSteps;
-            float hDist = ht * (mainJetLen * 0.85f);
-            float envW = Mathf.Lerp(throatW * 0.9f, midW * 0.85f, MathF.Sin(ht * Mathf.Pi));
-            float phase = ht * Mathf.Tau * 2.2f - pulse * 1.4f;
-
-            Vector2 basePt = focalPos + backDir * hDist;
-            Vector2 pt1 = basePt + tangent * (MathF.Sin(phase) * envW);
-            Vector2 pt2 = basePt - tangent * (MathF.Sin(phase) * envW);
-
-            if (h > 0)
-            {
-                float hAlpha = (1.0f - ht) * 0.68f * power;
-                Color hCol1 = new Color(1.4f, 4.2f, 5.6f, hAlpha);
-                Color hCol2 = new Color(3.8f, 2.4f, 5.2f, hAlpha);
-                DrawLine(prevH1, pt1, hCol1, 1.5f, false);
-                DrawLine(prevH2, pt2, hCol2, 1.5f, false);
-            }
-            prevH1 = pt1;
-            prevH2 = pt2;
-        }
     }
 
     private void DrawDartPlasmaBrakeVfx()
