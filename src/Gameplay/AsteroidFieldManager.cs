@@ -16,11 +16,11 @@ namespace GeometrySwarm.Gameplay;
 public partial class AsteroidFieldManager : Node2D
 {
     [Export] public Vector2 SectorSize { get; set; } = new(12000.0f, 12000.0f);
-    [Export] public int TotalAsteroids { get; set; } = 32;
+    [Export] public int TotalAsteroids { get; set; } = 40;
 
     public const float RiftOrbitRadius = 1550.0f;
 
-    // Telemetri sumur gravitasi aktif (Bintang Mini Aether + Aether Seed Infall) untuk arena.gd
+    // Telemetri sumur gravitasi aktif (Bintang Mini Aether + Aether Seed Infall + Cosmic Rift) untuk arena.gd
     public Vector2[] GravityWellPositions { get; private set; } = Array.Empty<Vector2>();
     public float[] GravityWellRadii { get; private set; } = Array.Empty<float>();
     public float[] GravityWellStrengths { get; private set; } = Array.Empty<float>();
@@ -80,9 +80,81 @@ public partial class AsteroidFieldManager : Node2D
         }
     }
 
+    private float _asteroidReplenishTimer = -30.0f; // Grace period 30 detik di awal permainan agar Black Hole tenang
+    private const float ReplenishCheckInterval = 5.0f;
+    private float _replenishCooldown = 0.0f;
+    [Export] public int MinAsteroidThreshold { get; set; } = 28;
+
     public override void _PhysicsProcess(double delta)
     {
         UpdateGravityWellTelemetry();
+        CheckAndReplenishAsteroids((float)delta);
+    }
+
+    /// <summary>
+    /// Memantau populasi asteroid di sabuk secara berkala.
+    /// Jika jumlah asteroid turun drastis di bawah ambang batas (histeresis <= 28),
+    /// sistem memilih satu Black Hole menganggur untuk memicu siklus White Hole Genesis.
+    /// </summary>
+    private void CheckAndReplenishAsteroids(float dt)
+    {
+        if (_replenishCooldown > 0.0f)
+        {
+            _replenishCooldown -= dt;
+        }
+
+        _asteroidReplenishTimer += dt;
+        if (_asteroidReplenishTimer < ReplenishCheckInterval)
+            return;
+
+        _asteroidReplenishTimer = 0.0f;
+
+        // 1. Hitung jumlah asteroid aktif yang masih utuh di tree
+        int activeCount = 0;
+        var asteroids = Asteroid.ActiveAsteroids;
+        for (int i = 0; i < asteroids.Count; i++)
+        {
+            var ast = asteroids[i];
+            if (ast != null && IsInstanceValid(ast) && !ast.IsDestroyed && ast.IsActiveInTree)
+            {
+                activeCount++;
+            }
+        }
+
+        // 2. Hanya picu replenish jika asteroid turun di bawah ambang batas DAN cooldown habis
+        if (activeCount < MinAsteroidThreshold && _replenishCooldown <= 0.0f && _cosmicRifts.Count > 0)
+        {
+            // Pastikan tidak ada Black Hole yang sedang sibuk merakit (White Hole / Charging)
+            for (int r = 0; r < _cosmicRifts.Count; r++)
+            {
+                var rift = _cosmicRifts[r];
+                if (rift != null && IsInstanceValid(rift) && rift.State != CosmicRift.RiftState.Dormant)
+                {
+                    return; // Proses perakitan sudah berjalan di salah satu Rift
+                }
+            }
+
+            // Kumpulkan Black Hole yang berstatus Dormant
+            var idleRifts = new List<CosmicRift>();
+            for (int r = 0; r < _cosmicRifts.Count; r++)
+            {
+                var rift = _cosmicRifts[r];
+                if (rift != null && IsInstanceValid(rift) && rift.State == CosmicRift.RiftState.Dormant)
+                {
+                    idleRifts.Add(rift);
+                }
+            }
+
+            if (idleRifts.Count > 0)
+            {
+                // Pilih satu Black Hole secara acak untuk spawn/merakit asteroid baru
+                var rng = new RandomNumberGenerator();
+                rng.Randomize();
+                int chosenIndex = rng.RandiRange(0, idleRifts.Count - 1);
+                idleRifts[chosenIndex].StartFullCinematicSequence();
+                _replenishCooldown = 40.0f; // Beri jeda 40 detik antar siklus replenish agar tidak bertubi-tubi
+            }
+        }
     }
 
     private void UpdateGravityWellTelemetry()
@@ -130,8 +202,8 @@ public partial class AsteroidFieldManager : Node2D
             _gravRadList.Add(520.0f);
             _gravStrList.Add(1.4f);
             _gravInfallList.Add(0.0f);
-            _gravPullList.Add(110.0f);
-            _gravSwirlList.Add(80.0f);
+            _gravPullList.Add(140.0f);
+            _gravSwirlList.Add(95.0f);
             _gravHeatList.Add(0.0f);
         }
 
@@ -166,14 +238,14 @@ public partial class AsteroidFieldManager : Node2D
 
         var placedAsteroids = new List<(Vector2 Pos, float EffRadius)>();
 
-        const float InterAsteroidPadding = 260.0f;
+        const float InterAsteroidPadding = 220.0f;
         float halfSector = SectorSize.X * 0.5f;
         Vector2 playerSpawnPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
 
-        bool IsLocationClear(Vector2 candPos, float effRadius)
+        bool IsLocationClear(Vector2 candPos, float effRadius, bool isEnergy)
         {
             // Jaga zona aman bebas asteroid di sekitar posisi kapal pemain saat spawn
-            if (candPos.DistanceTo(playerSpawnPos) < effRadius + 450.0f)
+            if (candPos.DistanceTo(playerSpawnPos) < effRadius + 420.0f)
             {
                 return false;
             }
@@ -190,10 +262,13 @@ public partial class AsteroidFieldManager : Node2D
                 return false;
             }
 
+            // Jaga zona eksklusi luas di sekitar ketiga Cosmic Rift agar Rift tidak pernah tertutup/di belakang asteroid.
+            // Bintang Aether secara naluriah menolak mendekati Black Hole: minimal jarak 2600 px!
             for (int r = 0; r < _cosmicRifts.Count; r++)
             {
                 float distToRift = candPos.DistanceTo(_cosmicRifts[r].Position);
-                if (distToRift < effRadius + 460.0f)
+                float requiredDist = isEnergy ? 2600.0f : (effRadius + 560.0f);
+                if (distToRift < requiredDist)
                 {
                     return false;
                 }
@@ -211,18 +286,61 @@ public partial class AsteroidFieldManager : Node2D
             return true;
         }
 
+        // 1. Tempatkan objek showcase di dekat Cosmic Rift 0 TERLEBIH DAHULU (sebelum loop sabuk):
+        //    - Disusun pada busur di luar horizon Rift 0.
+        //    - Bintang Aether TIDAK PERNAH ditempatkan di sini karena Bintang Aether cenderung menghindari Black Hole!
+        //    - Dilengkapi asteroid beruntun di belakangnya (pChain) agar saat shockwave mendorong p1/p2,
+        //      asteroid langsung saling bertabrakan secara beruntun!
+        if (_cosmicRifts.Count > 0)
+        {
+            Vector2 r0 = _cosmicRifts[0].Position;
+            // Posisikan di luar zona erosi Black Hole (dist >= 850 px) agar tidak terkikis saat diam
+            Vector2 p1 = r0 + new Vector2(780.0f, -460.0f);
+            Vector2 p2 = r0 + new Vector2(620.0f, 680.0f);
+            Vector2 pStar = r0 + new Vector2(-420.0f, -880.0f);
+            Vector2 pChain1 = r0 + new Vector2(1380.0f, -540.0f);
+            Vector2 pChain2 = r0 + new Vector2(1180.0f, 860.0f);
+
+            placedAsteroids.Add((p1, 240.0f * 1.18f));
+            placedAsteroids.Add((p2, 270.0f * 1.18f));
+            placedAsteroids.Add((pStar, 105.0f * 1.18f));
+            placedAsteroids.Add((pChain1, 310.0f * 1.18f));
+            placedAsteroids.Add((pChain2, 330.0f * 1.18f));
+
+            SpawnAsteroid(p1, 240.0f, SwarmRole.DartNeedle, false, rng);
+            SpawnAsteroid(p2, 270.0f, SwarmRole.Guardian, false, rng);
+            SpawnAsteroid(pStar, 105.0f, SwarmRole.DartNeedle, false, rng);
+            SpawnAsteroid(pChain1, 310.0f, SwarmRole.DrillDrone, false, rng);
+            SpawnAsteroid(pChain2, 330.0f, SwarmRole.CrescentBoomerang, false, rng);
+        }
+
         var beltConfigs = new (int Count, float MinDist, float MaxDist, float MinRad, float MaxRad)[]
         {
-            (5, 1250.0f, 2200.0f, 320.0f, 440.0f),
-            (15, 2450.0f, 4250.0f, 440.0f, 700.0f),
-            (12, 4450.0f, 5500.0f, 680.0f, 1050.0f)
+            (6, 1950.0f, 2450.0f, 300.0f, 420.0f),  // Inner Belt: 6
+            (17, 2600.0f, 4250.0f, 440.0f, 700.0f), // Mid Belt: 17
+            (12, 4450.0f, 5500.0f, 680.0f, 1050.0f) // Outer Belt: 12
         };
+        // Total awal: 5 showcase + 6 + 17 + 12 = 40 asteroid utuh saat game mulai!
 
-        foreach (var belt in beltConfigs)
+        for (int beltIndex = 0; beltIndex < beltConfigs.Length; beltIndex++)
         {
+            var belt = beltConfigs[beltIndex];
             for (int i = 0; i < belt.Count; i++)
             {
-                SwarmRole role = PickRandomType(rng, out bool isEnergy);
+                SwarmRole role;
+                bool isEnergy = false;
+                if (beltIndex == 0)
+                {
+                    // Sabuk pertama terlalu dekat dengan horizon Black Hole (Rift ~1580 px),
+                    // sehingga Bintang Aether tidak diizinkan spawn di sini.
+                    role = PickRandomMineralRole(rng);
+                    isEnergy = false;
+                }
+                else
+                {
+                    role = PickRandomType(rng, out isEnergy);
+                }
+
                 float baseRadius = rng.RandfRange(belt.MinRad, belt.MaxRad);
                 float radius = baseRadius;
 
@@ -244,7 +362,7 @@ public partial class AsteroidFieldManager : Node2D
                         effRadius = radius * effFactor;
                     }
 
-                    if (IsLocationClear(candidatePos, effRadius))
+                    if (IsLocationClear(candidatePos, effRadius, isEnergy))
                     {
                         chosenPos = candidatePos;
                         foundSpot = true;
@@ -262,7 +380,26 @@ public partial class AsteroidFieldManager : Node2D
                         radius = belt.MinRad * 0.8f;
                         effRadius = radius * effFactor;
 
-                        if (IsLocationClear(candidatePos, effRadius))
+                        if (IsLocationClear(candidatePos, effRadius, isEnergy))
+                        {
+                            chosenPos = candidatePos;
+                            foundSpot = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!foundSpot)
+                {
+                    for (int em = 0; em < 120; em++)
+                    {
+                        float randAngle = rng.Randf() * Mathf.Tau;
+                        float randDist = rng.RandfRange(belt.MinDist * 0.85f, belt.MaxDist * 1.1f);
+                        Vector2 candidatePos = new Vector2(MathF.Cos(randAngle), MathF.Sin(randAngle)) * randDist;
+                        radius = belt.MinRad * 0.70f;
+                        effRadius = radius * 1.08f;
+
+                        if (IsLocationClear(candidatePos, effRadius, isEnergy))
                         {
                             chosenPos = candidatePos;
                             foundSpot = true;
@@ -279,22 +416,138 @@ public partial class AsteroidFieldManager : Node2D
             }
         }
 
-        // Tempatkan asteroid & Bintang Aether di dekat Cosmic Rift 0 agar langsung terlihat mengorbit, terlempar, dan memicu supernova
-        if (_cosmicRifts.Count > 0)
+        TotalAsteroids = placedAsteroids.Count;
+        // Ambang batas histeresis: hanya spawn jika populasi asteroid turun drastis (<= 28 dari 40)
+        MinAsteroidThreshold = Math.Max(20, TotalAsteroids - 12);
+    }
+
+    /// <summary>
+    /// Mencari koordinat acak yang sepenuhnya aman di dalam sabuk asteroid:
+    /// 1. Bebas dari Black Hole / Cosmic Rift (jarak >= 2000 px).
+    /// 2. Bebas dari Bintang Aether (jarak >= 1800 px).
+    /// 3. Bebas dari tubuh asteroid (jarak >= OuterBoundRadius + 380 px, tidak pernah di dalam asteroid).
+    /// 4. Berjauhan dari target hindar (misal Player vs Rival Hive, jarak >= minAvoidDistance).
+    /// </summary>
+    public Vector2 FindSafeRandomSpawnPoint(RandomNumberGenerator rng, Vector2? avoidPos = null, float minAvoidDistance = 4200.0f)
+    {
+        float minRadius = 2400.0f;
+        float maxRadius = 4500.0f;
+        float halfSector = SectorSize.X * 0.5f;
+
+        for (int attempt = 0; attempt < 250; attempt++)
         {
-            Vector2 r0 = _cosmicRifts[0].Position;
-            Vector2 p1 = r0 + new Vector2(520.0f, -220.0f);
-            Vector2 p2 = r0 + new Vector2(-280.0f, -540.0f);
-            Vector2 pStar = r0 + new Vector2(-380.0f, 320.0f);
-            SpawnAsteroid(p1, 260.0f, SwarmRole.DartNeedle, false, rng);
-            SpawnAsteroid(p2, 310.0f, SwarmRole.Guardian, false, rng);
-            SpawnAsteroid(pStar, 110.0f, SwarmRole.DartNeedle, true, rng);
-            placedAsteroids.Add((p1, 260.0f * 1.18f));
-            placedAsteroids.Add((p2, 310.0f * 1.18f));
-            placedAsteroids.Add((pStar, 110.0f * 1.28f));
+            float angle;
+            if (avoidPos.HasValue && avoidPos.Value.LengthSquared() > 10.0f)
+            {
+                // Musuh otomatis ditempatkan di sisi galaksi yang berseberangan dengan pemain
+                float oppAngle = avoidPos.Value.Angle() + Mathf.Pi;
+                angle = oppAngle + rng.RandfRange(-0.95f, 0.95f);
+            }
+            else
+            {
+                angle = rng.Randf() * Mathf.Tau;
+            }
+
+            float dist = rng.RandfRange(minRadius, maxRadius);
+            Vector2 cand = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * dist;
+
+            // 1. Batas Sektor
+            if (MathF.Abs(cand.X) > halfSector - 600.0f || MathF.Abs(cand.Y) > halfSector - 600.0f)
+                continue;
+
+            // 2. Jarak ke target hindar (Player <-> Enemy)
+            if (avoidPos.HasValue)
+            {
+                float distToAvoid = cand.DistanceTo(avoidPos.Value);
+                if (distToAvoid < minAvoidDistance)
+                    continue;
+            }
+
+            // 3. Jarak ke semua Black Hole (Cosmic Rift)
+            bool tooCloseToRift = false;
+            for (int r = 0; r < _cosmicRifts.Count; r++)
+            {
+                var rift = _cosmicRifts[r];
+                if (!IsInstanceValid(rift)) continue;
+                if (cand.DistanceTo(rift.Position) < 2000.0f)
+                {
+                    tooCloseToRift = true;
+                    break;
+                }
+            }
+            if (tooCloseToRift) continue;
+
+            // 4. Jarak ke Bintang Aether dan Tubuh Asteroid
+            bool insideOrNearAsteroid = false;
+
+            for (int a = 0; a < Asteroid.ActiveAsteroids.Count; a++)
+            {
+                var ast = Asteroid.ActiveAsteroids[a];
+                if (!IsInstanceValid(ast) || ast.IsDestroyed) continue;
+
+                float distToAst = cand.DistanceTo(ast.GlobalPosition);
+
+                // Jika ini Bintang Aether, jaga zona aman ekstra luas (minimal 1800 px)
+                if (ast.IsEnergyAsteroid)
+                {
+                    if (distToAst < 1800.0f)
+                    {
+                        insideOrNearAsteroid = true;
+                        break;
+                    }
+                }
+
+                // Cek clearance fisik: tidak boleh di dalam atau bersentuhan dengan asteroid
+                float clearance = distToAst - (ast.OuterBoundRadius + 380.0f);
+                if (clearance < 0.0f)
+                {
+                    insideOrNearAsteroid = true;
+                    break;
+                }
+            }
+
+            if (insideOrNearAsteroid) continue;
+
+            // Lokasi sempurna ditemukan!
+            return cand;
         }
 
-        TotalAsteroids = placedAsteroids.Count;
+        // Fallback jika kondisi sangat padat (relaksasi jarak secara proporsional)
+        for (int fallback = 0; fallback < 120; fallback++)
+        {
+            float angle = avoidPos.HasValue
+                ? avoidPos.Value.Angle() + Mathf.Pi + rng.RandfRange(-1.2f, 1.2f)
+                : rng.Randf() * Mathf.Tau;
+            float dist = rng.RandfRange(2600.0f, 4200.0f);
+            Vector2 cand = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * dist;
+
+            bool blocked = false;
+            for (int r = 0; r < _cosmicRifts.Count; r++)
+            {
+                if (cand.DistanceTo(_cosmicRifts[r].Position) < 1600.0f)
+                {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked) continue;
+
+            for (int a = 0; a < Asteroid.ActiveAsteroids.Count; a++)
+            {
+                var ast = Asteroid.ActiveAsteroids[a];
+                if (!IsInstanceValid(ast) || ast.IsDestroyed) continue;
+                if (cand.DistanceTo(ast.GlobalPosition) < ast.OuterBoundRadius + 240.0f)
+                {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked) continue;
+
+            return cand;
+        }
+
+        return new Vector2(3200.0f, 0.0f);
     }
 
     public Asteroid SpawnEmptyAsteroidForWhiteHoleAssembly(Vector2 assemblyWorldPos, float radius = 320.0f)
@@ -319,27 +572,27 @@ public partial class AsteroidFieldManager : Node2D
         return asteroid;
     }
 
-    public void TriggerDebugWhiteHoleAsteroidGenesis()
+    public void TriggerRandomWhiteHoleAsteroidGenesis()
     {
-        CosmicRift? bestRift = null;
-        float minDist = float.MaxValue;
-        Vector2 pPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
+        var idleRifts = new List<CosmicRift>();
         for (int i = 0; i < _cosmicRifts.Count; i++)
         {
             var r = _cosmicRifts[i];
-            if (r != null && IsInstanceValid(r))
+            if (r != null && IsInstanceValid(r) && r.State == CosmicRift.RiftState.Dormant)
             {
-                float d = r.GlobalPosition.DistanceTo(pPos);
-                if (d < minDist)
-                {
-                    minDist = d;
-                    bestRift = r;
-                }
+                idleRifts.Add(r);
             }
         }
-        bestRift ??= (_cosmicRifts.Count > 0 && IsInstanceValid(_cosmicRifts[0])) ? _cosmicRifts[0] : null;
-        bestRift?.StartFullCinematicSequence();
+        if (idleRifts.Count > 0)
+        {
+            var rng = new RandomNumberGenerator();
+            rng.Randomize();
+            int idx = rng.RandiRange(0, idleRifts.Count - 1);
+            idleRifts[idx].StartFullCinematicSequence();
+        }
     }
+
+    public void TriggerDebugWhiteHoleAsteroidGenesis() => TriggerRandomWhiteHoleAsteroidGenesis();
 
     private void SpawnAsteroid(Vector2 pos, float radius, SwarmRole role, bool isEnergy, RandomNumberGenerator rng)
     {

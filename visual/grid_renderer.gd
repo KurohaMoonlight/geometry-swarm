@@ -65,7 +65,12 @@ func update_gravity_sources(
 	p_strengths: PackedFloat32Array,
 	p_infall_ratios: PackedFloat32Array
 ) -> bool:
-	var changed: bool = (grav_positions.size() != p_positions.size()) or (p_positions.size() > 0)
+	var changed: bool = grav_positions.size() != p_positions.size()
+	if not changed and p_positions.size() > 0:
+		for i in range(mini(grav_positions.size(), 4)):
+			if grav_positions[i].distance_squared_to(p_positions[i]) > 4.0:
+				changed = true
+				break
 	grav_positions = p_positions
 	grav_radii = p_radii
 	grav_strengths = p_strengths
@@ -76,11 +81,11 @@ func update_gravity_sources(
 func update_view(p_cam_pos: Vector2, delta: float) -> bool:
 	star_time += delta
 	_twinkle_accum += delta
-	var moved: bool = p_cam_pos.distance_squared_to(camera_pos) > 0.15
+	var moved: bool = p_cam_pos.distance_squared_to(camera_pos) > 0.4
 	if moved:
 		camera_pos = p_cam_pos
 		return true
-	if _twinkle_accum >= 0.05 or grav_positions.size() > 0:
+	if _twinkle_accum >= 0.08:
 		_twinkle_accum = 0.0
 		return true
 	return false
@@ -170,6 +175,10 @@ func _draw_parallax_starfield() -> void:
 						var g_pos: Vector2 = local_g_pos[g]
 						var g_rad: float = minf(local_g_rad[g], 420.0)
 						var diff: Vector2 = world_p - g_pos
+						var dx: float = absf(diff.x)
+						var dy: float = absf(diff.y)
+						if dx >= g_rad or dy >= g_rad:
+							continue
 						var dist_sq: float = diff.length_squared()
 						if dist_sq < g_rad * g_rad and dist_sq > 0.04:
 							var dist: float = sqrt(dist_sq)
@@ -184,7 +193,12 @@ func _draw_parallax_starfield() -> void:
 							# 1. Secara Optik: Einstein Starlight Deflection (melengkung memutari tepi horizon bintang)
 							var einstein_r: float = g_rad * 0.16
 							var ring_sigma: float = maxf(24.0, g_rad * 0.10)
-							var einstein_arc: float = exp(-pow((dist - einstein_r) / ring_sigma, 2.0))
+							var ring_d: float = absf(dist - einstein_r)
+							var einstein_arc: float = 0.0
+							if ring_d < ring_sigma * 2.2:
+								var norm_d: float = ring_d / (ring_sigma * 2.2)
+								var d2: float = 1.0 - norm_d * norm_d
+								einstein_arc = d2 * d2
 							var optical_bend: float = einstein_arc * (65.0 * g_str)
 							
 							# 2. Secara Fisik: Tarikan Massa Eksotis Super-Berat ke dalam corong gravitasi

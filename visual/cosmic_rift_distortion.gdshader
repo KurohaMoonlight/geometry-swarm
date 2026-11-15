@@ -2,7 +2,7 @@ shader_type canvas_item;
 render_mode blend_mix, unshaded;
 
 // Tekstur layar belakang untuk distorsi optik ruang melingkar murni (Gravitational Lensing)
-uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D screen_texture : hint_screen_texture, filter_linear;
 
 // Radius Event Horizon (Default 0.102)
 uniform float black_hole_radius : hint_range(0.02, 0.25) = 0.102;
@@ -50,24 +50,25 @@ void fragment() {
     vec2 rad_dir = (dist > 0.0001) ? (rel / dist) : vec2(1.0, 0.0);
     vec2 tan_dir = vec2(-rad_dir.y, rad_dir.x);
 
-    // 1. Distorsi Ruang Gravitasi Relativistik (Einstein Ring Equation + Kerr Swirl)
+    // 1. Distorsi Ruang Gravitasi Relativistik (Einstein Ring Deflection + Kerr Swirl)
     float r_horizon = black_hole_radius;
-    float r_einstein = r_horizon * 1.62;
     float r_max = 0.485;
 
     vec2 pixel_disp = vec2(0.0);
 
     if (dist > r_horizon) {
         float t = clamp((dist - r_horizon) / (r_max - r_horizon), 0.0, 1.0);
-        float outer_fade = smoothstep(1.0, 0.05, t);
+        float outer_fade = smoothstep(1.0, 0.04, t);
 
-        // A. Defleksi Radial Einstein
-        float einstein_curve = (pow(r_einstein, 1.7) / pow(max(dist, 0.02), 0.85) - dist);
-        float radial_pixels = einstein_curve * (lensing_strength * 380.0) * outer_fade;
+        // A. Defleksi Radial Einstein:
+        // Menggeser sampel UV ke arah dalam (-rad_dir) sehingga objek di sekitar terdorong
+        // melengkung mengelilingi luar Event Horizon (tidak pernah tertarik masuk menutupi Black Hole!)
+        float einstein_falloff = pow(1.0 - t, 2.15);
+        float radial_pixels = -einstein_falloff * (lensing_strength * 145.0) * outer_fade;
 
         // B. Pusaran Tangensial Frame-Dragging (Kerr Metric Vortex)
-        float swirl_falloff = pow(1.0 - t, 1.6);
-        float swirl_pixels = (swirl_falloff * 240.0 * swirl_strength) * outer_fade;
+        float swirl_falloff = pow(1.0 - t, 1.65);
+        float swirl_pixels = (swirl_falloff * 220.0 * swirl_strength) * outer_fade;
 
         // Rotasi vortex dinamis
         float spin_time = TIME * swirl_speed;
@@ -78,9 +79,14 @@ void fragment() {
         pixel_disp = (rad_dir * radial_pixels + dynamic_tan * swirl_pixels) * boundary_mask;
     }
 
-    // 2. Sampling Background Layar Asli (Grid Arena & Parallax Bintang)
+    // 2. Sampling Background Layar Asli + Bayangan Gravitasi Ergosfer (Redshift Shadow Moat)
+    // Menjamin asteroid atau bintang di dekatnya tidak pernah tembus menutupi cincin foton & mulut Rift!
     vec2 target_screen_uv = clamp(SCREEN_UV + pixel_disp * SCREEN_PIXEL_SIZE, vec2(0.001), vec2(0.999));
     vec4 bg = texture(screen_texture, target_screen_uv);
+
+    float ergosphere_shadow = smoothstep(r_horizon, r_horizon * 1.72, dist);
+    float shadow_mult = mix(ergosphere_shadow * ergosphere_shadow, 1.0, white_hole_polarity * 0.75);
+    bg.rgb *= shadow_mult;
 
     // 3. Efek Petir & Api di Event Horizon selama Fase Charging (charge_progress > 0.0)
     vec3 charge_vfx = vec3(0.0);
@@ -115,8 +121,6 @@ void fragment() {
     }
 
     // 4. Cincin Foton & Bloom Transisi Warna di Tepi Event Horizon
-    // Black Hole: Cincin putih-perak dengan bloom emas megah
-    // White Hole: Black hole versi putih dengan event horizon biru elektrik & bloom transisi warna cyan -> azure -> sapphire/violet
     vec3 photon_emission = vec3(0.0);
     if (dist > r_horizon) {
         float ring_center = r_horizon + photon_ring_width * 0.45;
@@ -125,11 +129,9 @@ void fragment() {
         float sharp_core = exp(-pow(ring_delta / max(0.0008, photon_ring_width * 0.45), 2.0));
         float outer_halo = exp(-pow(ring_delta / max(0.0020, gold_bloom_width * 0.65), 2.0));
         
-        // Warna Cincin Foton Horizon (Emas vs Biru Elektrik)
         vec3 wh_horizon_ring = vec3(2.5, 6.5, 10.5);
         vec3 active_photon_core = mix(photon_core_color.rgb, wh_horizon_ring, white_hole_polarity);
 
-        // Transisi Warna Bloom Spektakuler: Cyan Elektrik -> Biru Azure -> Safir/Violet Kosmik
         float bloom_t = clamp(ring_delta / max(0.003, gold_bloom_width * 1.6), 0.0, 1.0);
         vec3 wh_bloom_inner = vec3(1.6, 5.4, 9.8);
         vec3 wh_bloom_mid   = vec3(0.8, 2.8, 8.2);
@@ -150,7 +152,7 @@ void fragment() {
     vec3 white_hole_core = vec3(8.5, 8.8, 9.2); // Putih murni menyilaukan mutlak (HDR)
     vec3 core_rgb = mix(black_hole_core, white_hole_core, white_hole_polarity);
 
-    // 6. Komposisi Bersih (Murni Distorsi Ruang + Inti Singularitas + Event Horizon)
+    // 6. Komposisi Bersih (Murni Distorsi Ruang + Bayangan Ergosfer + Inti Singularitas + Event Horizon)
     vec3 final_rgb = bg.rgb + photon_emission + charge_vfx;
     final_rgb = mix(final_rgb, core_rgb, horizon_cut);
 

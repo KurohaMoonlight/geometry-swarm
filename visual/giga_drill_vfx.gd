@@ -51,7 +51,7 @@ func setup(p_arena: Node2D, p_sim: Node2D, p_core: Node2D) -> void:
 	player_core = p_core
 
 func _process(delta: float) -> void:
-	if not swarm_sim:
+	if not swarm_sim or swarm_sim.get("PlayerHealth") == null:
 		return
 		
 	var is_charging: bool = swarm_sim.get("IsChargingDrill") == true
@@ -349,7 +349,7 @@ func _update_ion_particles(delta: float, is_charging: bool, is_active: bool, swa
 			})
 
 func _draw() -> void:
-	if not swarm_sim:
+	if not swarm_sim or swarm_sim.get("PlayerHealth") == null:
 		return
 		
 	var is_charging: bool = swarm_sim.get("IsChargingDrill") == true

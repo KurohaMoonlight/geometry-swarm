@@ -13,7 +13,7 @@ namespace GeometrySwarm.Visual;
 public partial class SwarmMultiMeshRenderer : Node2D
 {
     private const int RoleCount = 7;
-    private const int MaxInstancesPerRole = 16384;
+    private const int MaxInstancesPerRole = 4096;
 
     private readonly MultiMeshInstance2D[] _backMeshInstances = new MultiMeshInstance2D[RoleCount];
     private readonly MultiMesh[] _backMultiMeshes = new MultiMesh[RoleCount];

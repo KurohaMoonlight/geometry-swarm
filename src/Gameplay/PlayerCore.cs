@@ -48,6 +48,9 @@ public partial class PlayerCore : CharacterBody2D
     public Vector2 BoostThrustVector { get; set; } = Vector2.Zero;
     public bool IsBraking { get; set; } = false;
     public Vector2 BrakeThrustVector { get; set; } = Vector2.Zero;
+    public bool IsThrusting { get; private set; } = false;
+    public bool IsBoostPriming { get; set; } = false;
+    public float BoostPrimingProgress { get; set; } = 0.0f;
 
     // Ukuran Hexagon diperkecil dari 24 px ke 16 px agar lincah bermanuver di dalam terowongan
     public const float HexRadius = 16.0f;
@@ -196,9 +199,17 @@ public partial class PlayerCore : CharacterBody2D
 
     public override void _Ready()
     {
-        // Spawn langsung di dekat Cosmic Rift 0 agar pemain dapat langsung mengamati animasinya
-        Vector2 rift0Pos = new Vector2(MathF.Cos(-0.155f), MathF.Sin(-0.155f)) * AsteroidFieldManager.RiftOrbitRadius;
-        GlobalPosition = rift0Pos + new Vector2(-460.0f, 140.0f);
+        // Spawn acak yang aman dari Black Hole, Bintang Aether, dan di luar semua asteroid
+        if (AsteroidFieldManager.Instance != null)
+        {
+            var rng = new RandomNumberGenerator();
+            rng.Randomize();
+            GlobalPosition = AsteroidFieldManager.Instance.FindSafeRandomSpawnPoint(rng);
+        }
+        else
+        {
+            GlobalPosition = new Vector2(-2800.0f, -1200.0f);
+        }
 
         ZIndex = 2; // Berada di antara Back Ring (ZIndex=1) dan Front Ring (ZIndex=3)
 
@@ -215,6 +226,14 @@ public partial class PlayerCore : CharacterBody2D
         _circleShape = new CircleShape2D { Radius = HexRadius * 0.92f };
         _collisionShape = new CollisionShape2D { Shape = _circleShape };
         AddChild(_collisionShape);
+
+        // Generator audio prosedural untuk thruster mesin kapal induk
+        var thrusterAudio = new GeometrySwarm.Audio.EngineThrusterAudio
+        {
+            Name = "EngineThrusterAudio"
+        };
+        AddChild(thrusterAudio);
+
         QueueRedraw();
     }
 
@@ -490,6 +509,8 @@ public partial class PlayerCore : CharacterBody2D
             if (Input.IsActionPressed("ui_left") || Input.IsKeyPressed(Key.A)) inputDir.X -= 1.0f;
             if (Input.IsActionPressed("ui_down") || Input.IsKeyPressed(Key.S)) inputDir.Y += 1.0f;
             if (Input.IsActionPressed("ui_up") || Input.IsKeyPressed(Key.W)) inputDir.Y -= 1.0f;
+
+            IsThrusting = inputDir.LengthSquared() > 0.01f;
 
             float currentAccel = HasEscapeSpeedBuff ? (Acceleration * 1.45f) : Acceleration;
             if (inputDir.LengthSquared() > 0.01f)

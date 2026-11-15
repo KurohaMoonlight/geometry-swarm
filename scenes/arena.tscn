@@ -8,6 +8,7 @@
 [ext_resource type="Script" path="res://src/Visual/SwarmMultiMeshRenderer.cs" id="6_render"]
 [ext_resource type="Script" path="res://src/Gameplay/AsteroidFieldManager.cs" id="7_asteroids"]
 [ext_resource type="Script" path="res://src/Gameplay/PlayerCamera.cs" id="8_camera"]
+[ext_resource type="Script" path="res://src/Gameplay/TacticalMap.cs" id="9_map"]
 
 [node name="Arena" type="Node2D"]
 script = ExtResource("1_arena")
@@ -48,54 +49,360 @@ environment = ExtResource("3_env")
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
-[node name="Margin" type="MarginContainer" parent="HUD"]
-anchors_preset = 10
-anchor_right = 1.0
-offset_bottom = 85.0
-theme_override_constants/margin_left = 24
-theme_override_constants/margin_top = 20
-theme_override_constants/margin_right = 24
+[node name="TopLeftMargin" type="MarginContainer" parent="HUD"]
+offset_right = 320.0
+offset_bottom = 90.0
+theme_override_constants/margin_left = 20
+theme_override_constants/margin_top = 16
 
-[node name="VBox" type="VBoxContainer" parent="HUD/Margin"]
+[node name="CorePanel" type="PanelContainer" parent="HUD/TopLeftMargin"]
+custom_minimum_size = Vector2(280, 0)
+layout_mode = 2
+
+[node name="VBox" type="VBoxContainer" parent="HUD/TopLeftMargin/CorePanel"]
 layout_mode = 2
 theme_override_constants/separation = 4
 
-[node name="Title" type="Label" parent="HUD/Margin/VBox"]
+[node name="HeaderHBox" type="HBoxContainer" parent="HUD/TopLeftMargin/CorePanel/VBox"]
 layout_mode = 2
-theme_override_colors/font_color = Color(3.0, 1.8, 0.6, 1)
-theme_override_font_sizes/font_size = 18
-text = "GEOMETRY SWARM // COLOSSAL ASTEROIDS & COSMIC RIFTS (DEBUG RESOURCE: ∞)"
 
-[node name="Guide" type="Label" parent="HUD/Margin/VBox"]
+[node name="CoreBadge" type="Label" parent="HUD/TopLeftMargin/CorePanel/VBox/HeaderHBox"]
 layout_mode = 2
-theme_override_colors/font_color = Color(0.85, 0.75, 1.0, 0.9)
-theme_override_font_sizes/font_size = 13
-text = "WASD: Gerak  |  SPACE: Plasma Boost  |  LMB: Laser/Tembak  |  RMB: Giga Drill  |  TAB: Pabrik"
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.3, 0.9, 1, 1)
+theme_override_font_sizes/font_size = 12
+text = "[ HIVE CORE ]"
 
-[node name="RightMargin" type="MarginContainer" parent="HUD"]
+[node name="CoreHpLabel" type="Label" parent="HUD/TopLeftMargin/CorePanel/VBox/HeaderHBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 12
+text = "600 / 600 HP"
+horizontal_alignment = 2
+
+[node name="CoreHealthBar" type="ProgressBar" parent="HUD/TopLeftMargin/CorePanel/VBox"]
+custom_minimum_size = Vector2(0, 8)
+layout_mode = 2
+max_value = 600.0
+value = 600.0
+show_percentage = false
+
+[node name="CoreCellsLabel" type="Label" parent="HUD/TopLeftMargin/CorePanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.65, 0.82, 0.95, 0.85)
+theme_override_font_sizes/font_size = 11
+text = "◆ Core Modules: 1"
+
+[node name="TopCenterMargin" type="MarginContainer" parent="HUD"]
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -300.0
+offset_right = 300.0
+offset_bottom = 54.0
+grow_horizontal = 2
+theme_override_constants/margin_top = 16
+
+[node name="ResourceHBox" type="HBoxContainer" parent="HUD/TopCenterMargin"]
+layout_mode = 2
+theme_override_constants/separation = 8
+alignment = 1
+
+[node name="FePill" type="PanelContainer" parent="HUD/TopCenterMargin/ResourceHBox"]
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="HUD/TopCenterMargin/ResourceHBox/FePill"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 3
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 3
+
+[node name="Label" type="Label" parent="HUD/TopCenterMargin/ResourceHBox/FePill/Margin"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.95, 0.85, 0.3, 1)
+theme_override_font_sizes/font_size = 11
+text = "◆ Fe: 35"
+
+[node name="QzPill" type="PanelContainer" parent="HUD/TopCenterMargin/ResourceHBox"]
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="HUD/TopCenterMargin/ResourceHBox/QzPill"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 3
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 3
+
+[node name="Label" type="Label" parent="HUD/TopCenterMargin/ResourceHBox/QzPill/Margin"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.25, 0.9, 1, 1)
+theme_override_font_sizes/font_size = 11
+text = "◆ Qz: 15"
+
+[node name="CbPill" type="PanelContainer" parent="HUD/TopCenterMargin/ResourceHBox"]
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="HUD/TopCenterMargin/ResourceHBox/CbPill"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 3
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 3
+
+[node name="Label" type="Label" parent="HUD/TopCenterMargin/ResourceHBox/CbPill/Margin"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.45, 0.3, 1)
+theme_override_font_sizes/font_size = 11
+text = "◆ Cb: 10"
+
+[node name="VxPill" type="PanelContainer" parent="HUD/TopCenterMargin/ResourceHBox"]
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="HUD/TopCenterMargin/ResourceHBox/VxPill"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 3
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 3
+
+[node name="Label" type="Label" parent="HUD/TopCenterMargin/ResourceHBox/VxPill/Margin"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 1, 0.6, 1)
+theme_override_font_sizes/font_size = 11
+text = "◆ Vx: 0"
+
+[node name="AePill" type="PanelContainer" parent="HUD/TopCenterMargin/ResourceHBox"]
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="HUD/TopCenterMargin/ResourceHBox/AePill"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 3
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 3
+
+[node name="Label" type="Label" parent="HUD/TopCenterMargin/ResourceHBox/AePill/Margin"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.9, 0.4, 1)
+theme_override_font_sizes/font_size = 11
+text = "⚡ Ae: 0"
+
+[node name="TopRightMargin" type="MarginContainer" parent="HUD"]
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-offset_left = -420.0
-offset_bottom = 110.0
+offset_left = -380.0
+offset_bottom = 120.0
 grow_horizontal = 0
-theme_override_constants/margin_top = 20
-theme_override_constants/margin_right = 24
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 20
 
-[node name="VBox" type="VBoxContainer" parent="HUD/RightMargin"]
+[node name="VBox" type="VBoxContainer" parent="HUD/TopRightMargin"]
 layout_mode = 2
-theme_override_constants/separation = 2
+theme_override_constants/separation = 4
 
-[node name="FpsLabel" type="Label" parent="HUD/RightMargin/VBox"]
+[node name="FleetPanel" type="PanelContainer" parent="HUD/TopRightMargin/VBox"]
 layout_mode = 2
-theme_override_colors/font_color = Color(0.3, 2.5, 1.2, 1)
-theme_override_font_sizes/font_size = 18
-horizontal_alignment = 2
-text = "FPS: 60"
 
-[node name="SwarmLabel" type="Label" parent="HUD/RightMargin/VBox"]
+[node name="VBox" type="VBoxContainer" parent="HUD/TopRightMargin/VBox/FleetPanel"]
 layout_mode = 2
-theme_override_colors/font_color = Color(0.4, 2.0, 2.6, 0.9)
+theme_override_constants/separation = 3
+
+[node name="FleetHeaderLabel" type="Label" parent="HUD/TopRightMargin/VBox/FleetPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.9, 0.95, 1, 1)
 theme_override_font_sizes/font_size = 13
+text = "SWARM FLEET: 55 UNITS"
+
+[node name="FleetCompositionLabel" type="Label" parent="HUD/TopRightMargin/VBox/FleetPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.85, 1, 0.9)
+theme_override_font_sizes/font_size = 11
+text = "▲ 40  •  ◈ 5  •  ⛏ 10  •  🛡 0"
+
+[node name="AbilityStatusLabel" type="Label" parent="HUD/TopRightMargin/VBox/FleetPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.4, 1.8, 2.2, 1)
+theme_override_font_sizes/font_size = 11
+text = "★ GIGA DRILL: READY [RMB]"
+
+[node name="FpsLabel" type="Label" parent="HUD/TopRightMargin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.45, 0.7, 0.55, 0.7)
+theme_override_font_sizes/font_size = 10
+text = "60 FPS"
 horizontal_alignment = 2
-text = "SWARM: 55\n[ Orbit: 55 | Fired: 0 | Return: 0 ]\nDARTS: 40 | SCANNERS: 5 | MINERS: 10 | DEFENDERS: 0 | CORES: 1"
+
+[node name="RightCenterMargin" type="MarginContainer" parent="HUD"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -340.0
+offset_top = 138.0
+offset_bottom = 224.0
+grow_horizontal = 0
+theme_override_constants/margin_right = 20
+
+[node name="RivalPanel" type="PanelContainer" parent="HUD/RightCenterMargin"]
+layout_mode = 2
+
+[node name="VBox" type="VBoxContainer" parent="HUD/RightCenterMargin/RivalPanel"]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="HeaderHBox" type="HBoxContainer" parent="HUD/RightCenterMargin/RivalPanel/VBox"]
+layout_mode = 2
+
+[node name="RivalTitle" type="Label" parent="HUD/RightCenterMargin/RivalPanel/VBox/HeaderHBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(1, 0.4, 0.4, 1)
+theme_override_font_sizes/font_size = 11
+text = "⚔ RIVAL HIVE"
+
+[node name="RivalDistLabel" type="Label" parent="HUD/RightCenterMargin/RivalPanel/VBox/HeaderHBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.85, 0.85, 0.9)
+theme_override_font_sizes/font_size = 11
+text = "4,200 px"
+horizontal_alignment = 2
+
+[node name="RivalHealthBar" type="ProgressBar" parent="HUD/RightCenterMargin/RivalPanel/VBox"]
+custom_minimum_size = Vector2(0, 6)
+layout_mode = 2
+max_value = 600.0
+value = 600.0
+show_percentage = false
+
+[node name="RivalStateLabel" type="Label" parent="HUD/RightCenterMargin/RivalPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.8, 0.8, 0.9, 0.85)
+theme_override_font_sizes/font_size = 10
+text = "Status: Mining"
+
+[node name="BottomControlsMargin" type="MarginContainer" parent="HUD"]
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -340.0
+offset_top = -140.0
+offset_right = 340.0
+offset_bottom = -112.0
+grow_horizontal = 2
+grow_vertical = 0
+
+[node name="ControlsPanel" type="PanelContainer" parent="HUD/BottomControlsMargin"]
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="HUD/BottomControlsMargin/ControlsPanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 3
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 3
+
+[node name="ControlsLabel" type="Label" parent="HUD/BottomControlsMargin/ControlsPanel/Margin"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.65, 0.82, 0.95, 0.85)
+theme_override_font_sizes/font_size = 11
+text = "WASD: Move  •  SPACE: Plasma Boost  •  LMB: Laser/Fire  •  RMB: Giga Drill  •  TAB: Foundry  •  M: Tactical Map"
+horizontal_alignment = 1
+
+[node name="TacticalMap" type="Control" parent="HUD"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("9_map")
+
+[node name="PauseOverlay" type="Control" parent="HUD"]
+visible = false
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Backdrop" type="ColorRect" parent="HUD/PauseOverlay"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.01, 0.015, 0.03, 0.65)
+
+[node name="Center" type="CenterContainer" parent="HUD/PauseOverlay"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Panel" type="PanelContainer" parent="HUD/PauseOverlay/Center"]
+custom_minimum_size = Vector2(380, 0)
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="HUD/PauseOverlay/Center/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 22
+theme_override_constants/margin_right = 24
+theme_override_constants/margin_bottom = 22
+
+[node name="VBox" type="VBoxContainer" parent="HUD/PauseOverlay/Center/Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="HUD/PauseOverlay/Center/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.35, 0.9, 1, 1)
+theme_override_font_sizes/font_size = 18
+text = "SIMULASI DITAHAN // SLOW-MOTION"
+horizontal_alignment = 1
+
+[node name="Subtitle" type="Label" parent="HUD/PauseOverlay/Center/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.8, 0.9, 0.8)
+theme_override_font_sizes/font_size = 11
+text = "Kecepatan ruang-waktu melambat hingga 10%"
+horizontal_alignment = 1
+
+[node name="HSeparator" type="HSeparator" parent="HUD/PauseOverlay/Center/Panel/Margin/VBox"]
+layout_mode = 2
+
+[node name="BtnVBox" type="VBoxContainer" parent="HUD/PauseOverlay/Center/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ResumeBtn" type="Button" parent="HUD/PauseOverlay/Center/Panel/Margin/VBox/BtnVBox"]
+custom_minimum_size = Vector2(0, 36)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.4, 2, 2.4, 1)
+theme_override_font_sizes/font_size = 13
+text = "▶ LANJUTKAN PERMAINAN [ESC]"
+
+[node name="RestartBtn" type="Button" parent="HUD/PauseOverlay/Center/Panel/Margin/VBox/BtnVBox"]
+custom_minimum_size = Vector2(0, 34)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.95, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "↺ RESTART EKSPEDISI"
+
+[node name="MainMenuBtn" type="Button" parent="HUD/PauseOverlay/Center/Panel/Margin/VBox/BtnVBox"]
+custom_minimum_size = Vector2(0, 34)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(1, 0.5, 0.5, 1)
+theme_override_font_sizes/font_size = 12
+text = "◀ KEMBALI KE MAIN MENU"

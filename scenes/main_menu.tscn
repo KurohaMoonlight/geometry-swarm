@@ -1,0 +1,343 @@
+[gd_scene format=3 uid="uid://b6k1m8n3p2q4r"]
+
+[ext_resource type="Script" path="res://scenes/main_menu.gd" id="1_menu"]
+[ext_resource type="Script" path="res://scenes/menu_background.gd" id="2_bg"]
+[ext_resource type="Shader" path="res://visual/cosmic_rift_distortion.gdshader" id="3_shader"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_bh"]
+shader = ExtResource("3_shader")
+shader_parameter/black_hole_radius = 0.102
+shader_parameter/lensing_strength = 1.7
+shader_parameter/swirl_strength = 2.4
+shader_parameter/swirl_speed = 0.35
+shader_parameter/charge_progress = 0.0
+shader_parameter/lightning_intensity = 4.8
+shader_parameter/fire_intensity = 4.2
+shader_parameter/white_hole_polarity = 0.0
+shader_parameter/photon_ring_width = 0.003
+shader_parameter/photon_ring_intensity = 5.5
+shader_parameter/gold_bloom_width = 0.01
+shader_parameter/gold_bloom_intensity = 3.4
+shader_parameter/photon_core_color = Color(5.8, 5.6, 5.2, 1)
+shader_parameter/gold_bloom_color = Color(3.4, 2.3, 0.58, 1)
+
+[node name="MainMenu" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_menu")
+
+[node name="Background" type="Control" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="BackgroundColor" type="ColorRect" parent="Background"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.008, 0.004, 0.015, 1)
+
+[node name="StarfieldGrid" type="Node2D" parent="Background"]
+script = ExtResource("2_bg")
+
+[node name="TitleCanvas" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_top = 110.0
+offset_bottom = 330.0
+grow_horizontal = 2
+mouse_filter = 2
+theme_override_constants/margin_left = 40
+theme_override_constants/margin_right = 40
+
+[node name="VBox" type="VBoxContainer" parent="TitleCanvas"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 6
+alignment = 1
+
+[node name="TitleBadge" type="Label" parent="TitleCanvas/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.4, 0.85, 1, 0.9)
+theme_override_font_sizes/font_size = 13
+text = "◆ HIVE CORE SYSTEM // EVENT HORIZON ◆"
+horizontal_alignment = 1
+
+[node name="MainTitle" type="Label" parent="TitleCanvas/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 0.95, 1, 1)
+theme_override_colors/font_shadow_color = Color(0, 0.35, 0.75, 0.6)
+theme_override_constants/shadow_offset_x = 3
+theme_override_constants/shadow_offset_y = 3
+theme_override_font_sizes/font_size = 72
+text = "GEOMETRY SWARM"
+horizontal_alignment = 1
+
+[node name="SubTitle" type="Label" parent="TitleCanvas/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.35, 1)
+theme_override_colors/font_shadow_color = Color(0.6, 0.35, 0.05, 0.5)
+theme_override_constants/shadow_offset_x = 2
+theme_override_constants/shadow_offset_y = 2
+theme_override_font_sizes/font_size = 22
+text = "CHRONO RIFT // SINGULARITY"
+horizontal_alignment = 1
+
+[node name="LoreText" type="Label" parent="TitleCanvas/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.8, 0.95, 0.7)
+theme_override_font_sizes/font_size = 12
+text = "EVOLVE THE HIVE • BEND SPACETIME • CONSUME THE VOID"
+horizontal_alignment = 1
+
+[node name="BackBufferCopy" type="BackBufferCopy" parent="."]
+copy_mode = 2
+
+[node name="BlackHoleRoot" type="Node2D" parent="."]
+position = Vector2(960, 360)
+
+[node name="BlackHoleRect" type="ColorRect" parent="BlackHoleRoot"]
+material = SubResource("ShaderMaterial_bh")
+custom_minimum_size = Vector2(560, 560)
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -280.0
+offset_top = -280.0
+offset_right = 280.0
+offset_bottom = 280.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="MenuCanvas" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -240.0
+offset_top = 40.0
+offset_right = 240.0
+offset_bottom = 480.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="MenuCanvas"]
+layout_mode = 2
+theme_override_constants/separation = 24
+alignment = 1
+
+[node name="BtnBox" type="VBoxContainer" parent="MenuCanvas/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 12
+alignment = 1
+
+[node name="PlayButton" type="Button" parent="MenuCanvas/VBox/BtnBox"]
+custom_minimum_size = Vector2(340, 52)
+layout_mode = 2
+size_flags_horizontal = 4
+focus_mode = 0
+theme_override_colors/font_color = Color(0.35, 1.8, 2.2, 1)
+theme_override_font_sizes/font_size = 15
+text = "▶  MULAI EKSPEDISI"
+
+[node name="DebugButton" type="Button" parent="MenuCanvas/VBox/BtnBox"]
+custom_minimum_size = Vector2(340, 46)
+layout_mode = 2
+size_flags_horizontal = 4
+focus_mode = 0
+theme_override_colors/font_color = Color(1, 0.85, 0.35, 1)
+theme_override_font_sizes/font_size = 13
+text = "⚡ MODE DEBUG: RESOURCE INFINITE [OFF]"
+
+[node name="ControlsButton" type="Button" parent="MenuCanvas/VBox/BtnBox"]
+custom_minimum_size = Vector2(340, 46)
+layout_mode = 2
+size_flags_horizontal = 4
+focus_mode = 0
+theme_override_colors/font_color = Color(0.85, 0.92, 1, 1)
+theme_override_font_sizes/font_size = 13
+text = "⌨  KONTROL & PANDUAN"
+
+[node name="QuitButton" type="Button" parent="MenuCanvas/VBox/BtnBox"]
+custom_minimum_size = Vector2(340, 46)
+layout_mode = 2
+size_flags_horizontal = 4
+focus_mode = 0
+theme_override_colors/font_color = Color(1, 0.55, 0.55, 1)
+theme_override_font_sizes/font_size = 13
+text = "✕  KELUAR KE DESKTOP"
+
+[node name="FooterLabel" type="Label" parent="MenuCanvas/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.45, 0.55, 0.65, 0.65)
+theme_override_font_sizes/font_size = 11
+text = "GEOMETRY SWARM v1.2.0 • BUILT WITH GODOT 4.7 & C# ECS"
+horizontal_alignment = 1
+
+[node name="ControlsModal" type="Control" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Backdrop" type="ColorRect" parent="ControlsModal"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.01, 0.015, 0.03, 0.75)
+
+[node name="Center" type="CenterContainer" parent="ControlsModal"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Panel" type="PanelContainer" parent="ControlsModal/Center"]
+custom_minimum_size = Vector2(520, 0)
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="ControlsModal/Center/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 28
+theme_override_constants/margin_top = 24
+theme_override_constants/margin_right = 28
+theme_override_constants/margin_bottom = 24
+
+[node name="VBox" type="VBoxContainer" parent="ControlsModal/Center/Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="Title" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.35, 0.9, 1, 1)
+theme_override_font_sizes/font_size = 16
+text = "PANDUAN SISTEM ARMADA & KONTROL"
+horizontal_alignment = 1
+
+[node name="HSeparator" type="HSeparator" parent="ControlsModal/Center/Panel/Margin/VBox"]
+layout_mode = 2
+
+[node name="GuideGrid" type="GridContainer" parent="ControlsModal/Center/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/h_separation = 16
+theme_override_constants/v_separation = 8
+columns = 2
+
+[node name="Key1" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "[W] [A] [S] [D]"
+
+[node name="Desc1" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.9, 1, 0.9)
+theme_override_font_sizes/font_size = 12
+text = "Navigasi & Kemudi Kapal Hive Core"
+
+[node name="Key2" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "[SPACE] / Spasi"
+
+[node name="Desc2" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.9, 1, 0.9)
+theme_override_font_sizes/font_size = 12
+text = "Sacrificial Plasma Boost (Bakar Dart Needle)"
+
+[node name="Key3" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "[LMB] / Klik Kiri"
+
+[node name="Desc3" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.9, 1, 0.9)
+theme_override_font_sizes/font_size = 12
+text = "Laser Penambang / Tembak Swarm Aktif"
+
+[node name="Key4" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "[RMB] / Klik Kanan"
+
+[node name="Desc4" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.9, 1, 0.9)
+theme_override_font_sizes/font_size = 12
+text = "Charge & Tembakkan Super Giga Drill Break"
+
+[node name="Key5" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "[1] s/d [5]"
+
+[node name="Desc5" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.9, 1, 0.9)
+theme_override_font_sizes/font_size = 12
+text = "Multi-Toggle Slot Senjata Swarm"
+
+[node name="Key6" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "[TAB]"
+
+[node name="Desc6" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.9, 1, 0.9)
+theme_override_font_sizes/font_size = 12
+text = "Buka / Tutup Pabrik Hive Foundry"
+
+[node name="Key7" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.4, 1)
+theme_override_font_sizes/font_size = 12
+text = "[ESC]"
+
+[node name="Desc7" type="Label" parent="ControlsModal/Center/Panel/Margin/VBox/GuideGrid"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.85, 0.9, 1, 0.9)
+theme_override_font_sizes/font_size = 12
+text = "Slow-Motion Bullet Time & Menu Keluar"
+
+[node name="CloseButton" type="Button" parent="ControlsModal/Center/Panel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 36)
+layout_mode = 2
+focus_mode = 0
+theme_override_colors/font_color = Color(0.35, 1.8, 2.2, 1)
+theme_override_font_sizes/font_size = 12
+text = "TUTUP PANDUAN"
+

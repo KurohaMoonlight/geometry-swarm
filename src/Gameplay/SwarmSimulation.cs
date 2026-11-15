@@ -251,6 +251,7 @@ public partial class SwarmSimulation : Node2D
     {
         public Vector2 Center;
         public float Radius;
+        public float PrevRadius;
         public float StartRadius;
         public float MaxRadius;
         public float Life;
@@ -259,6 +260,8 @@ public partial class SwarmSimulation : Node2D
         public Color Color2;
         public bool IsEnergy;
         public bool IsInward;
+        public float PushPower;
+        public bool AffectsEntities;
     }
     private readonly List<AsteroidShockwaveRing> _asteroidShockwaves = new();
 
@@ -344,6 +347,10 @@ public partial class SwarmSimulation : Node2D
         ? $"{_enemyController.State} [⛏ {_enemyController.MinerCount} | ⛨ {_enemyController.GuardianCount} | ▲ {_enemyController.DartCount}]"
         : "None";
 
+    public int[] ResourceStock => _resourceStock;
+    public int GetResource(int index) => (index >= 0 && index < _resourceStock.Length) ? _resourceStock[index] : 0;
+    public bool IsInfiniteResources => InfiniteDebugResources;
+
     public int GigaDrillTotalUnits => _activeDrillFormationCount + _activeDefenderCoreCount;
     public int GigaDrillDefenderCoreCount => _activeDefenderCoreCount;
     public int GigaDrillLanceCount => _activeDrillFormationCount;
@@ -362,6 +369,11 @@ public partial class SwarmSimulation : Node2D
             _playerCore.CoreDestroyed += OnPlayerCoreDestroyed;
         }
         _renderer = GetNode<SwarmMultiMeshRenderer>("SwarmRenderer");
+
+        if (ProjectSettings.HasSetting("debug/infinite_resources") && (bool)ProjectSettings.GetSetting("debug/infinite_resources"))
+        {
+            InfiniteDebugResources = true;
+        }
 
         if (InfiniteDebugResources)
         {
@@ -390,9 +402,18 @@ public partial class SwarmSimulation : Node2D
             AddChild(_plasmaBoostMesh);
         }
 
-        // Inisialisasi Rival Hive Core & AI Controller di Sabuk Asteroid (Jarak ~1.750 px dari Pusat)
+        // Inisialisasi Rival Hive Core & AI Controller di Sabuk Asteroid yang aman & jauh dari pemain
         _enemyCore = new EnemyCore();
-        _enemyCore.GlobalPosition = new Vector2(1750.0f, 350.0f);
+        if (AsteroidFieldManager.Instance != null && _playerCore != null)
+        {
+            var rng = new RandomNumberGenerator();
+            rng.Randomize();
+            _enemyCore.GlobalPosition = AsteroidFieldManager.Instance.FindSafeRandomSpawnPoint(rng, _playerCore.GlobalPosition, 4200.0f);
+        }
+        else
+        {
+            _enemyCore.GlobalPosition = new Vector2(2800.0f, 1500.0f);
+        }
         AddChild(_enemyCore);
         _enemyCore.EnemyEscapePodEjected += OnEnemyEscapePodEjected;
         _enemyCore.EnemyCoreDestroyed += OnEnemyCoreDestroyed;
@@ -656,7 +677,7 @@ public partial class SwarmSimulation : Node2D
         _foundryMainPanel = new PanelContainer
         {
             Name = "HiveFoundryPanel",
-            Position = new Vector2(FoundryOpenX, 72),
+            Position = new Vector2(FoundryOpenX, 108),
             CustomMinimumSize = new Vector2(FoundryPanelWidth, 0),
             MouseFilter = Control.MouseFilterEnum.Stop
         };
@@ -674,7 +695,7 @@ public partial class SwarmSimulation : Node2D
 
         var titleLbl = new Label
         {
-            Text = "⚙ HIVE FOUNDRY // PABRIK (DEBUG: ∞)",
+            Text = InfiniteDebugResources ? "⚙ HIVE FOUNDRY // PABRIK (DEBUG: ∞)" : "⚙ HIVE FOUNDRY // PABRIK",
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill
         };
         titleLbl.AddThemeColorOverride("font_color", new Color(1.0f, 0.88f, 0.35f));
@@ -702,7 +723,7 @@ public partial class SwarmSimulation : Node2D
         _toggleFoundryButton = new Button
         {
             Text = "◀ TUTUP [TAB]",
-            Position = new Vector2(FoundryOpenBtnX, 72),
+            Position = new Vector2(FoundryOpenBtnX, 108),
             CustomMinimumSize = new Vector2(110, 28),
             MouseFilter = Control.MouseFilterEnum.Stop,
             FocusMode = Control.FocusModeEnum.None
@@ -895,13 +916,14 @@ public partial class SwarmSimulation : Node2D
             }
         }
 
-        // 4. Tombol Uji Tambah Dart Cepat
+        // 4. Tombol Uji Tambah Dart Cepat (hanya tampil jika mode debug aktif)
         var cheatBtn = new Button
         {
             Text = "+ Tambah 50 Dart Needle [Uji Boost Space]",
             CustomMinimumSize = new Vector2(0, 26),
             MouseFilter = Control.MouseFilterEnum.Stop,
-            FocusMode = Control.FocusModeEnum.None
+            FocusMode = Control.FocusModeEnum.None,
+            Visible = InfiniteDebugResources
         };
         cheatBtn.AddThemeFontSizeOverride("font_size", 10);
         cheatBtn.Pressed += () =>
@@ -2231,14 +2253,22 @@ public partial class SwarmSimulation : Node2D
         _activeBoostDartCount = activeCount;
         BoostAimDirection = aimDir;
 
-        // 3. Masa Ignition Priming Singkat (~0.42s) lalu langsung Full Power Sacrificial Thrust
-        _boostPrimingDuration = 0.42f;
+        // 3. Masa Ignition Priming (~0.65s) ala Godzilla Atomic Breath Charge lalu Full Power Blast
+        _boostPrimingDuration = 0.65f;
         _boostPrimingTimer += dt;
         float primingProgress = Mathf.Clamp(_boostPrimingTimer / _boostPrimingDuration, 0.0f, 1.0f);
+        bool wasFullPower = _isBoostFullPower;
         _isBoostFullPower = (_boostPrimingTimer >= _boostPrimingDuration);
 
         _boostPulseTimer += dt * (22.0f + primingProgress * 36.0f);
         _boostSacrificeFlash = MathF.Max(0.0f, _boostSacrificeFlash - dt * 6.5f);
+
+        // Hentakan detonasi seketika saat priming selesai & daya dorong penuh meledak
+        if (!wasFullPower && _isBoostFullPower)
+        {
+            _boostSacrificeFlash = 1.6f;
+            PlayerCamera.Instance?.TriggerShake(15.0f);
+        }
 
         float thrusterFillRatio = Mathf.Clamp((float)activeCount / MaxBoostThrusterSlots, 0.40f, 1.0f);
         Vector2 shipVel = _playerCore.Velocity;
@@ -2253,15 +2283,24 @@ public partial class SwarmSimulation : Node2D
         {
             float boostAccel = 7200.0f * thrusterFillRatio;
             _playerCore.IsBoosting = true;
+            _playerCore.IsBoostPriming = false;
+            _playerCore.BoostPrimingProgress = 1.0f;
             _playerCore.BoostThrustVector = aimDir * boostAccel;
             BoostPowerRatio = Mathf.Clamp(0.62f + speedNorm * 0.38f, 0.62f, 1.0f);
         }
         else
         {
-            float warmupAccel = 2600.0f * primingProgress * thrusterFillRatio;
-            _playerCore.IsBoosting = true;
-            _playerCore.BoostThrustVector = aimDir * warmupAccel;
-            BoostPowerRatio = Mathf.Lerp(0.22f, 0.62f, primingProgress);
+            // Fase Priming (Godzilla Charge): Kapal menahan energi sebelum meluncur
+            _playerCore.IsBoosting = false;
+            _playerCore.IsBoostPriming = true;
+            _playerCore.BoostPrimingProgress = primingProgress;
+            _playerCore.BoostThrustVector = aimDir * (120.0f * primingProgress);
+            BoostPowerRatio = primingProgress * 0.35f;
+
+            if (primingProgress > 0.20f)
+            {
+                PlayerCamera.Instance?.TriggerShake(0.6f + 1.8f * primingProgress);
+            }
         }
 
         float coreRadius = 20.0f + MathF.Sqrt(Math.Max(1, _playerCore.CoreCellCount)) * 8.5f;
@@ -2274,8 +2313,8 @@ public partial class SwarmSimulation : Node2D
         //    Dart di nozzle terbakar habis menjadi propelan plasma seiring laju kapal!
         // =========================================================================
         float burnRatePerSec = _isBoostFullPower
-            ? (3.2f + speedNorm * speedNorm * 10.8f) // ~3.2 Dart/s saat awal -> ~14 Dart/s pada top speed
-            : (1.5f * primingProgress);
+            ? (0.8f + speedNorm * speedNorm * 1.4f) // ~0.8 hingga 2.2 Dart/s (jauh lebih awet & stabil)
+            : 0.0f; // Tidak mengorbankan Dart saat fase priming
 
         _boostSacrificeAccumulator += burnRatePerSec * dt;
         if (_boostSacrificeAccumulator >= 1.0f)
@@ -2360,20 +2399,28 @@ public partial class SwarmSimulation : Node2D
         // =========================================================================
         if (_plasmaBoostMesh != null && _plasmaBoostMat != null)
         {
-            float pulse = _boostPulseTimer;
-            float mainJetLen = Mathf.Lerp(175.0f, 360.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.2f));
-            float plumeWidth = (34.0f + 26.0f * power);
-            Vector2 midPos = focalChamberPos + backDir * (mainJetLen * 0.5f);
+            if (_isBoostFullPower)
+            {
+                float pulse = _boostPulseTimer;
+                float mainJetLen = Mathf.Lerp(175.0f, 360.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.2f));
+                float plumeWidth = (34.0f + 26.0f * power);
+                Vector2 midPos = focalChamberPos + backDir * (mainJetLen * 0.5f);
 
-            _plasmaBoostMesh.Visible = true;
-            _plasmaBoostMesh.GlobalPosition = midPos;
-            _plasmaBoostMesh.GlobalRotation = backDir.Angle();
-            _plasmaBoostMesh.Scale = new Vector2(mainJetLen, plumeWidth);
+                _plasmaBoostMesh.Visible = true;
+                _plasmaBoostMesh.GlobalPosition = midPos;
+                _plasmaBoostMesh.GlobalRotation = backDir.Angle();
+                _plasmaBoostMesh.Scale = new Vector2(mainJetLen, plumeWidth);
 
-            _plasmaBoostMat.SetShaderParameter("power", power);
-            _plasmaBoostMat.SetShaderParameter("time", pulse);
-            _plasmaBoostMat.SetShaderParameter("flash_boost", _boostSacrificeFlash);
-            _plasmaBoostMat.SetShaderParameter("diamond_count", 6.8f);
+                _plasmaBoostMat.SetShaderParameter("power", power);
+                _plasmaBoostMat.SetShaderParameter("time", pulse);
+                _plasmaBoostMat.SetShaderParameter("flash_boost", _boostSacrificeFlash);
+                _plasmaBoostMat.SetShaderParameter("diamond_count", 6.8f);
+            }
+            else
+            {
+                // Semburan jet utama baru menyembur saat priming selesai
+                _plasmaBoostMesh.Visible = false;
+            }
         }
 
         QueueRedraw();
@@ -2571,6 +2618,8 @@ public partial class SwarmSimulation : Node2D
         if (_playerCore != null)
         {
             _playerCore.IsBoosting = false;
+            _playerCore.IsBoostPriming = false;
+            _playerCore.BoostPrimingProgress = 0.0f;
             _playerCore.BoostThrustVector = Vector2.Zero;
         }
 
@@ -4417,16 +4466,24 @@ public partial class SwarmSimulation : Node2D
         bool redrawNeeded = !_isMiningLaserActive && !_isBoostActive;
         bool stockChanged = false;
 
-        // Update gelombang kejut kehancuran asteroid
+        // Update gelombang kejut & dorongan fisika wavefront seamless
         for (int i = _asteroidShockwaves.Count - 1; i >= 0; i--)
         {
             var sw = _asteroidShockwaves[i];
+            float prevR = sw.Radius;
             sw.Life -= dt;
             float progress = 1.0f - Mathf.Clamp(sw.Life / sw.MaxLife, 0.0f, 1.0f);
             float startR = sw.StartRadius > 0.0f ? sw.StartRadius : 12.0f;
             sw.Radius = sw.IsInward
                 ? Mathf.Lerp(startR, sw.MaxRadius, progress * progress)
                 : Mathf.Lerp(startR, sw.MaxRadius, MathF.Sqrt(progress));
+            sw.PrevRadius = prevR;
+
+            if (sw.AffectsEntities && !sw.IsInward && sw.PushPower > 1.0f)
+            {
+                ApplyExpandingShockwaveRingPhysics(in sw, dt);
+            }
+
             if (sw.Life <= 0.0f)
             {
                 _asteroidShockwaves.RemoveAt(i);
@@ -4536,30 +4593,36 @@ public partial class SwarmSimulation : Node2D
 
     public void TriggerAsteroidDestructionFx(Vector2 position, float asteroidRadius, Color glowColor, bool isEnergy, bool suppressGridImpulse = false)
     {
-        // 1. Gelombang kejut ledakan asteroid melingkar dinamis (Expanding Vector Shockwave Ring)
+        // 1. Gelombang kejut ledakan asteroid melingkar dinamis (Expanding Physical Vector Shockwave Ring)
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
         {
             Center = position,
             Radius = 16.0f,
-            MaxRadius = asteroidRadius * (isEnergy ? 4.8f : 1.75f),
-            Life = isEnergy ? 0.85f : 0.55f,
-            MaxLife = isEnergy ? 0.85f : 0.55f,
+            PrevRadius = 16.0f,
+            StartRadius = 16.0f,
+            MaxRadius = asteroidRadius * (isEnergy ? 9.5f : 2.6f),
+            Life = isEnergy ? 0.92f : 0.62f,
+            MaxLife = isEnergy ? 0.92f : 0.62f,
             Color1 = isEnergy ? new Color(5.2f, 4.4f, 1.8f, 0.98f) : new Color(0.9f, 0.9f, 1.0f, 0.75f),
             Color2 = isEnergy ? new Color(0.8f, 3.8f, 5.2f, 0.90f) : new Color(0.35f, 0.35f, 0.45f, 0.5f),
-            IsEnergy = isEnergy
+            IsEnergy = isEnergy,
+            IsInward = false,
+            PushPower = isEnergy ? 1180.0f : 640.0f,
+            AffectsEntities = true
         });
 
         // EFEK SUPERNOVA DETONATION: Dorongan Kinetik Masif & Robekan Grid Latar Belakang
         if (isEnergy)
         {
-            // A. Dorongan Kinetik Supernova Dahsyat ke Kapal Induk Pemain
+            // A. Dorongan Kinetik Supernova ke Kapal Induk Pemain
             if (PlayerCore.Instance != null && IsInstanceValid(PlayerCore.Instance))
             {
                 float pDist = position.DistanceTo(PlayerCore.Instance.GlobalPosition);
-                if (pDist < 950.0f)
+                if (pDist < 1200.0f)
                 {
                     Vector2 pDir = (PlayerCore.Instance.GlobalPosition - position).Normalized();
-                    float blastForce = Mathf.Lerp(1200.0f, 280.0f, pDist / 950.0f);
+                    float shieldMult = PlayerCore.Instance.HasShockwaveShield ? 0.25f : 1.0f;
+                    float blastForce = Mathf.Lerp(920.0f, 220.0f, pDist / 1200.0f) * shieldMult;
                     PlayerCore.Instance.Velocity += pDir * blastForce;
                 }
             }
@@ -4569,26 +4632,27 @@ public partial class SwarmSimulation : Node2D
             {
                 if (swarm.State == SwarmState.Dead) return;
                 float dDistSq = position.DistanceSquaredTo(pPos.Value);
-                if (dDistSq < 810000.0f)
+                if (dDistSq < 1210000.0f)
                 {
                     float dDist = MathF.Sqrt(dDistSq);
                     Vector2 dDir = (pPos.Value - position) / (dDist > 0.001f ? dDist : 1.0f);
-                    float blast = Mathf.Lerp(980.0f, 240.0f, dDist / 900.0f);
+                    float blast = Mathf.Lerp(860.0f, 200.0f, dDist / 1100.0f);
                     pVel.Value += dDir * blast;
                 }
             });
 
-            // C. Dorongan Kinetik Radial ke Asteroid Lain di Sekitarnya
+            // C. Dorongan Kinetik Radial ke Asteroid Lain di Sekitarnya (dengan _supernovaEjectionTimer aktif!)
             for (int a = 0; a < Asteroid.ActiveAsteroids.Count; a++)
             {
                 var other = Asteroid.ActiveAsteroids[a];
                 if (!IsInstanceValid(other) || !other.IsActiveInTree) continue;
-                float aDistSq = position.DistanceSquaredTo(other.CachedPosition);
-                if (aDistSq < 902500.0f && aDistSq > 1.0f)
+                float aDist = position.DistanceTo(other.CachedPosition);
+                if (aDist < 1650.0f && aDist > 1.0f)
                 {
-                    float aDist = MathF.Sqrt(aDistSq);
                     Vector2 aDir = (other.CachedPosition - position) / aDist;
-                    other.LinearVelocity += aDir * 360.0f;
+                    float falloff = Mathf.Clamp(1.0f - (aDist / 1650.0f), 0.15f, 1.0f);
+                    float massScale = Mathf.Clamp(300.0f / MathF.Max(140.0f, other.Radius), 0.5f, 1.35f);
+                    other.ApplyShockwaveImpulse(aDir * (Mathf.Lerp(140.0f, 540.0f, falloff) * massScale), 4.8f);
                 }
             }
 
@@ -4600,7 +4664,20 @@ public partial class SwarmSimulation : Node2D
         }
         else
         {
-            // Gelombang kejut runtuhnya cangkang asteroid batu saat 100% mineral tuntas dipanen
+            // Gelombang kejut runtuhnya cangkang asteroid batu ikut mendorong objek di dekatnya
+            for (int a = 0; a < Asteroid.ActiveAsteroids.Count; a++)
+            {
+                var other = Asteroid.ActiveAsteroids[a];
+                if (!IsInstanceValid(other) || !other.IsActiveInTree) continue;
+                float aDist = position.DistanceTo(other.CachedPosition);
+                float maxR = asteroidRadius * 2.6f + other.Radius;
+                if (aDist < maxR && aDist > 1.0f)
+                {
+                    Vector2 aDir = (other.CachedPosition - position) / aDist;
+                    float falloff = Mathf.Clamp(1.0f - (aDist / maxR), 0.15f, 1.0f);
+                    other.ApplyShockwaveImpulse(aDir * (280.0f * falloff), 3.6f);
+                }
+            }
             EmitSignal(SignalName.SwarmClashImpulse, position, 1500.0f, 300.0f);
         }
 
@@ -4668,20 +4745,139 @@ public partial class SwarmSimulation : Node2D
         QueueRedraw();
     }
 
+    /// <summary>
+    /// Menerapkan dorongan fisik wavefront secara seamless saat cincin shockwave mengembang dari PrevRadius ke Radius.
+    /// Asteroid yang dilewati gelombang terdorong secara mulus dan saling menabrak asteroid lain di jalurnya!
+    /// </summary>
+    private void ApplyExpandingShockwaveRingPhysics(in AsteroidShockwaveRing sw, float dt)
+    {
+        float bandHalf = MathF.Max(95.0f, MathF.Abs(sw.Radius - sw.PrevRadius) * 1.75f);
+        float minWaveR = MathF.Max(0.0f, MathF.Min(sw.PrevRadius, sw.Radius) - bandHalf);
+        float maxWaveR = MathF.Max(sw.PrevRadius, sw.Radius) + bandHalf;
+
+        // 1. Dorong PlayerCore & EnemyCore saat muka gelombang melintas (Asteroid ditangani oleh Ghost Phasing & Inversi Gravitasi)
+
+        // 2. Dorong PlayerCore & EnemyCore saat muka gelombang melintas
+        if (_playerCore != null && IsInstanceValid(_playerCore))
+        {
+            Vector2 toP = _playerCore.GlobalPosition - sw.Center;
+            float pDist = toP.Length();
+            if (pDist > 1.0f && pDist >= minWaveR - 45.0f && pDist <= maxWaveR + 45.0f)
+            {
+                float shieldMult = _playerCore.HasShockwaveShield ? 0.22f : 1.0f;
+                float atten = Mathf.Clamp(1.0f - (pDist / (sw.MaxRadius + 80.0f)), 0.15f, 1.0f);
+                _playerCore.Velocity += (toP / pDist) * (sw.PushPower * atten * shieldMult * dt * 1.35f);
+            }
+        }
+
+        if (_enemyCore != null && IsInstanceValid(_enemyCore))
+        {
+            Vector2 toE = _enemyCore.GlobalPosition - sw.Center;
+            float eDist = toE.Length();
+            if (eDist > 1.0f && eDist >= minWaveR - 45.0f && eDist <= maxWaveR + 45.0f)
+            {
+                float shieldMult = _enemyCore.HasShockwaveShield ? 0.22f : 1.0f;
+                float atten = Mathf.Clamp(1.0f - (eDist / (sw.MaxRadius + 80.0f)), 0.15f, 1.0f);
+                _enemyCore.Velocity += (toE / eDist) * (sw.PushPower * atten * shieldMult * dt * 1.35f);
+            }
+        }
+
+        // 3. Dorong partikel kristal/debris yang dilewati gelombang kejut
+        for (int d = 0; d < _miningDebris.Count; d++)
+        {
+            var p = _miningDebris[d];
+            Vector2 toD = p.Position - sw.Center;
+            float dDist = toD.Length();
+            if (dDist > 1.0f && dDist >= minWaveR - 30.0f && dDist <= maxWaveR + 30.0f)
+            {
+                float atten = Mathf.Clamp(1.0f - (dDist / (sw.MaxRadius + 60.0f)), 0.2f, 1.0f);
+                p.Velocity += (toD / dDist) * (sw.PushPower * atten * dt * 1.6f);
+                _miningDebris[d] = p;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Efek visual & gelombang kejut lokal saat dua asteroid saling bertabrakan keras.
+    /// </summary>
+    public void TriggerAsteroidCollisionImpactFx(Vector2 impactPos, float impactSpeed, Color colA, Color colB)
+    {
+        float intensity = Mathf.Clamp(impactSpeed / 260.0f, 0.25f, 1.5f);
+
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
+        {
+            Center = impactPos,
+            Radius = 14.0f,
+            PrevRadius = 14.0f,
+            StartRadius = 14.0f,
+            MaxRadius = Mathf.Lerp(140.0f, 340.0f, Mathf.Clamp(intensity, 0.0f, 1.0f)),
+            Life = 0.38f,
+            MaxLife = 0.38f,
+            Color1 = colA.Lerp(new Color(4.8f, 4.2f, 2.2f, 0.95f), 0.5f),
+            Color2 = colB,
+            IsEnergy = true,
+            IsInward = false,
+            PushPower = 240.0f * intensity,
+            AffectsEntities = false
+        });
+
+        int sparkCount = Math.Clamp((int)(8 * intensity), 5, 16);
+        for (int i = 0; i < sparkCount; i++)
+        {
+            if (_miningDebris.Count > 450) break;
+            float ang = (float)i / sparkCount * Mathf.Tau + (GD.Randf() - 0.5f) * 0.4f;
+            Vector2 dir = new Vector2(MathF.Cos(ang), MathF.Sin(ang));
+            float spd = (90.0f + GD.Randf() * 210.0f) * intensity;
+            float life = 0.55f + GD.Randf() * 0.55f;
+            Color c = (i % 2 == 0 ? colA : colB).Lerp(new Color(4.5f, 3.8f, 1.6f, 1.0f), 0.4f);
+
+            _miningDebris.Add(new MiningDebrisParticle
+            {
+                Position = impactPos + dir * 6.0f,
+                Velocity = dir * spd,
+                Color = c,
+                Life = life,
+                MaxLife = life,
+                Size = 3.2f + GD.Randf() * 2.6f,
+                IsCrystalMatter = false,
+                Rotation = ang,
+                RotSpeed = (GD.Randf() - 0.5f) * 16.0f,
+                IsQuantumGlass = true,
+                IsPlasmaPuff = false
+            });
+        }
+
+        if (_playerCore != null && IsInstanceValid(_playerCore))
+        {
+            float distToPlayer = _playerCore.GlobalPosition.DistanceTo(impactPos);
+            if (distToPlayer < 2400.0f)
+            {
+                float atten = Mathf.Clamp(1.0f - (distToPlayer - 300.0f) / 2100.0f, 0.0f, 1.0f);
+                PlayerCamera.Instance?.TriggerShake(Mathf.Clamp(impactSpeed * 0.032f * atten, 1.5f, 14.0f));
+            }
+        }
+
+        EmitSignal(SignalName.SwarmClashImpulse, impactPos, 950.0f * intensity, 220.0f);
+        QueueRedraw();
+    }
+
     public void TriggerPreSupernovaShockwave(Vector2 position, float asteroidRadius, float progress)
     {
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
         {
             Center = position,
             Radius = 14.0f,
+            PrevRadius = 14.0f,
             StartRadius = 14.0f,
-            MaxRadius = asteroidRadius * Mathf.Lerp(2.2f, 4.5f, progress),
-            Life = 0.55f,
-            MaxLife = 0.55f,
+            MaxRadius = asteroidRadius * Mathf.Lerp(5.5f, 9.5f, progress),
+            Life = 0.62f,
+            MaxLife = 0.62f,
             Color1 = new Color(4.2f, 3.4f, 1.2f, 0.95f),
             Color2 = new Color(0.45f, 2.55f, 4.2f, 0.90f),
             IsEnergy = true,
-            IsInward = false
+            IsInward = false,
+            PushPower = Mathf.Lerp(520.0f, 1080.0f, progress),
+            AffectsEntities = true
         });
 
         float impulsePower = Mathf.Lerp(1200.0f, 3200.0f, progress);
@@ -4695,14 +4891,17 @@ public partial class SwarmSimulation : Node2D
         {
             Center = position,
             Radius = 12.0f,
+            PrevRadius = 12.0f,
             StartRadius = 12.0f,
-            MaxRadius = asteroidRadius * 4.2f,
+            MaxRadius = asteroidRadius * 5.2f,
             Life = 0.78f,
             MaxLife = 0.78f,
             Color1 = new Color(3.8f, 3.2f, 1.25f, 0.96f),
             Color2 = new Color(0.45f, 2.55f, 3.85f, 0.90f),
             IsEnergy = true,
-            IsInward = false
+            IsInward = false,
+            PushPower = 820.0f,
+            AffectsEntities = true
         });
 
         EmitSignal(SignalName.SwarmClashImpulse, position, 2650.0f, 540.0f);
@@ -4716,6 +4915,7 @@ public partial class SwarmSimulation : Node2D
         {
             Center = position,
             Radius = 340.0f,
+            PrevRadius = 340.0f,
             StartRadius = 340.0f,
             MaxRadius = 6.0f,
             Life = 0.35f,
@@ -4723,7 +4923,9 @@ public partial class SwarmSimulation : Node2D
             Color1 = new Color(0.45f, 2.85f, 4.2f, 0.96f),
             Color2 = new Color(3.8f, 3.2f, 1.25f, 0.92f),
             IsEnergy = true,
-            IsInward = true
+            IsInward = true,
+            PushPower = 0.0f,
+            AffectsEntities = false
         });
 
         // Impuls menyedot simpul grid latar belakang melesak ke titik tengah seed (radius teroptimasi)
@@ -4738,14 +4940,17 @@ public partial class SwarmSimulation : Node2D
         {
             Center = position,
             Radius = 14.0f,
+            PrevRadius = 14.0f,
             StartRadius = 14.0f,
-            MaxRadius = 480.0f,
-            Life = 0.52f,
-            MaxLife = 0.52f,
+            MaxRadius = 620.0f,
+            Life = 0.56f,
+            MaxLife = 0.56f,
             Color1 = new Color(3.8f, 3.2f, 1.25f, 0.98f),
             Color2 = new Color(0.45f, 2.55f, 3.85f, 0.92f),
             IsEnergy = true,
-            IsInward = false
+            IsInward = false,
+            PushPower = 580.0f,
+            AffectsEntities = true
         });
 
         // Impuls grid latar belakang melebar keluar secara spektakuler (radius teroptimasi)
@@ -4755,7 +4960,7 @@ public partial class SwarmSimulation : Node2D
 
     /// <summary>
     /// Gelombang kejut primer raksasa Supernova dari Cosmic Rift saat pertama kali meledak.
-    /// Menghentak grid arena dengan radius terukur (~380 px) satu kali saja agar FPS tetap solid.
+    /// Mendorong seluruh asteroid, bintang, dan objek sekitar secara seamless seiring cincin merambat!
     /// </summary>
     public void TriggerRiftSupernovaShockwave(Vector2 position, float radius, float impulsePower)
     {
@@ -4763,14 +4968,17 @@ public partial class SwarmSimulation : Node2D
         {
             Center = position,
             Radius = 24.0f,
+            PrevRadius = 24.0f,
             StartRadius = 24.0f,
             MaxRadius = radius,
-            Life = 0.65f,
-            MaxLife = 0.65f,
+            Life = 0.78f,
+            MaxLife = 0.78f,
             Color1 = new Color(7.5f, 7.0f, 6.2f, 1.0f),
             Color2 = new Color(4.2f, 2.8f, 0.85f, 0.95f),
             IsEnergy = true,
-            IsInward = false
+            IsInward = false,
+            PushPower = 1450.0f,
+            AffectsEntities = true
         });
 
         // Hentakan fisik grid arena berkekuatan terkontrol agar tidak lag
@@ -4781,23 +4989,25 @@ public partial class SwarmSimulation : Node2D
     }
 
     /// <summary>
-    /// Gelombang kejut visual sekunder (Echo Pulse) tanpa menghentak grid GDScript lagi,
-    /// menghasilkan visual gelombang kejut beruntun yang mulus dan bebas lag.
+    /// Gelombang kejut sekunder (Echo Pulse) yang juga mendorong objek di jalurnya secara seamless.
     /// </summary>
-    public void TriggerVisualShockwaveEcho(Vector2 position, float radius)
+    public void TriggerVisualShockwaveEcho(Vector2 position, float radius, float pushPower = 680.0f)
     {
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
         {
             Center = position,
             Radius = 24.0f,
+            PrevRadius = 24.0f,
             StartRadius = 24.0f,
             MaxRadius = radius,
-            Life = 0.52f,
-            MaxLife = 0.52f,
+            Life = 0.62f,
+            MaxLife = 0.62f,
             Color1 = new Color(6.8f, 6.2f, 5.5f, 0.90f),
             Color2 = new Color(3.8f, 2.5f, 0.75f, 0.85f),
             IsEnergy = true,
-            IsInward = false
+            IsInward = false,
+            PushPower = pushPower,
+            AffectsEntities = pushPower > 1.0f
         });
         QueueRedraw();
     }
@@ -5254,20 +5464,54 @@ public partial class SwarmSimulation : Node2D
         // =========================================================================
         // B. BUSUR INDUKSI & FEEDER KONVERGEN DARI 10 DART KE FOCAL PLASMA CHAMBER
         // =========================================================================
+        bool isPriming = !_isBoostFullPower;
+        float primingProgress = Mathf.Clamp(_boostPrimingTimer / _boostPrimingDuration, 0.0f, 1.0f);
+
+        // Efek Cincin Energi Menghisap (Imploding Rings) ala Godzilla Charge
+        if (isPriming)
+        {
+            for (int r = 0; r < 3; r++)
+            {
+                float ringPhase = Mathf.PosMod(_boostPrimingTimer * 2.8f + (float)r / 3.0f, 1.0f);
+                float ringRadius = Mathf.Lerp(85.0f, 8.0f, ringPhase);
+                float ringAlpha = MathF.Sin(ringPhase * Mathf.Pi) * (0.35f + 0.65f * primingProgress);
+                Color ringCol = new Color(0.9f, 3.8f, 5.8f, ringAlpha);
+                DrawArc(focalPos, ringRadius, 0.0f, Mathf.Tau, 24, ringCol, 2.0f);
+            }
+        }
+
         for (int i = 0; i < dartCount; i++)
         {
             Vector2 dPos = _activeThrusterDartPositions[i];
-            Color feederGlow = new Color(0.8f, 3.4f, 5.2f, 0.55f * power);
-            Color feederCore = new Color(3.8f, 4.8f, 5.8f, 0.88f * power);
 
-            DrawLine(dPos, focalPos, feederGlow, 3.4f, false);
-            DrawLine(dPos, focalPos, feederCore, 1.4f, false);
+            // Penyalaan sekuensial Dart ala sirip dorsal Godzilla (dari tepi luar ke tengah)
+            float dartSlotNorm = (float)i / MathF.Max(1, dartCount - 1);
+            float igniteThreshold = MathF.Abs(dartSlotNorm - 0.5f) * 2.0f; // Luar dulu lalu menuju tengah
+            igniteThreshold = 1.0f - igniteThreshold; // 0.0 di ujung, 1.0 di tengah
+            bool isDartCharged = !isPriming || (primingProgress >= igniteThreshold * 0.85f);
+
+            Color feederGlow = isDartCharged
+                ? new Color(0.8f, 3.8f, 5.6f, 0.75f * power + 0.25f)
+                : new Color(0.4f, 1.2f, 2.2f, 0.25f);
+            Color feederCore = isDartCharged
+                ? new Color(3.8f, 4.8f, 5.8f, 0.95f)
+                : new Color(1.2f, 2.2f, 3.2f, 0.40f);
+
+            DrawLine(dPos, focalPos, feederGlow, isDartCharged ? 3.6f : 1.8f, false);
+            DrawLine(dPos, focalPos, feederCore, isDartCharged ? 1.6f : 0.8f, false);
+
+            if (isDartCharged && isPriming)
+            {
+                // Percikan kilat mikro berdenyut pada Dart yang sudah terisi
+                float sparkRadius = 3.5f + MathF.Sin(pulse * 6.0f + i) * 1.5f;
+                DrawCircle(dPos, sparkRadius, new Color(3.5f, 4.8f, 6.0f, 0.85f));
+            }
 
             if (i < dartCount - 1)
             {
                 Vector2 nextPos = _activeThrusterDartPositions[i + 1];
                 Vector2 mid = (dPos + nextPos) * 0.5f + backDir * (MathF.Sin(pulse * 4.2f + i * 1.7f) * 2.5f);
-                Color arcCol = new Color(1.8f, 4.0f, 5.5f, 0.65f * power);
+                Color arcCol = isDartCharged ? new Color(1.8f, 4.0f, 5.5f, 0.75f * power + 0.20f) : new Color(0.8f, 1.6f, 2.5f, 0.30f);
                 DrawLine(dPos, mid, arcCol, 1.3f, false);
                 DrawLine(mid, nextPos, arcCol, 1.3f, false);
             }
@@ -5275,8 +5519,12 @@ public partial class SwarmSimulation : Node2D
 
         // Bola Ruang Bakar Plasma (Focal Pinch Orb) + Flash saat Dart dikorbankan
         float flashBoost = _boostSacrificeFlash;
-        float orbRad = (7.5f + 5.0f * power + 6.5f * flashBoost) * (0.90f + 0.10f * MathF.Sin(pulse * 5.0f));
-        DrawCircle(focalPos, orbRad * 1.85f, new Color(0.5f, 2.4f, 4.8f, 0.35f * power));
+        float baseOrbRad = isPriming
+            ? (5.0f + 12.0f * primingProgress * (0.85f + 0.15f * MathF.Sin(pulse * 8.0f)))
+            : (7.5f + 5.0f * power + 6.5f * flashBoost) * (0.90f + 0.10f * MathF.Sin(pulse * 5.0f));
+
+        float orbRad = baseOrbRad;
+        DrawCircle(focalPos, orbRad * 1.85f, new Color(0.5f, 2.4f, 4.8f, 0.35f * power + (isPriming ? 0.30f * primingProgress : 0.0f)));
         DrawCircle(focalPos, orbRad, new Color(2.8f + flashBoost * 2.0f, 4.6f, 5.8f, 0.92f));
         DrawCircle(focalPos, orbRad * 0.52f, new Color(5.5f, 5.4f, 4.2f, 0.98f));
 
@@ -5486,10 +5734,6 @@ public partial class SwarmSimulation : Node2D
                     break;
                 case Key.Q:
                     FireRadialNova(80);
-                    break;
-                case Key.T:
-                    // Cinematic Trigger [T]: Memicu urutan penuh Black Hole Charging -> Shockwave Supernova -> White Hole Assembly!
-                    AsteroidFieldManager.Instance?.TriggerDebugWhiteHoleAsteroidGenesis();
                     break;
             }
         }
