@@ -108,9 +108,13 @@ func _on_boost_dart_sacrificed(nozzle_pos: Vector2, aim_dir: Vector2, power_rati
 
 func _on_swarm_clash_impulse(pos: Vector2, power: float, radius: float) -> void:
 	if grid_physics:
-		grid_physics.apply_radial_impulse(pos, power, radius)
+		grid_physics.apply_radial_impulse(pos, power, minf(radius, 450.0))
 	if absf(power) >= 2500.0:
-		trigger_shake(clampf(absf(power) * 0.0032, 3.5, 15.0))
+		var cam_pos: Vector2 = player_core.global_position if player_core else Vector2.ZERO
+		var dist_to_cam: float = pos.distance_to(cam_pos)
+		if dist_to_cam < 2200.0:
+			var atten: float = clampf(1.0 - (dist_to_cam - 300.0) / 1900.0, 0.0, 1.0)
+			trigger_shake(clampf(absf(power) * 0.0032 * atten, 0.5, 15.0))
 
 func _on_cosmic_rift_infall(rift_pos: Vector2, power: float, radius: float) -> void:
 	if grid_physics:
@@ -125,11 +129,8 @@ func _on_cosmic_rift_erupted(rift_pos: Vector2, power: float, radius: float) -> 
 
 func _process(delta: float) -> void:
 	if screen_shake_intensity > 0.05:
-		var offset: Vector2 = Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * screen_shake_intensity
-		position = offset
 		screen_shake_intensity = lerpf(screen_shake_intensity, 0.0, 12.0 * delta)
-	else:
-		position = Vector2.ZERO
+	position = Vector2.ZERO
 
 	var grid_dirty: bool = false
 

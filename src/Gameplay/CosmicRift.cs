@@ -4,103 +4,108 @@ using Godot;
 namespace GeometrySwarm.Gameplay;
 
 /// <summary>
-/// Anomali Astrofisika Sabuk Dalam: Dualitas Black Hole & White Hole.
-/// - Fase Pasif (Dormant): Black Hole sunyi berupa lingkaran hitam pekat mutlak (menutup grid & latar)
-///   dikelilingi cincin radiasi Hawking (Photon Sphere) yang sangat tipis, tajam, dan elegan.
-/// - Fase Infall (3.2s): Inversi polaritas ruang-waktu menjadi White Hole yang berpijar terang menyilaukan.
-/// - Fase Erupting (1.0s): White Hole memancarkan ledakan cahaya dan melahirkan asteroid baru
-///   dari pusat singularitasnya dengan animasi pembesaran ala iOS App Launch.
-/// - Fase Cooling (2.8s): White Hole mereda dan mendingin kembali menjadi Black Hole abadi.
+/// Anomali Astrofisika Sabuk Dalam: Cosmic Rift (Supermassive Black Hole & White Hole).
+/// Siklus Sinematik:
+/// 1. Dormant: Black hole stabil dengan distorsi ruang melingkar & cincin foton emas tipis.
+/// 2. Charging (8 Detik): Petir dan lidah api menjilat di horizon, asteroid terdekat tersedot mengorbit melingkari black hole.
+/// 3. Supernova Blast (3 Detik): Ledakan supernova memancarkan shockwave raksasa setiap 0.5s, asteroid terlempar jauh,
+///    dan inti berubah menjadi White Hole putih-perak mutlak.
+/// 4. White Hole (5.5 Detik): Menolak materi keluar dengan gravitasi repulsif sebelum kembali ke Black Hole.
 /// </summary>
 public partial class CosmicRift : Node2D
 {
-    [Signal]
-    public delegate void RiftInfallStartedEventHandler(Vector2 riftPos, float power, float radius);
-
-    [Signal]
-    public delegate void RiftEruptedEventHandler(Vector2 riftPos, float power, float radius);
-
-    [Signal]
-    public delegate void RiftSpawnAsteroidRequestedEventHandler(Vector2 riftPos, Vector2 ejectVelocity);
-
     public enum RiftState
     {
         Dormant = 0,
-        Infall = 1,
-        Erupting = 2,
-        Cooling = 3
+        Charging = 1,
+        SupernovaBlast = 2,
+        WhiteHole = 3
     }
 
     [Export] public float OrbitRadius { get; set; } = 1550.0f;
     [Export] public float OrbitAngle { get; set; } = 0.0f;
     [Export] public float OrbitSpeed { get; set; } = 0.012f; // ~0.68 deg/sec
     [Export] public int RiftId { get; set; } = 0;
-    [Export] public Vector2 CustomEjectDirection { get; set; } = Vector2.Zero;
-    [Export] public float CustomEjectSpeed { get; set; } = 0.0f;
 
     public RiftState State { get; private set; } = RiftState.Dormant;
-    public bool IsEjecting => State != RiftState.Dormant;
 
-    public const float InfallDuration = 2.6f;
-    public const float EruptionDuration = 1.75f;
-    public const float CoolingDuration = 2.4f;
+    // Durasi Fase
+    public const float ChargeDuration = 8.0f;
+    public const float SupernovaDuration = 3.0f;
+    public const float WhiteHoleDuration = 5.5f;
+    public const float DormantDuration = 22.0f;
+
+    // Ukuran quad visual efek distorsi lensa gravitasi
+    public const float VisualQuadSize = 960.0f;
 
     private float _stateTimer = 0.0f;
-    private float _pulseTimer = 0.0f;
-    private float _spinAngle = 0.0f;
-    private float _infallImpulseTimer = 0.0f;
-    private float _redrawThrottleTimer = 0.0f;
+    private float _shockwavePulseTimer = 0.0f;
+    private float _chargeProgress = 0.0f;
+    private float _whiteHolePolarity = 0.0f;
 
-    // Partikel Kuantum Virtual di Tepi Horizon (Hawking Radiation Fluctuation Motes)
-    private const int HawkingPhotonCount = 28;
-    private readonly float[] _hawkingPhotonAngles = new float[HawkingPhotonCount];
-    private readonly float[] _hawkingPhotonSpeeds = new float[HawkingPhotonCount];
-    private readonly float[] _hawkingPhotonPhases = new float[HawkingPhotonCount];
-
-    // Jaringan Retakan Ruang-Waktu Event Horizon saat Black Hole Mengalami Supercharge Inversi
-    private readonly System.Collections.Generic.List<(Vector2 Start, Vector2 End, float Jitter)> _horizonFractures = new();
-
-    // Palet Warna Singularitas
-    private static readonly Color VoidCoreColor = new(0.002f, 0.001f, 0.005f, 1.0f); // Hitam pekat mutlak (occlude grid & parallax)
-    private static readonly Color WhiteHoleCoreColor = new(5.5f, 5.2f, 4.8f, 1.0f); // Putih-perak blinding HDR
-    private static readonly Color HawkingRadiationCyan = new(0.75f, 2.95f, 4.8f, 0.95f);
-    private static readonly Color HawkingRadiationViolet = new(3.4f, 1.8f, 4.5f, 0.85f);
-    private static readonly Color SupercriticalFlareColor = new(5.2f, 4.6f, 5.5f, 1.0f);
-    private static readonly Color IncandescentCrackColor = new(5.5f, 4.8f, 3.2f, 1.0f);
+    private BackBufferCopy? _backBuffer;
+    private ColorRect? _riftRect;
+    private ShaderMaterial? _riftMaterial;
 
     public override void _Ready()
     {
-        var rng = new RandomNumberGenerator();
-        rng.Seed = (ulong)(1337 + RiftId * 9871);
+        // 1. Tempatkan pada posisi orbit awal
+        UpdateOrbitPosition();
 
-        for (int i = 0; i < HawkingPhotonCount; i++)
+        // Rift 0 diatur agar langsung memicu animasi charge dalam 1.5 detik sejak game dimulai
+        if (RiftId == 0)
         {
-            _hawkingPhotonAngles[i] = rng.Randf() * Mathf.Tau;
-            _hawkingPhotonSpeeds[i] = rng.RandfRange(1.4f, 3.2f) * (rng.Randf() > 0.5f ? 1.0f : -1.0f);
-            _hawkingPhotonPhases[i] = rng.Randf() * Mathf.Tau;
+            _stateTimer = DormantDuration - 1.5f;
+        }
+        else
+        {
+            _stateTimer = 0.0f;
         }
 
-        // Bangun pola retakan petir geometris melintasi piringan Event Horizon (R ~ 46 px)
-        _horizonFractures.Clear();
-        int crackBranches = 16;
-        for (int b = 0; b < crackBranches; b++)
+        // 2. Bangun komponen shader distorsi ruang gravitasi
+        try
         {
-            float baseAngle = (float)b / crackBranches * Mathf.Tau + rng.RandfRange(-0.15f, 0.15f);
-            Vector2 pCenter = new Vector2(MathF.Cos(baseAngle), MathF.Sin(baseAngle)) * rng.RandfRange(3.0f, 9.0f);
-            Vector2 pMid = new Vector2(MathF.Cos(baseAngle + rng.RandfRange(-0.25f, 0.25f)), MathF.Sin(baseAngle + rng.RandfRange(-0.25f, 0.25f))) * rng.RandfRange(22.0f, 33.0f);
-            Vector2 pRim = new Vector2(MathF.Cos(baseAngle + rng.RandfRange(-0.45f, 0.45f)), MathF.Sin(baseAngle + rng.RandfRange(-0.45f, 0.45f))) * rng.RandfRange(42.0f, 47.0f);
-
-            _horizonFractures.Add((pCenter, pMid, rng.Randf()));
-            _horizonFractures.Add((pMid, pRim, rng.Randf()));
-
-            if (rng.Randf() > 0.5f)
+            var shader = GD.Load<Shader>("res://visual/cosmic_rift_distortion.gdshader");
+            if (shader != null)
             {
-                Vector2 pSubFork = new Vector2(MathF.Cos(baseAngle + rng.RandfRange(0.35f, 0.65f)), MathF.Sin(baseAngle + rng.RandfRange(0.35f, 0.65f))) * rng.RandfRange(38.0f, 46.0f);
-                _horizonFractures.Add((pMid, pSubFork, rng.Randf()));
+                _riftMaterial = new ShaderMaterial { Shader = shader };
+                _riftMaterial.SetShaderParameter("black_hole_radius", 0.102f);
+                _riftMaterial.SetShaderParameter("lensing_strength", 1.65f);
+                _riftMaterial.SetShaderParameter("swirl_strength", 2.40f);
+                _riftMaterial.SetShaderParameter("swirl_speed", 0.35f);
+                _riftMaterial.SetShaderParameter("photon_ring_width", 0.0030f);
+                _riftMaterial.SetShaderParameter("photon_ring_intensity", 5.5f);
+                _riftMaterial.SetShaderParameter("gold_bloom_width", 0.0100f);
+                _riftMaterial.SetShaderParameter("gold_bloom_intensity", 3.4f);
+                _riftMaterial.SetShaderParameter("photon_core_color", new Color(5.8f, 5.6f, 5.2f, 1.0f));
+                _riftMaterial.SetShaderParameter("gold_bloom_color", new Color(3.4f, 2.3f, 0.58f, 1.0f));
+                _riftMaterial.SetShaderParameter("charge_progress", 0.0f);
+                _riftMaterial.SetShaderParameter("white_hole_polarity", 0.0f);
+
+                // BackBufferCopy Viewport memastikan seluruh layar diambil tanpa batas terpotong (zero seams)
+                _backBuffer = new BackBufferCopy
+                {
+                    Name = "RiftBackBuffer",
+                    CopyMode = BackBufferCopy.CopyModeEnum.Viewport
+                };
+                AddChild(_backBuffer);
+
+                _riftRect = new ColorRect
+                {
+                    Name = "RiftDistortionQuad",
+                    Material = _riftMaterial,
+                    CustomMinimumSize = new Vector2(VisualQuadSize, VisualQuadSize),
+                    Size = new Vector2(VisualQuadSize, VisualQuadSize),
+                    Position = new Vector2(-VisualQuadSize * 0.5f, -VisualQuadSize * 0.5f),
+                    MouseFilter = Control.MouseFilterEnum.Ignore
+                };
+                AddChild(_riftRect);
             }
         }
-
-        UpdateOrbitPosition();
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[CosmicRift._Ready] Gagal inisialisasi shader distorsi: {ex}");
+        }
     }
 
     private void UpdateOrbitPosition()
@@ -111,451 +116,286 @@ public partial class CosmicRift : Node2D
     public override void _PhysicsProcess(double delta)
     {
         float dt = (float)delta;
-        _pulseTimer += dt;
 
         // 1. Presesi Orbit Lambat di Sekitar (0,0)
         OrbitAngle += OrbitSpeed * dt;
         UpdateOrbitPosition();
 
-        // 2. Putaran Fluktuasi Kuantum
-        float spinMult = State switch
+        // Rift 1 & 2 tetap tenang di sabuk dalam sebagai black hole stabil (Zero cycle conflict)
+        if (RiftId != 0)
         {
-            RiftState.Infall => Mathf.Lerp(1.5f, 28.0f, MathF.Pow(_stateTimer / InfallDuration, 2.2f)),
-            RiftState.Erupting => 14.0f,
-            RiftState.Cooling => Mathf.Lerp(8.0f, 1.0f, _stateTimer / CoolingDuration),
-            _ => 1.0f
-        };
-        _spinAngle += dt * 2.4f * spinMult;
-
-        for (int i = 0; i < HawkingPhotonCount; i++)
-        {
-            _hawkingPhotonAngles[i] += _hawkingPhotonSpeeds[i] * dt * spinMult;
+            State = RiftState.Dormant;
+            _chargeProgress = 0.0f;
+            _whiteHolePolarity = 0.0f;
+            if (_riftRect != null && _riftRect.Visible) _riftRect.Visible = false;
+            if (_backBuffer != null && _backBuffer.Visible) _backBuffer.Visible = false;
+            return;
         }
 
-        // 3. State Machine Ejection
+        // 2. State Machine Siklus Kosmik
         _stateTimer += dt;
+
+        Vector2 playerPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
+        float distToPlayer = playerPos.DistanceTo(GlobalPosition);
+        // Atenuasi jarak guncangan kamera: semakin jauh semakin ringan, semakin dekat semakin berat
+        float cameraDistAtten = Mathf.Clamp(1.0f - (distToPlayer - 350.0f) / 3200.0f, 0.0f, 1.0f);
+
+        // Optimasi GPU: Nonaktifkan shader & viewport backbuffer copy jika rift berada di luar layar
+        bool isNearPlayer = distToPlayer < 1700.0f;
+        if (_riftRect != null && _riftRect.Visible != isNearPlayer)
+        {
+            _riftRect.Visible = isNearPlayer;
+        }
+        if (_backBuffer != null && _backBuffer.Visible != isNearPlayer)
+        {
+            _backBuffer.Visible = isNearPlayer;
+        }
 
         switch (State)
         {
             case RiftState.Dormant:
-                break;
+                _chargeProgress = 0.0f;
+                _whiteHolePolarity = Mathf.Lerp(_whiteHolePolarity, 0.0f, dt * 2.0f);
+                _riftMaterial?.SetShaderParameter("black_hole_radius", 0.102f);
 
-            case RiftState.Infall:
-                // Tarikan gravitasi hisap eskalatif dahsyat pada grid (ruang-waktu melengkung ekstrem ke singularitas)
-                _infallImpulseTimer += dt;
-                float progress = Mathf.Clamp(_stateTimer / InfallDuration, 0.0f, 1.0f);
-                float impulseInterval = Mathf.Lerp(0.18f, 0.09f, progress); // Frekuensi getaran hisap makin rapat
-                if (_infallImpulseTimer >= impulseInterval)
+                if (_stateTimer >= DormantDuration)
                 {
-                    _infallImpulseTimer = 0.0f;
-                    float pullForce = Mathf.Lerp(750.0f, 3800.0f, progress * progress);
-                    float pullRadius = Mathf.Lerp(450.0f, 850.0f, progress);
-                    EmitSignal(SignalName.RiftInfallStarted, GlobalPosition, pullForce, pullRadius);
-                }
-
-                if (_stateTimer >= InfallDuration)
-                {
-                    EnterEruptingState();
-                }
-                break;
-
-            case RiftState.Erupting:
-                if (_stateTimer >= EruptionDuration)
-                {
-                    State = RiftState.Cooling;
+                    State = RiftState.Charging;
                     _stateTimer = 0.0f;
                 }
                 break;
 
-            case RiftState.Cooling:
-                if (_stateTimer >= CoolingDuration)
+            case RiftState.Charging:
+                float p = Mathf.Clamp(_stateTimer / ChargeDuration, 0.0f, 1.0f);
+                _chargeProgress = p;
+                _whiteHolePolarity = 0.0f;
+
+                // Guncangan getaran gemuruh halus progresif (tidak membuat frame patah-patah)
+                float rumbleShake = Mathf.Lerp(0.0f, 2.2f, p * p * p) * cameraDistAtten;
+                if (rumbleShake > 0.05f)
+                {
+                    PlayerCamera.Instance?.TriggerShake(rumbleShake);
+                }
+
+                // Fisika: Asteroid di sekitar tersedot dan berputar mengorbit melingkari black hole
+                CaptureAndOrbitNearbyAsteroids(p, dt);
+
+                // Implosi / Pinching sesaat di 0.3s terakhir sebelum meledak Supernova
+                if (p >= 0.94f)
+                {
+                    float pinchT = (p - 0.94f) / 0.06f;
+                    float pinchedR = Mathf.Lerp(0.102f, 0.038f, MathF.Sin(pinchT * Mathf.Pi * 0.5f));
+                    _riftMaterial?.SetShaderParameter("black_hole_radius", pinchedR);
+                }
+                else
+                {
+                    _riftMaterial?.SetShaderParameter("black_hole_radius", 0.102f);
+                }
+
+                if (_stateTimer >= ChargeDuration)
+                {
+                    // Transisi ke Supernova Blast!
+                    State = RiftState.SupernovaBlast;
+                    _stateTimer = 0.0f;
+                    _shockwavePulseTimer = 0.0f;
+
+                    // 1. Pemicu Bintang Aether: TIDAK terdorong, langsung hancur seketika menjadi Supernova,
+                    //    menjadi Seed, dan langsung roaming menjauh sejauh mungkin dari Black Hole!
+                    TriggerAetherSupernovaAndSeedEscape();
+
+                    // 2. Lontarkan asteroid batu di sekitar SATU KALI dengan kecepatan tinggi & mulus tanpa patah-patah
+                    LaunchNearbyAsteroidsSeamlessly();
+
+                    // 3. Shockwave primer dahsyat pertama & getaran kamera
+                    SwarmSimulation.Instance?.TriggerRiftSupernovaShockwave(GlobalPosition, 2800.0f, 4800.0f);
+                    float blastShake = 28.0f * cameraDistAtten;
+                    if (blastShake > 0.5f)
+                    {
+                        PlayerCamera.Instance?.TriggerShake(blastShake);
+                    }
+                }
+                break;
+
+            case RiftState.SupernovaBlast:
+                _chargeProgress = 0.0f;
+                // Inversi polaritas instan menjadi White Hole menyilaukan
+                _whiteHolePolarity = Mathf.Lerp(_whiteHolePolarity, 1.0f, dt * 10.0f);
+                _riftMaterial?.SetShaderParameter("black_hole_radius", 0.102f);
+
+                // Player dan musuh otomatis memunculkan perisai neon anti-terpental menghadap ke black hole
+                PlayerCore.Instance?.ActivateShockwaveShield(GlobalPosition, 0.45f);
+                SwarmSimulation.Instance?.EnemyCore?.ActivateShockwaveShield(GlobalPosition, 0.45f);
+
+                // Gelombang kejut visual berulang setiap 0.5 detik selama 3 detik (Murni visual echo, tanpa reset kecepatan asteroid!)
+                _shockwavePulseTimer += dt;
+                if (_shockwavePulseTimer >= 0.5f)
+                {
+                    _shockwavePulseTimer = 0.0f;
+
+                    // Gelombang visual echo & getaran kamera sekunder halus (tanpa membebani CPU/GDScript)
+                    SwarmSimulation.Instance?.TriggerVisualShockwaveEcho(GlobalPosition, 2800.0f);
+                    float echoShake = 10.0f * cameraDistAtten;
+                    if (echoShake > 0.4f)
+                    {
+                        PlayerCamera.Instance?.TriggerShake(echoShake);
+                    }
+                }
+
+                if (_stateTimer >= SupernovaDuration)
+                {
+                    State = RiftState.WhiteHole;
+                    _stateTimer = 0.0f;
+                }
+                break;
+
+            case RiftState.WhiteHole:
+                _chargeProgress = 0.0f;
+                _riftMaterial?.SetShaderParameter("black_hole_radius", 0.102f);
+
+                // Gaya tolak repulsif White Hole (mendorong materi agar tidak mendekat)
+                ApplyWhiteHoleRepulsion(dt);
+
+                // Mendingin perlahan di 2.0s terakhir durasi
+                if (_stateTimer >= WhiteHoleDuration - 2.0f)
+                {
+                    float coolProgress = (_stateTimer - (WhiteHoleDuration - 2.0f)) / 2.0f;
+                    _whiteHolePolarity = Mathf.Clamp(1.0f - coolProgress, 0.0f, 1.0f);
+                }
+                else
+                {
+                    _whiteHolePolarity = 1.0f;
+                }
+
+                if (_stateTimer >= WhiteHoleDuration)
                 {
                     State = RiftState.Dormant;
                     _stateTimer = 0.0f;
+                    _whiteHolePolarity = 0.0f;
                 }
                 break;
         }
 
-        // Culling & redraw throttling
-        Vector2 playerPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
-        float distSq = GlobalPosition.DistanceSquaredTo(playerPos);
-        bool isNearPlayer = distSq <= (2600.0f * 2600.0f);
-        bool isActivePhase = State != RiftState.Dormant;
-
-        if (isNearPlayer || isActivePhase)
-        {
-            _redrawThrottleTimer += dt;
-            if (_redrawThrottleTimer >= 0.033f) // ~30 FPS
-            {
-                _redrawThrottleTimer = 0.0f;
-                QueueRedraw();
-            }
-        }
-    }
-
-    public bool TriggerEjectionSequence()
-    {
-        if (State != RiftState.Dormant) return false;
-
-        State = RiftState.Infall;
-        _stateTimer = 0.0f;
-        _infallImpulseTimer = 0.0f;
-
-        // Hentakan hisap awal pada grid saat inversi polaritas dimulai
-        EmitSignal(SignalName.RiftInfallStarted, GlobalPosition, 850.0f, 450.0f);
-        return true;
-    }
-
-    private void EnterEruptingState()
-    {
-        State = RiftState.Erupting;
-        _stateTimer = 0.0f;
-
-        // 1. Gelombang Kejut Radial Dahsyat pada Grid saat White Hole Terbuka
-        EmitSignal(SignalName.RiftErupted, GlobalPosition, 4600.0f, 850.0f);
-        PlayerCamera.Instance?.TriggerShake(18.0f);
-
-        // 2. Hitung Trajektori Lontaran Teraman Bebas Tabrakan dengan Asteroid Lain
-        Vector2 ejectVel = (CustomEjectDirection.LengthSquared() > 0.01f)
-            ? (CustomEjectDirection.Normalized() * (CustomEjectSpeed > 1.0f ? CustomEjectSpeed : 320.0f))
-            : CalculateSafestEjectionTrajectory();
-
-        // Asteroid lahir tepat di pusat White Hole (GlobalPosition)!
-        Vector2 spawnPos = GlobalPosition;
-
-        // 3. Minta AsteroidFieldManager melahirkan asteroid baru
-        EmitSignal(SignalName.RiftSpawnAsteroidRequested, spawnPos, ejectVel);
+        // 3. Kirim parameter dinamis ke shader
+        _riftMaterial?.SetShaderParameter("charge_progress", _chargeProgress);
+        _riftMaterial?.SetShaderParameter("white_hole_polarity", _whiteHolePolarity);
+        _riftMaterial?.SetShaderParameter("swirl_speed", Mathf.Lerp(0.35f, 2.6f, _chargeProgress));
+        _riftMaterial?.SetShaderParameter("lensing_strength", Mathf.Lerp(1.65f, 3.4f, _chargeProgress));
+        _riftMaterial?.SetShaderParameter("swirl_strength", Mathf.Lerp(2.40f, 4.8f, _chargeProgress));
     }
 
     /// <summary>
-    /// Memindai koridor 360 derajat di sekitar portal untuk menemukan trajektori lontaran terbersih.
-    /// Jika suatu jalur memiliki potensi tabrakan dengan asteroid lain dalam jarak dekat (< 1.600 px),
-    /// sistem pintar akan MENOLAK jalur tersebut dan mencari koridor kosong lain yang benar-benar terbuka!
+    /// Menghisap asteroid di sekitar dan membuat mereka berputar mengorbit melingkari black hole selama charging.
     /// </summary>
-    private Vector2 CalculateSafestEjectionTrajectory()
+    private void CaptureAndOrbitNearbyAsteroids(float progress, float dt)
     {
-        Vector2 riftPos = GlobalPosition;
-        Vector2 outward = riftPos.LengthSquared() > 1.0f ? riftPos.Normalized() : Vector2.Right;
-
-        const int CandidateCount = 48;
-        const float MaxLookahead = 4800.0f;
-        const float EstimatedNewRadius = 420.0f;
-        const float SafetyPadding = 240.0f;
-
-        Vector2 bestDir = outward;
-        float bestScore = -1.0f;
-
-        for (int i = 0; i < CandidateCount; i++)
+        var asteroids = Asteroid.ActiveAsteroids;
+        for (int a = 0; a < asteroids.Count; a++)
         {
-            float testAngle = (float)i / CandidateCount * Mathf.Tau;
-            Vector2 candDir = new Vector2(MathF.Cos(testAngle), MathF.Sin(testAngle));
+            var ast = asteroids[a];
+            if (ast == null || !IsInstanceValid(ast) || !ast.IsActiveInTree) continue;
 
-            // Hindari melontarkan langsung menabrak pusat arena (Markas Origin < 1.100 px)
-            Vector2 toCenter = -riftPos;
-            if (candDir.Dot(toCenter.Normalized()) > 0.88f) continue;
+            Vector2 toRift = GlobalPosition - ast.CachedPosition;
+            float dist = toRift.Length();
 
-            float clearDist = MaxLookahead;
-            bool blockedByNearAsteroid = false;
-
-            // Pindai semua asteroid aktif di sepanjang koridor trajectory
-            var asteroids = Asteroid.ActiveAsteroids;
-            for (int a = 0; a < asteroids.Count; a++)
+            if (dist < 1550.0f && dist > 1.0f)
             {
-                var ast = asteroids[a];
-                if (ast == null || !IsInstanceValid(ast) || !ast.IsActiveInTree) continue;
+                Vector2 radDir = toRift / dist;
+                Vector2 tanDir = new Vector2(-radDir.Y, radDir.X); // Vektor tangensial putaran berlawanan jarum jam
 
-                Vector2 toAst = ast.CachedPosition - riftPos;
-                float projT = toAst.Dot(candDir);
+                // Radius orbit sasaran yang mengitari black hole (~270 - 450 px)
+                float targetRadius = 270.0f + (MathF.Abs(ast.GetInstanceId()) % 5) * 45.0f;
+                float radialDelta = dist - targetRadius;
 
-                // Abaikan asteroid yang berada di belakang portal
-                if (projT <= 60.0f) continue;
+                // Kecepatan putaran orbit meningkat pesat seiring bertambahnya charge
+                float orbitSpeed = Mathf.Lerp(180.0f, 560.0f, progress);
+                float radialForce = radialDelta * 3.6f * progress;
 
-                // Jarak tegak lurus dari asteroid ke garis tengah koridor lontaran
-                float perpDist = (toAst - candDir * projT).Length();
-                float totalClearanceNeeded = EstimatedNewRadius + ast.OuterBoundRadius + SafetyPadding;
-
-                if (perpDist < totalClearanceNeeded)
-                {
-                    if (projT < 1750.0f)
-                    {
-                        // JALUR INI ADA HALANGAN ASTEROID LAIN! Tolak dan cari koridor lain!
-                        blockedByNearAsteroid = true;
-                        break;
-                    }
-                    if (projT < clearDist) clearDist = projT;
-                }
-            }
-
-            if (blockedByNearAsteroid) continue;
-
-            // Periksa batas arena sektor (agar tidak langsung terlempar menabrak batas dinding)
-            Vector2 endPt = riftPos + candDir * clearDist;
-            if (MathF.Abs(endPt.X) > 5600.0f || MathF.Abs(endPt.Y) > 5600.0f)
-            {
-                float tX = (candDir.X > 0 ? (5600.0f - riftPos.X) : (-5600.0f - riftPos.X)) / (MathF.Abs(candDir.X) > 0.001f ? candDir.X : 0.001f);
-                float tY = (candDir.Y > 0 ? (5600.0f - riftPos.Y) : (-5600.0f - riftPos.Y)) / (MathF.Abs(candDir.Y) > 0.001f ? candDir.Y : 0.001f);
-                float boundT = MathF.Min(MathF.Max(0.0f, tX), MathF.Max(0.0f, tY));
-                if (boundT < clearDist) clearDist = boundT;
-            }
-
-            // Skoring: Koridor terpanjang + bonus mengarah ke sabuk asteroid luar
-            float outwardFactor = MathF.Max(0.0f, candDir.Dot(outward));
-            float score = clearDist * (1.0f + outwardFactor * 0.65f);
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestDir = candDir;
+                Vector2 desiredVel = tanDir * orbitSpeed + radDir * radialForce;
+                ast.LinearVelocity = ast.LinearVelocity.Lerp(desiredVel, dt * (2.4f + progress * 4.2f));
+                ast.AngularVelocity = Mathf.Lerp(ast.AngularVelocity, 1.4f, dt * 2.8f);
             }
         }
-
-        // Jika semua kandidat awal terhalang, cari koridor dengan jarak obstacle terjauh
-        if (bestScore <= 0.0f)
-        {
-            float maxClear = -1.0f;
-            var asteroids = Asteroid.ActiveAsteroids;
-            for (int i = 0; i < CandidateCount; i++)
-            {
-                float testAngle = (float)i / CandidateCount * Mathf.Tau;
-                Vector2 candDir = new Vector2(MathF.Cos(testAngle), MathF.Sin(testAngle));
-                if (candDir.Dot((-riftPos).Normalized()) > 0.88f) continue;
-
-                float nearestAstDist = MaxLookahead;
-                for (int a = 0; a < asteroids.Count; a++)
-                {
-                    var ast = asteroids[a];
-                    if (ast == null || !IsInstanceValid(ast) || !ast.IsActiveInTree) continue;
-                    Vector2 toAst = ast.CachedPosition - riftPos;
-                    float projT = toAst.Dot(candDir);
-                    if (projT <= 60.0f) continue;
-                    float perp = (toAst - candDir * projT).Length();
-                    if (perp < EstimatedNewRadius + ast.OuterBoundRadius + SafetyPadding && projT < nearestAstDist)
-                    {
-                        nearestAstDist = projT;
-                    }
-                }
-                if (nearestAstDist > maxClear)
-                {
-                    maxClear = nearestAstDist;
-                    bestDir = candDir;
-                }
-            }
-        }
-
-        // Kecepatan lontaran bertenaga tinggi (540 - 640 px/s) agar asteroid benar-benar terlempar jauh
-        float ejectSpeed = (float)GD.RandRange(540.0, 640.0);
-        return bestDir * ejectSpeed;
     }
 
-    public override void _Draw()
+    /// <summary>
+    /// Pemicu instan untuk Bintang Aether saat Black Hole meledak Supernova:
+    /// Bintang Aether TIDAK terdorong, melainkan langsung hancur seketika menjadi Supernova di tempat,
+    /// bertransformasi menjadi Aether Seed, dan langsung mulai roaming menjauh sejauh mungkin dari Black Hole.
+    /// </summary>
+    private void TriggerAetherSupernovaAndSeedEscape()
     {
-        float pulse = 0.96f + 0.04f * MathF.Sin(_pulseTimer * 3.2f);
-        float baseHorizonR = 46.0f * pulse;
-
-        // =====================================================================
-        // 1. FASE DORMANT: THE PITCH-BLACK HOLE & HAWKING RADIATION
-        // =====================================================================
-        if (State == RiftState.Dormant)
+        var asteroids = Asteroid.ActiveAsteroids;
+        for (int a = 0; a < asteroids.Count; a++)
         {
-            // A. Selimut Gravitasi Luar (Faint Lensing Corona)
-            DrawCircle(Vector2.Zero, baseHorizonR * 1.55f, new Color(0.20f, 0.08f, 0.38f, 0.07f));
-            DrawCircle(Vector2.Zero, baseHorizonR * 1.25f, new Color(0.12f, 0.28f, 0.45f, 0.12f));
+            var ast = asteroids[a];
+            if (ast == null || !IsInstanceValid(ast)) continue;
 
-            // B. INTI BLACK HOLE PEKAT (Penutup Mutlak Grid & Parallax)
-            // Lingkaran hitam mutlak (alpha 1.0) memutus dan menelan seluruh garis grid di baliknya
-            DrawCircle(Vector2.Zero, baseHorizonR, VoidCoreColor);
-
-            // C. CINCIN RADIASI HAWKING (Thin & Razor-Sharp Photon Sphere)
-            // Lapisan 1: Cincin batas horizon ultra-tipis (Cyan Kuantum Tajam)
-            DrawArc(Vector2.Zero, baseHorizonR + 1.2f, 0.0f, Mathf.Tau, 64, HawkingRadiationCyan, 1.8f, true);
-
-            // Lapisan 2: Harmonik radiasi sekunder (Violet Fluktuatif)
-            float secPulse = MathF.Sin(_pulseTimer * 4.8f);
-            Color secCol = HawkingRadiationViolet;
-            secCol.A = 0.65f + 0.25f * secPulse;
-            DrawArc(Vector2.Zero, baseHorizonR + 3.2f, _spinAngle * 0.5f, _spinAngle * 0.5f + Mathf.Pi * 1.6f, 48, secCol, 1.1f, true);
-
-            // D. FLUKTUASI PARTIKEL KUANTUM VIRTUAL (Hawking Virtual Photons)
-            for (int i = 0; i < HawkingPhotonCount; i++)
+            if (ast.IsEnergyAsteroid && !ast.IsInSeedCycle)
             {
-                float angle = _hawkingPhotonAngles[i];
-                float blink = 0.5f + 0.5f * MathF.Sin(_pulseTimer * 8.0f + _hawkingPhotonPhases[i]);
-                if (blink < 0.25f) continue;
-
-                float r = baseHorizonR + (i % 2 == 0 ? 1.4f : 3.0f) + MathF.Sin(angle * 4.0f + _pulseTimer) * 1.2f;
-                Vector2 pos = new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * r;
-                Color pCol = (i % 2 == 0) ? HawkingRadiationCyan : HawkingRadiationViolet;
-                pCol.A = blink * 0.85f;
-                DrawCircle(pos, 1.3f + blink * 0.7f, pCol);
-            }
-            return;
-        }
-
-        // =====================================================================
-        // 2. FASE INFALL (SUPERCHARGED GRAVITATIONAL ACCRETION & FRACTURE INVERSION, 3.8 DETIK)
-        // =====================================================================
-        if (State == RiftState.Infall)
-        {
-            float p = Mathf.Clamp(_stateTimer / InfallDuration, 0.0f, 1.0f);
-
-            // Radius Event Horizon:
-            // Pada p in [0.86, 0.98]: SUPERCRITICAL PRE-ERUPTION PINCH!
-            // Horizon memampat ekstrem dari 46 px ke 14 px tepat sebelum Big Bang White Hole!
-            float currentHorizonR = baseHorizonR;
-            if (p >= 0.86f && p < 0.98f)
-            {
-                float pinchNorm = (p - 0.86f) / 0.12f;
-                currentHorizonR = Mathf.Lerp(baseHorizonR, 14.0f, MathF.Sin(pinchNorm * Mathf.Pi * 0.5f));
-            }
-            else if (p >= 0.98f)
-            {
-                currentHorizonR = 14.0f;
-            }
-            else
-            {
-                // Pulsasi gelisah berfrekuensi tinggi saat energi membuncah
-                float jitter = MathF.Sin(p * Mathf.Tau * 6.0f) * (2.2f * p);
-                currentHorizonR = baseHorizonR + jitter;
-            }
-
-            // A. Selimut Gravitasi Luar (Violent Infall Lensing Glow)
-            DrawCircle(Vector2.Zero, currentHorizonR * 2.1f, new Color(0.18f, 0.06f, 0.38f, 0.15f + p * 0.25f));
-            DrawCircle(Vector2.Zero, currentHorizonR * 1.5f, new Color(0.10f, 0.45f, 0.65f, 0.22f + p * 0.38f));
-
-            // B. Inti Black Hole Pekat (Tetap Hitam Menutup Grid Latar Belakang!)
-            DrawCircle(Vector2.Zero, currentHorizonR, VoidCoreColor);
-
-            // C. RETAKAN RUANG-WAKTU EVENT HORIZON (White-Hot Fractures across Event Horizon)
-            if (p > 0.18f)
-            {
-                float crackNorm = (p - 0.18f) / 0.82f;
-                float crackAlpha = Mathf.Clamp(crackNorm * 1.35f, 0.0f, 1.0f);
-                float crackWidth = 1.3f + crackNorm * 2.8f;
-                float radiusRatio = currentHorizonR / baseHorizonR;
-
-                Color crackCol = IncandescentCrackColor.Lerp(WhiteHoleCoreColor, crackNorm * 0.65f);
-                crackCol.A = crackAlpha;
-
-                for (int i = 0; i < _horizonFractures.Count; i++)
+                float dist = ast.CachedPosition.DistanceTo(GlobalPosition);
+                if (dist < 3600.0f)
                 {
-                    var f = _horizonFractures[i];
-                    DrawLine(f.Start * radiusRatio, f.End * radiusRatio, crackCol, crackWidth);
-                }
-
-                // Titik-titik singularitas bocor di simpul retakan
-                for (int i = 0; i < _horizonFractures.Count; i += 2)
-                {
-                    Vector2 node = _horizonFractures[i].End * radiusRatio;
-                    DrawCircle(node, 1.8f + crackNorm * 2.2f, crackCol);
+                    ast.TriggerSupernovaFromBlackHole(GlobalPosition);
                 }
             }
+        }
+    }
 
-            // D. INTI BLINDING BURST DARI DALAM PUSAT SINGULARITAS (p > 0.72)
-            if (p > 0.72f)
+    /// <summary>
+    /// Melontarkan asteroid batu di sekitar SATU KALI SAJA saat ledakan supernova black hole.
+    /// Asteroid meluncur mulus, konsisten, dan bebas dari lonjakan kecepatan patah-patah.
+    /// </summary>
+    private void LaunchNearbyAsteroidsSeamlessly()
+    {
+        var asteroids = Asteroid.ActiveAsteroids;
+        for (int a = 0; a < asteroids.Count; a++)
+        {
+            var ast = asteroids[a];
+            if (ast == null || !IsInstanceValid(ast) || !ast.IsActiveInTree || ast.IsEnergyAsteroid) continue;
+
+            Vector2 outward = ast.CachedPosition - GlobalPosition;
+            float dist = outward.Length();
+
+            if (dist < 3400.0f)
             {
-                float burstNorm = (p - 0.72f) / 0.28f;
-                float burstRadius = currentHorizonR * MathF.Pow(burstNorm, 1.6f);
-                DrawCircle(Vector2.Zero, burstRadius, WhiteHoleCoreColor);
-                DrawArc(Vector2.Zero, burstRadius + 1.5f, 0.0f, Mathf.Tau, 48, SupercriticalFlareColor, 2.5f, true);
+                Vector2 dir = dist > 1.0f ? outward / dist : Vector2.Right;
+                // Kecepatan awal yang kuat, diluncurkan sekali saja sehingga trajectory 100% mulus
+                float blastSpeed = (float)GD.RandRange(2800.0, 3600.0);
+                ast.ApplySupernovaBlast(dir * blastSpeed, SupernovaDuration + WhiteHoleDuration + 4.0f);
             }
+        }
+    }
 
-            // E. LENGAN SPIRAL HISAPAN AKRESI KUANTUM (14 Inward Accretion Vortex Arms)
-            int vortexArms = 14;
-            float suctionProgress = p * p;
-            for (int v = 0; v < vortexArms; v++)
-            {
-                float armBaseAngle = _spinAngle + (v * (Mathf.Tau / vortexArms));
-                float armOuterR = Mathf.Lerp(260.0f, currentHorizonR + 8.0f, suctionProgress);
-                float armInnerR = currentHorizonR + 2.0f;
-
-                // Lengkungan spiral logaritmik masuk ke horizon
-                Vector2 pOuter = new Vector2(MathF.Cos(armBaseAngle + 0.85f), MathF.Sin(armBaseAngle + 0.85f)) * armOuterR;
-                Vector2 pInner = new Vector2(MathF.Cos(armBaseAngle), MathF.Sin(armBaseAngle)) * armInnerR;
-
-                Color armCol = HawkingRadiationCyan.Lerp(SupercriticalFlareColor, p);
-                armCol.A = (0.25f + 0.75f * p) * (1.0f - (float)v / (vortexArms * 2.0f));
-                DrawLine(pOuter, pInner, armCol, 1.8f + p * 2.2f);
-            }
-
-            // F. CINCIN FOTON PINCH & SUPERCRITICAL CORONA
-            Color flareRingCol = SupercriticalFlareColor;
-            flareRingCol.A = 0.85f + 0.15f * MathF.Sin(_pulseTimer * 16.0f);
-            float ringThick = 2.4f + p * 4.5f;
-            DrawArc(Vector2.Zero, currentHorizonR + 1.5f, 0.0f, Mathf.Tau, 64, flareRingCol, ringThick, true);
-
-            // G. CINCIN KONTRAKSI GELOMBANG HISAP LUAR
-            float contractR = Mathf.Lerp(320.0f, currentHorizonR, (p * 2.2f) % 1.0f);
-            Color contractCol = new Color(0.7f, 2.8f, 4.5f, 0.45f * (1.0f - (p % 0.5f) * 2.0f));
-            DrawArc(Vector2.Zero, contractR, 0.0f, Mathf.Tau, 48, contractCol, 1.8f, true);
-            return;
+    /// <summary>
+    /// Medan gaya repulsif White Hole yang mendorong partikel & asteroid menjauh.
+    /// Memudar dengan halus di 2.0s terakhir agar transisi kembali ke Black Hole bebas lonjakan fisika.
+    /// </summary>
+    private void ApplyWhiteHoleRepulsion(float dt)
+    {
+        float coolMult = 1.0f;
+        if (_stateTimer >= WhiteHoleDuration - 2.0f)
+        {
+            float coolProgress = (_stateTimer - (WhiteHoleDuration - 2.0f)) / 2.0f;
+            coolMult = Mathf.Clamp(1.0f - coolProgress, 0.0f, 1.0f);
         }
 
-        // =====================================================================
-        // 3. FASE ERUPTING (WHITE HOLE SUPERNOVA-SCALE OUTBURST, 1.35 DETIK)
-        // =====================================================================
-        if (State == RiftState.Erupting)
+        if (coolMult <= 0.01f) return;
+
+        var asteroids = Asteroid.ActiveAsteroids;
+        for (int a = 0; a < asteroids.Count; a++)
         {
-            float p = Mathf.Clamp(_stateTimer / EruptionDuration, 0.0f, 1.0f);
+            var ast = asteroids[a];
+            if (ast == null || !IsInstanceValid(ast)) continue;
 
-            // Inti White Hole Blinding White-Silver
-            float whiteR = baseHorizonR * (1.45f - 0.25f * p);
-            DrawCircle(Vector2.Zero, whiteR * 2.2f, new Color(0.45f, 2.85f, 4.5f, 0.42f * (1.0f - p)));
-            DrawCircle(Vector2.Zero, whiteR * 1.5f, new Color(5.5f, 5.0f, 4.2f, 0.75f * (1.0f - p * 0.4f)));
-            DrawCircle(Vector2.Zero, whiteR, WhiteHoleCoreColor);
+            Vector2 outward = ast.CachedPosition - GlobalPosition;
+            float dist = outward.Length();
 
-            // Cincin ledakan foton memancar keluar (Dual Shockwave)
-            float shockRadius1 = Mathf.Lerp(whiteR, 480.0f, MathF.Sqrt(p));
-            Color shockCol1 = new Color(5.5f, 5.2f, 4.5f, 1.0f - p);
-            DrawArc(Vector2.Zero, shockRadius1, 0.0f, Mathf.Tau, 56, shockCol1, 4.2f * (1.0f - p * 0.6f), true);
-
-            float shockRadius2 = Mathf.Lerp(whiteR, 320.0f, p * (2.0f - p));
-            Color shockCol2 = new Color(0.75f, 3.2f, 5.0f, 0.85f * (1.0f - p));
-            DrawArc(Vector2.Zero, shockRadius2, 0.0f, Mathf.Tau, 48, shockCol2, 2.6f * (1.0f - p * 0.5f), true);
-
-            // Pusaran Leher Lampu Jin White Hole (Genie Vortex Aperture Swirls)
-            int swirlArms = 10;
-            for (int s = 0; s < swirlArms; s++)
+            if (dist < 2600.0f && dist > 1.0f)
             {
-                float a0 = -_spinAngle * 1.2f + s * (Mathf.Tau / swirlArms);
-                float a1 = a0 + 1.35f;
-                float rOuter = whiteR * (2.4f - 0.8f * p);
-                Vector2 p0 = new Vector2(MathF.Cos(a0), MathF.Sin(a0)) * (whiteR * 0.65f);
-                Vector2 p1 = new Vector2(MathF.Cos(a1), MathF.Sin(a1)) * rOuter;
-                Color swirlCol = (s % 2 == 0)
-                    ? new Color(5.5f, 4.6f, 2.2f, 0.85f * (1.0f - p))
-                    : new Color(0.85f, 3.6f, 5.2f, 0.85f * (1.0f - p));
-                DrawLine(p0, p1, swirlCol, 3.0f * (1.0f - p * 0.4f));
+                Vector2 dir = outward / dist;
+                float repulseForce = 520.0f * coolMult * (1.0f - dist / 2600.0f);
+                ast.LinearVelocity += dir * repulseForce * dt;
             }
-
-            // Berkas sinar White Hole radial (Relativistic Light Beams)
-            int rayCount = 20;
-            for (int r = 0; r < rayCount; r++)
-            {
-                float rayAngle = _spinAngle * 0.4f + (r * (Mathf.Tau / rayCount));
-                Vector2 dir = new Vector2(MathF.Cos(rayAngle), MathF.Sin(rayAngle));
-                float rayLen = whiteR + (140.0f + 60.0f * (r % 3)) * (1.0f - p * 0.7f);
-                DrawLine(dir * (whiteR * 0.85f), dir * rayLen, new Color(5.5f, 5.2f, 5.0f, 0.75f * (1.0f - p)), 2.8f);
-            }
-            return;
-        }
-
-        // =====================================================================
-        // 4. FASE COOLING (PENENANGAN KEMBALI KE BLACK HOLE, 2.6 DETIK)
-        // =====================================================================
-        if (State == RiftState.Cooling)
-        {
-            float p = Mathf.Clamp(_stateTimer / CoolingDuration, 0.0f, 1.0f);
-            float smoothP = p * p;
-
-            // Inti mendingin dari putih kembali ke hitam pekat
-            Color coolCore = WhiteHoleCoreColor.Lerp(VoidCoreColor, smoothP);
-            DrawCircle(Vector2.Zero, baseHorizonR, coolCore);
-
-            // Cincin putih meredup kembali menjadi cincin Hawking Cyan tipis
-            Color coolRing = SupercriticalFlareColor.Lerp(HawkingRadiationCyan, smoothP);
-            coolRing.A = Mathf.Lerp(1.0f, 0.85f, p);
-            float ringW = Mathf.Lerp(4.5f, 1.8f, smoothP);
-            DrawArc(Vector2.Zero, baseHorizonR + 1.2f, 0.0f, Mathf.Tau, 64, coolRing, ringW, true);
         }
     }
 }

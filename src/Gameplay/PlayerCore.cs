@@ -37,6 +37,10 @@ public partial class PlayerCore : CharacterBody2D
     public bool IsEscapePod { get; private set; } = false;
     public float InvulnerableTimer { get; private set; } = 0.0f;
     public float EscapeBurstTimer { get; private set; } = 0.0f;
+    [Export] public float EscapeBuffDuration { get; set; } = 15.0f;
+    public float EscapeBuffTimer { get; private set; } = 0.0f;
+    public bool HasEscapeSpeedBuff => IsEscapePod && EscapeBuffTimer > 0.0f;
+    [Export] public bool ShowEscapeTrail { get; set; } = false;
     public Vector2 EscapeBurstDirection { get; private set; } = Vector2.Left;
     public float HitFlashTimer { get; private set; } = 0.0f;
 
@@ -105,6 +109,22 @@ public partial class PlayerCore : CharacterBody2D
     private float _gravityTidalActiveTimer = 0.0f;
     private Vector2 _gravityStarWorldPos = Vector2.Zero;
     private float _gravityPulseTimer = 0.0f;
+
+    // Status Perisai Neon Anti-Terpental saat Cosmic Rift Supernova Shockwave
+    private float _shockwaveShieldTimer = 0.0f;
+    private Vector2 _shockwaveShieldSourcePos = Vector2.Zero;
+    public bool HasShockwaveShield => _shockwaveShieldTimer > 0.0f;
+
+    /// <summary>
+    /// Mengaktifkan perisai neon anti-terpental yang menghadap ke arah Cosmic Rift / Black Hole.
+    /// Menyerap hentakan inersia gelombang kejut supernova agar kapal induk tidak terlempar.
+    /// </summary>
+    public void ActivateShockwaveShield(Vector2 sourcePosition, float duration = 0.55f)
+    {
+        _shockwaveShieldSourcePos = sourcePosition;
+        _shockwaveShieldTimer = MathF.Max(_shockwaveShieldTimer, duration);
+        QueueRedraw();
+    }
 
     /// <summary>
     /// Dipanggil oleh Bintang Aether saat kapal pemain berada di dalam sumur gravitasi maut.
@@ -176,12 +196,9 @@ public partial class PlayerCore : CharacterBody2D
 
     public override void _Ready()
     {
-        // Spawn acak di Inner Belt (R ~ 1.350 - 1.850 px dari pusat semesta)
-        var rng = new RandomNumberGenerator();
-        rng.Randomize();
-        float spawnAngle = rng.Randf() * Mathf.Tau;
-        float spawnDist = rng.RandfRange(1350.0f, 1850.0f);
-        GlobalPosition = new Vector2(MathF.Cos(spawnAngle), MathF.Sin(spawnAngle)) * spawnDist;
+        // Spawn langsung di dekat Cosmic Rift 0 agar pemain dapat langsung mengamati animasinya
+        Vector2 rift0Pos = new Vector2(MathF.Cos(-0.155f), MathF.Sin(-0.155f)) * AsteroidFieldManager.RiftOrbitRadius;
+        GlobalPosition = rift0Pos + new Vector2(-460.0f, 140.0f);
 
         ZIndex = 2; // Berada di antara Back Ring (ZIndex=1) dan Front Ring (ZIndex=3)
 
@@ -301,6 +318,7 @@ public partial class PlayerCore : CharacterBody2D
         {
             IsEscapePod = false;
             EscapeBurstTimer = 0.0f;
+            EscapeBuffTimer = 0.0f;
         }
         Health = MathF.Min(MaxHealth, Health + BaseHealthPerCell);
         EmitSignal(SignalName.CoreDamageTaken, Health, MaxHealth);
@@ -376,6 +394,7 @@ public partial class PlayerCore : CharacterBody2D
         Health = BaseHealthPerCell;
         InvulnerableTimer = 3.0f;
         EscapeBurstTimer = 1.40f;
+        EscapeBuffTimer = EscapeBuffDuration;
 
         // Arah lontaran kabur: searah dorongan menjauh dari musuh (impactDir sudah mengarah dari musuh ke pemain)
         Vector2 escapeDir = impactDir.LengthSquared() > 0.01f
@@ -410,6 +429,11 @@ public partial class PlayerCore : CharacterBody2D
             if (EscapeBurstTimer > 0.0f)
             {
                 EscapeBurstTimer -= dt;
+                QueueRedraw();
+            }
+            if (EscapeBuffTimer > 0.0f)
+            {
+                EscapeBuffTimer -= dt;
                 QueueRedraw();
             }
             if (HitFlashTimer > 0.0f)
@@ -467,7 +491,7 @@ public partial class PlayerCore : CharacterBody2D
             if (Input.IsActionPressed("ui_down") || Input.IsKeyPressed(Key.S)) inputDir.Y += 1.0f;
             if (Input.IsActionPressed("ui_up") || Input.IsKeyPressed(Key.W)) inputDir.Y -= 1.0f;
 
-            float currentAccel = IsEscapePod ? (Acceleration * 1.45f) : Acceleration;
+            float currentAccel = HasEscapeSpeedBuff ? (Acceleration * 1.45f) : Acceleration;
             if (inputDir.LengthSquared() > 0.01f)
             {
                 inputDir = inputDir.Normalized();
@@ -506,7 +530,7 @@ public partial class PlayerCore : CharacterBody2D
                 : baseFriction;
             Velocity *= MathF.Pow(activeFriction, dt * 60.0f);
 
-            float baseMaxSpd = (IsEscapePod ? EscapePodMaxSpeed : MaxSpeed) + (_gravityTidalStress * 340.0f);
+            float baseMaxSpd = (HasEscapeSpeedBuff ? EscapePodMaxSpeed : MaxSpeed) + (_gravityTidalStress * 340.0f);
             float activeMaxSpeed = (IsEscapePod && EscapeBurstTimer > 0.0f)
                 ? 1220.0f
                 : (IsBoosting ? BoostMaxSpeed : baseMaxSpd);
@@ -525,6 +549,14 @@ public partial class PlayerCore : CharacterBody2D
                     float dampedSpeed = Mathf.Lerp(curSpeed, baseMaxSpd, MathF.Min(1.0f, 6.5f * dt));
                     Velocity = (Velocity / curSpeed) * dampedSpeed;
                 }
+            }
+
+            // Inersia Jangkar Perisai Neon Anti-Terpental saat gelombang kejut Supernova Rift
+            if (_shockwaveShieldTimer > 0.0f)
+            {
+                _shockwaveShieldTimer -= dt;
+                Velocity = Velocity.Lerp(Vector2.Zero, dt * 12.0f);
+                QueueRedraw();
             }
 
             GlobalPosition += Velocity * dt;
@@ -587,8 +619,8 @@ public partial class PlayerCore : CharacterBody2D
             Color activeLineColor = isHit ? new Color(4.8f, 4.8f, 4.2f, 1.0f) : CoreLineColor;
             Color activeAuraColor = isHit ? new Color(3.5f, 3.5f, 2.5f, 0.85f) : CoreAuraColor;
 
-            // Ekor Thruster Darurat saat Escape Pod melesat kabur cepat
-            if (IsEscapePod && Velocity.LengthSquared() > 2500.0f)
+            // Ekor Thruster Darurat saat Escape Pod melesat kabur cepat (Dihilangkan secara default; dibatasi 15 detik jika ShowEscapeTrail diaktifkan)
+            if (ShowEscapeTrail && HasEscapeSpeedBuff && Velocity.LengthSquared() > 2500.0f)
             {
                 Vector2 localBack = (-Velocity.Normalized()).Rotated(-Rotation);
                 Vector2 localTan = new Vector2(-localBack.Y, localBack.X);
@@ -755,6 +787,51 @@ public partial class PlayerCore : CharacterBody2D
 
                 float flashRadius = Mathf.Lerp(6.5f, 2.8f, 1.0f - t);
                 DrawCircle(p, flashRadius, fb.ThemeColor * (1.5f + sinT * 1.5f));
+            }
+
+            // 4. Perisai Neon Anti-Terpental (Inertial Anchor Barrier) saat Supernova Cosmic Rift
+            if (_shockwaveShieldTimer > 0.0f)
+            {
+                Vector2 toRiftWorld = _shockwaveShieldSourcePos - GlobalPosition;
+                if (toRiftWorld.LengthSquared() > 0.01f)
+                {
+                    Vector2 localToRift = toRiftWorld.Normalized().Rotated(-Rotation);
+                    float midAngle = localToRift.Angle();
+                    float clusterRad = _circleShape?.Radius ?? (HexRadius * 2.2f);
+                    float shieldRadius = clusterRad + 32.0f;
+                    float arcSpread = 1.62f; // ~93 derajat
+                    float startAngle = midAngle - arcSpread * 0.5f;
+
+                    float pulse = 0.85f + 0.15f * MathF.Sin((float)Time.GetTicksMsec() * 0.018f);
+
+                    // A. Lapisan Aura Glow Luar Neon Cyan-Teal
+                    Color neonAura = new Color(0.1f, 4.2f, 8.8f, 0.95f) * pulse;
+                    DrawArc(Vector2.Zero, shieldRadius, startAngle, startAngle + arcSpread, 28, neonAura, 8.5f, false);
+
+                    // B. Lapisan Inti Garis Energi Tajam (White-Cyan HDR)
+                    Color neonCore = new Color(5.6f, 7.5f, 9.2f, 1.0f);
+                    DrawArc(Vector2.Zero, shieldRadius, startAngle, startAngle + arcSpread, 28, neonCore, 2.8f, false);
+
+                    // C. Cincin Lapisan Kedua Resonansi Medan Gaya (Secondary Harmonic Arc)
+                    Color neonSub = new Color(0.2f, 3.2f, 6.8f, 0.70f) * pulse;
+                    DrawArc(Vector2.Zero, shieldRadius - 9.0f, startAngle + 0.18f, startAngle + arcSpread - 0.18f, 22, neonSub, 2.2f, false);
+
+                    // D. Taring Penjepit Inersia (Inertial Field Stabilizer Brackets) di kedua ujung arc
+                    Vector2 tip1 = new Vector2(MathF.Cos(startAngle), MathF.Sin(startAngle)) * shieldRadius;
+                    Vector2 tip2 = new Vector2(MathF.Cos(startAngle + arcSpread), MathF.Sin(startAngle + arcSpread)) * shieldRadius;
+                    DrawLine(tip1, tip1 * 0.82f, neonCore, 2.5f);
+                    DrawLine(tip2, tip2 * 0.82f, neonCore, 2.5f);
+
+                    // E. Garis Faset Pembelok Gelombang Kejut (Deflector Lattice Lines)
+                    int latticeRays = 5;
+                    for (int l = 0; l <= latticeRays; l++)
+                    {
+                        float aL = startAngle + (arcSpread * l / latticeRays);
+                        Vector2 pOuter = new Vector2(MathF.Cos(aL), MathF.Sin(aL)) * shieldRadius;
+                        Vector2 pInner = pOuter * 0.88f;
+                        DrawLine(pInner, pOuter, neonAura * 0.75f, 1.8f);
+                    }
+                }
             }
         }
         catch (Exception ex)

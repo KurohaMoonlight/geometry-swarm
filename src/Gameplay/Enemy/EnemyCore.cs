@@ -1,15 +1,15 @@
 using System;
 using System.Collections.Generic;
+using GeometrySwarm.Core.ECS.Components;
 using Godot;
 
 namespace GeometrySwarm.Gameplay.Enemy;
 
 /// <summary>
 /// Kapal Induk Musuh (Enemy Hive Core) bertema crimson-magenta neon.
-/// Berdiri berhadapan dengan Player Core sebagai markas komando swarm musuh.
-/// - Mode Hive Core: Massa kapal induk sangat berat (Heavy Mass Inertia).
-/// - Mode Emergency Escape Pod (1 Core tersisa): Terlontar kabur dengan kecepatan sangat tinggi
-///   menjauhi pemain, memproduksi 1 Miner otomatis, dan bermanuver lincah menghindari kejaran.
+/// - Memiliki fitur fisik, ekspansi sel Honeycomb (Mitosis), dan kolisi voxel per-sel yang 100% setara dengan PlayerCore.
+/// - Ukuran CoreCollisionRadius dan CoreCellCount otomatis bertambah saat Rival Hive melakukan ekspansi Core di Foundry.
+/// - Mode Emergency Escape Pod (1 Core tersisa): Terlontar kabur menjauhi pemain dengan 1 Miner otomatis.
 /// </summary>
 public partial class EnemyCore : Node2D
 {
@@ -27,7 +27,9 @@ public partial class EnemyCore : Node2D
     public float Health { get; private set; } = 600.0f;
 
     public const float HexRadius = 16.0f;
-    public float CoreCollisionRadius => HexRadius * 0.92f;
+    private float _clusterCollisionRadius = HexRadius * 0.92f;
+    public float CoreCollisionRadius => _clusterCollisionRadius;
+    public int CoreCellCount => _hexCellOffsets.Count;
 
     [Export] public float Acceleration { get; set; } = 2200.0f;
     [Export] public float Friction { get; set; } = 0.91f;
@@ -37,8 +39,52 @@ public partial class EnemyCore : Node2D
     public bool IsEscapePod { get; private set; } = false;
     public float InvulnerableTimer { get; private set; } = 0.0f;
     public float EscapeBurstTimer { get; private set; } = 0.0f;
+    [Export] public float EscapeBuffDuration { get; set; } = 15.0f;
+    public float EscapeBuffTimer { get; private set; } = 0.0f;
+    public bool HasEscapeSpeedBuff => IsEscapePod && EscapeBuffTimer > 0.0f;
+    [Export] public bool ShowEscapeTrail { get; set; } = false;
     public Vector2 EscapeBurstDirection { get; private set; } = Vector2.Right;
     public Vector2 Velocity { get; set; } = Vector2.Zero;
+
+    // Status Perisai Neon Anti-Terpental saat Cosmic Rift Supernova Shockwave
+    private float _shockwaveShieldTimer = 0.0f;
+    private Vector2 _shockwaveShieldSourcePos = Vector2.Zero;
+    public bool HasShockwaveShield => _shockwaveShieldTimer > 0.0f;
+
+    /// <summary>
+    /// Mengaktifkan perisai neon anti-terpental yang menghadap ke arah Cosmic Rift / Black Hole.
+    /// Menyerap hentakan inersia gelombang kejut supernova agar armada rival tidak terlempar.
+    /// </summary>
+    public void ActivateShockwaveShield(Vector2 sourcePosition, float duration = 0.55f)
+    {
+        _shockwaveShieldSourcePos = sourcePosition;
+        _shockwaveShieldTimer = MathF.Max(_shockwaveShieldTimer, duration);
+        QueueRedraw();
+    }
+
+    // Sistem Mitosis (Pembelahan Sel Core Prosedural - Identik 1:1 dengan PlayerCore)
+    public bool IsMitosisActive { get; private set; } = false;
+    public float MitosisProgress { get; private set; } = 0.0f;
+    public float MitosisDuration { get; private set; } = 7.0f;
+    public float MitosisTimer { get; private set; } = 0.0f;
+    public float MitosisRemainingTime => MathF.Max(0.0f, MitosisDuration - MitosisTimer);
+
+    private static readonly Vector2I[] HexDirections = new Vector2I[]
+    {
+        new(1, 0),
+        new(1, -1),
+        new(0, -1),
+        new(-1, 0),
+        new(-1, 1),
+        new(0, 1),
+    };
+
+    private readonly HashSet<Vector2I> _occupiedAxials = new();
+    private readonly HashSet<Vector2I> _reservedAxials = new();
+    private readonly Queue<Vector2I> _mitosisQueue = new();
+    private Vector2I _mitosisChosenAxial;
+    private Vector2 _mitosisParentOffset;
+    private Vector2 _mitosisTargetOffset;
 
     private readonly List<Vector2> _hexCellOffsets = new();
     private readonly List<Vector2[]> _cachedHexPolylines = new();
@@ -61,10 +107,128 @@ public partial class EnemyCore : Node2D
 
     private void BuildHoneycombCluster()
     {
+        _occupiedAxials.Clear();
+        _reservedAxials.Clear();
+        _mitosisQueue.Clear();
+        IsMitosisActive = false;
+
         _hexCellOffsets.Clear();
         _cachedHexPolylines.Clear();
+
+        _occupiedAxials.Add(Vector2I.Zero);
         _hexCellOffsets.Add(Vector2.Zero);
         _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
+        _clusterCollisionRadius = HexRadius * 0.92f;
+    }
+
+    public float GetMitosisDurationForCurrentCores()
+    {
+        int currentCount = _hexCellOffsets.Count;
+        float duration = 7.0f / (1.0f + (currentCount - 1) * 0.40f);
+        return MathF.Max(0.75f, duration);
+    }
+
+    public void AddNextHoneycombCell()
+    {
+        List<Vector2I> candidates = new();
+
+        foreach (var cell in _occupiedAxials)
+        {
+            foreach (var dir in HexDirections)
+            {
+                var neighbor = cell + dir;
+                if (!_occupiedAxials.Contains(neighbor) && !_reservedAxials.Contains(neighbor) && !candidates.Contains(neighbor))
+                {
+                    candidates.Add(neighbor);
+                }
+            }
+        }
+
+        candidates.Sort((a, b) =>
+        {
+            int distA = Math.Max(Math.Abs(a.X), Math.Max(Math.Abs(a.Y), Math.Abs(a.X + a.Y)));
+            int distB = Math.Max(Math.Abs(b.X), Math.Max(Math.Abs(b.Y), Math.Abs(b.X + b.Y)));
+            if (distA != distB) return distA.CompareTo(distB);
+            return MathF.Atan2(a.Y, a.X).CompareTo(MathF.Atan2(b.Y, b.X));
+        });
+
+        if (candidates.Count > 0)
+        {
+            var chosen = candidates[0];
+            _reservedAxials.Add(chosen);
+
+            if (!IsMitosisActive)
+            {
+                StartMitosis(chosen);
+            }
+            else
+            {
+                _mitosisQueue.Enqueue(chosen);
+            }
+        }
+    }
+
+    private void StartMitosis(Vector2I targetAxial)
+    {
+        _mitosisChosenAxial = targetAxial;
+
+        Vector2I parentAxial = Vector2I.Zero;
+        foreach (var dir in HexDirections)
+        {
+            var neighbor = targetAxial - dir;
+            if (_occupiedAxials.Contains(neighbor))
+            {
+                parentAxial = neighbor;
+                break;
+            }
+        }
+
+        _mitosisParentOffset = AxialToWorldOffset(parentAxial);
+        _mitosisTargetOffset = AxialToWorldOffset(targetAxial);
+
+        MitosisDuration = GetMitosisDurationForCurrentCores();
+        MitosisTimer = 0.0f;
+        MitosisProgress = 0.0f;
+        IsMitosisActive = true;
+        QueueRedraw();
+    }
+
+    private void CompleteCurrentMitosis()
+    {
+        _occupiedAxials.Add(_mitosisChosenAxial);
+        _hexCellOffsets.Add(_mitosisTargetOffset);
+        _cachedHexPolylines.Add(BuildHexPoints(_mitosisTargetOffset, HexRadius));
+
+        float maxDist = HexRadius * 0.92f;
+        for (int i = 0; i < _hexCellOffsets.Count; i++)
+        {
+            maxDist = MathF.Max(maxDist, _hexCellOffsets[i].Length() + HexRadius * 0.92f);
+        }
+        _clusterCollisionRadius = maxDist;
+
+        _reservedAxials.Remove(_mitosisChosenAxial);
+
+        if (IsEscapePod)
+        {
+            IsEscapePod = false;
+            EscapeBurstTimer = 0.0f;
+            EscapeBuffTimer = 0.0f;
+        }
+
+        Health = MathF.Min(MaxHealth, Health + BaseHealthPerCell);
+        EmitSignal(SignalName.EnemyCoreDamageTaken, Health, MaxHealth);
+
+        if (_mitosisQueue.Count > 0)
+        {
+            var next = _mitosisQueue.Dequeue();
+            StartMitosis(next);
+        }
+        else
+        {
+            IsMitosisActive = false;
+        }
+
+        QueueRedraw();
     }
 
     private static Vector2 AxialToWorldOffset(Vector2I axial)
@@ -91,6 +255,13 @@ public partial class EnemyCore : Node2D
         float dt = (float)delta;
         _pulseTimer += dt * 3.2f;
 
+        // Inersia Jangkar Perisai Neon Anti-Terpental saat gelombang kejut Supernova Rift
+        if (_shockwaveShieldTimer > 0.0f)
+        {
+            _shockwaveShieldTimer -= dt;
+            Velocity = Velocity.Lerp(Vector2.Zero, dt * 12.0f);
+        }
+
         if (_hitFlashTimer > 0.0f)
         {
             _hitFlashTimer -= dt;
@@ -102,6 +273,20 @@ public partial class EnemyCore : Node2D
         if (EscapeBurstTimer > 0.0f)
         {
             EscapeBurstTimer -= dt;
+        }
+        if (EscapeBuffTimer > 0.0f)
+        {
+            EscapeBuffTimer -= dt;
+        }
+
+        if (IsMitosisActive)
+        {
+            MitosisTimer += dt;
+            MitosisProgress = Mathf.Clamp(MitosisTimer / MitosisDuration, 0.0f, 1.0f);
+            if (MitosisTimer >= MitosisDuration)
+            {
+                CompleteCurrentMitosis();
+            }
         }
 
         // Manuver gerak Escape Pod tunggal (1 Core) atau Hive Core
@@ -130,12 +315,14 @@ public partial class EnemyCore : Node2D
                 }
 
                 // Kemudi kabur dengan akselerasi normal
-                Velocity += fleeDir * (Acceleration * 0.75f * dt);
+                float targetAccel = HasEscapeSpeedBuff ? (Acceleration * 0.75f) : (Acceleration * 0.45f);
+                float targetMaxSpeed = HasEscapeSpeedBuff ? EscapePodMaxSpeed : MaxSpeed;
+                Velocity += fleeDir * (targetAccel * dt);
 
                 float curSpeed = Velocity.Length();
-                if (curSpeed > EscapePodMaxSpeed)
+                if (curSpeed > targetMaxSpeed)
                 {
-                    float dampedSpeed = Mathf.Lerp(curSpeed, EscapePodMaxSpeed, MathF.Min(1.0f, 6.0f * dt));
+                    float dampedSpeed = Mathf.Lerp(curSpeed, targetMaxSpeed, MathF.Min(1.0f, 6.0f * dt));
                     Velocity = (Velocity / curSpeed) * dampedSpeed;
                 }
 
@@ -161,35 +348,58 @@ public partial class EnemyCore : Node2D
                 float dampedSpeed = Mathf.Lerp(curSpeed, MaxSpeed, MathF.Min(1.0f, 6.0f * dt));
                 Velocity = (Velocity / curSpeed) * dampedSpeed;
             }
+
             GlobalPosition += Velocity * dt;
             Velocity *= MathF.Pow(Friction, dt * 60.0f);
         }
 
-        // Pantulan fisik & seluncur tangensial terhadap batuan asteroid agar Escape Pod tidak nyangkut saat kabur
+        // Kolisi fisik per-sel Hexagon terhadap voxel asteroid (identik 1:1 dengan PlayerCore)
+        ResolveAsteroidVoxelCollisions();
+
+        QueueRedraw();
+    }
+
+    private void ResolveAsteroidVoxelCollisions()
+    {
         var asteroids = Asteroid.ActiveAsteroids;
+        if (asteroids.Count == 0) return;
+
+        Vector2 shipPos = GlobalPosition;
+        Vector2 shipVel = Velocity;
+        float hexColRadius = HexRadius * 0.85f;
+        float clusterRadius = _clusterCollisionRadius;
+
         for (int i = 0; i < asteroids.Count; i++)
         {
             var ast = asteroids[i];
             if (ast == null || !ast.IsActiveInTree) continue;
 
-            Vector2 curPos = GlobalPosition;
-            Vector2 curVel = Velocity;
-            if (ast.ResolveCircleVoxelCollision(ref curPos, ref curVel, CoreCollisionRadius, out Vector2 hitNormal, impulseWeight: 0.35f))
+            float maxReach = clusterRadius + ast.OuterBoundRadius;
+            Vector2 toAst = shipPos - ast.CachedPosition;
+            if (MathF.Abs(toAst.X) > maxReach || MathF.Abs(toAst.Y) > maxReach) continue;
+
+            for (int c = 0; c < _hexCellOffsets.Count; c++)
             {
-                if (IsEscapePod)
+                Vector2 rotatedOffset = _hexCellOffsets[c].Rotated(Rotation);
+                Vector2 cellWorldPos = shipPos + rotatedOffset;
+
+                if (ast.ResolveCircleVoxelCollision(ref cellWorldPos, ref shipVel, hexColRadius, out Vector2 hitNormal, impulseWeight: 0.35f))
                 {
-                    Vector2 tangent = new Vector2(-hitNormal.Y, hitNormal.X);
-                    if (tangent.Dot(EscapeBurstDirection) < 0.0f) tangent = -tangent;
-                    float keepSpeed = MathF.Max(curVel.Length(), 680.0f);
-                    curVel = (tangent * 0.85f + hitNormal * 0.15f).Normalized() * keepSpeed;
-                    EscapeBurstDirection = curVel.Normalized();
+                    shipPos = cellWorldPos - rotatedOffset;
+                    if (IsEscapePod)
+                    {
+                        Vector2 tangent = new Vector2(-hitNormal.Y, hitNormal.X);
+                        if (tangent.Dot(EscapeBurstDirection) < 0.0f) tangent = -tangent;
+                        float keepSpeed = MathF.Max(shipVel.Length(), 680.0f);
+                        shipVel = (tangent * 0.85f + hitNormal * 0.15f).Normalized() * keepSpeed;
+                        EscapeBurstDirection = shipVel.Normalized();
+                    }
                 }
-                GlobalPosition = curPos;
-                Velocity = curVel;
             }
         }
 
-        QueueRedraw();
+        GlobalPosition = shipPos;
+        Velocity = shipVel;
     }
 
     public bool TakeDamage(float amount, Vector2 impactDir)
@@ -221,14 +431,12 @@ public partial class EnemyCore : Node2D
         IsEscapePod = true;
 
         // Sarang luar hancur total, menyisakan 1 sel inti Nemesis Pod tunggal
-        _hexCellOffsets.Clear();
-        _cachedHexPolylines.Clear();
-        _hexCellOffsets.Add(Vector2.Zero);
-        _cachedHexPolylines.Add(BuildHexPoints(Vector2.Zero, HexRadius));
+        BuildHoneycombCluster();
 
         Health = 600.0f;
         InvulnerableTimer = 3.0f;
         EscapeBurstTimer = 1.45f;
+        EscapeBuffTimer = EscapeBuffDuration;
 
         // Pastikan arah eject SELALU menjauhi PlayerCore (bukan berbalik ke arah pemain!)
         Vector2 awayDir = impactDir.LengthSquared() > 0.01f ? impactDir.Normalized() : Vector2.Right;
@@ -275,8 +483,19 @@ public partial class EnemyCore : Node2D
             DrawCircle(offset, coreGlowRadius, EnemyPulseColor);
         }
 
-        // Ekor Thruster Darurat HANYA menyala saat fase Escape Burst aktif (1.45 detik), lalu mati
-        if (IsEscapePod && EscapeBurstTimer > 0.0f)
+        // Gambar animasi Mitosis bila sedang membelah sel baru
+        if (IsMitosisActive)
+        {
+            float pEased = Mathf.SmoothStep(0.0f, 1.0f, MitosisProgress);
+            Vector2 childPos = _mitosisParentOffset.Lerp(_mitosisTargetOffset, pEased);
+            float childRadius = Mathf.Lerp(HexRadius * 0.45f, HexRadius * 0.95f, pEased);
+            DrawCircle(childPos, childRadius, new Color(2.2f, 0.2f, 0.75f, 0.35f));
+            DrawArc(childPos, childRadius, 0.0f, Mathf.Tau, 16, EnemyLineColor, 1.8f);
+            DrawLine(_mitosisParentOffset, childPos, EnemyPulseColor, 1.8f);
+        }
+
+        // Ekor Thruster Darurat (Dihilangkan secara default; hanya menyala jika ShowEscapeTrail aktif)
+        if (ShowEscapeTrail && IsEscapePod && EscapeBurstTimer > 0.0f)
         {
             Vector2 backDir = -Velocity.Normalized();
             Vector2 tangent = new Vector2(-backDir.Y, backDir.X);
@@ -292,7 +511,7 @@ public partial class EnemyCore : Node2D
         {
             float invPulse = 0.5f + 0.5f * MathF.Sin(InvulnerableTimer * 26.0f);
             Color invColor = new Color(4.5f, 0.4f, 2.2f, 0.50f + 0.35f * invPulse);
-            DrawArc(Vector2.Zero, HexRadius * 1.55f, 0.0f, Mathf.Tau, 32, invColor, 2.5f);
+            DrawArc(Vector2.Zero, _clusterCollisionRadius * 1.35f, 0.0f, Mathf.Tau, 32, invColor, 2.5f);
         }
 
         // Strobe Peringatan Bahaya jika sedang menjadi Nemesis Escape Pod
@@ -304,6 +523,50 @@ public partial class EnemyCore : Node2D
         }
 
         // Lingkaran batas sensor perisai inti
-        DrawArc(Vector2.Zero, CoreCollisionRadius, 0.0f, Mathf.Tau, 32, new Color(EnemyLineColor.R, EnemyLineColor.G, EnemyLineColor.B, 0.28f * pulse), 1.2f);
+        DrawArc(Vector2.Zero, _clusterCollisionRadius, 0.0f, Mathf.Tau, 32, new Color(EnemyLineColor.R, EnemyLineColor.G, EnemyLineColor.B, 0.28f * pulse), 1.2f);
+
+        // Perisai Neon Anti-Terpental (Rival Inertial Anchor Barrier) saat Supernova Cosmic Rift
+        if (_shockwaveShieldTimer > 0.0f)
+        {
+            Vector2 toRiftWorld = _shockwaveShieldSourcePos - GlobalPosition;
+            if (toRiftWorld.LengthSquared() > 0.01f)
+            {
+                Vector2 localToRift = toRiftWorld.Normalized().Rotated(-Rotation);
+                float midAngle = localToRift.Angle();
+                float shieldRadius = _clusterCollisionRadius + 32.0f;
+                float arcSpread = 1.62f; // ~93 derajat
+                float startAngle = midAngle - arcSpread * 0.5f;
+
+                float shieldPulse = 0.85f + 0.15f * MathF.Sin((float)Time.GetTicksMsec() * 0.018f);
+
+                // A. Lapisan Aura Glow Luar Neon Crimson-Magenta
+                Color enemyNeonAura = new Color(6.8f, 0.35f, 4.6f, 0.95f) * shieldPulse;
+                DrawArc(Vector2.Zero, shieldRadius, startAngle, startAngle + arcSpread, 28, enemyNeonAura, 8.5f, false);
+
+                // B. Lapisan Inti Garis Energi Tajam (White-Magenta HDR)
+                Color enemyNeonCore = new Color(8.8f, 5.2f, 7.8f, 1.0f);
+                DrawArc(Vector2.Zero, shieldRadius, startAngle, startAngle + arcSpread, 28, enemyNeonCore, 2.8f, false);
+
+                // C. Cincin Lapisan Kedua Resonansi Medan Gaya
+                Color enemyNeonSub = new Color(4.5f, 0.2f, 3.2f, 0.70f) * shieldPulse;
+                DrawArc(Vector2.Zero, shieldRadius - 9.0f, startAngle + 0.18f, startAngle + arcSpread - 0.18f, 22, enemyNeonSub, 2.2f, false);
+
+                // D. Taring Penjepit Inersia di kedua ujung arc
+                Vector2 tip1 = new Vector2(MathF.Cos(startAngle), MathF.Sin(startAngle)) * shieldRadius;
+                Vector2 tip2 = new Vector2(MathF.Cos(startAngle + arcSpread), MathF.Sin(startAngle + arcSpread)) * shieldRadius;
+                DrawLine(tip1, tip1 * 0.82f, enemyNeonCore, 2.5f);
+                DrawLine(tip2, tip2 * 0.82f, enemyNeonCore, 2.5f);
+
+                // E. Garis Faset Pembelok Gelombang Kejut (Deflector Lattice Lines)
+                int latticeRays = 5;
+                for (int l = 0; l <= latticeRays; l++)
+                {
+                    float aL = startAngle + (arcSpread * l / latticeRays);
+                    Vector2 pOuter = new Vector2(MathF.Cos(aL), MathF.Sin(aL)) * shieldRadius;
+                    Vector2 pInner = pOuter * 0.88f;
+                    DrawLine(pInner, pOuter, enemyNeonAura * 0.75f, 1.8f);
+                }
+            }
+        }
     }
 }

@@ -15,17 +15,8 @@ namespace GeometrySwarm.Gameplay;
 /// </summary>
 public partial class AsteroidFieldManager : Node2D
 {
-    [Signal]
-    public delegate void CosmicRiftInfallEventHandler(Vector2 riftPos, float power, float radius);
-
-    [Signal]
-    public delegate void CosmicRiftEruptedEventHandler(Vector2 riftPos, float power, float radius);
-
     [Export] public Vector2 SectorSize { get; set; } = new(12000.0f, 12000.0f);
     [Export] public int TotalAsteroids { get; set; } = 32;
-    [Export] public int TargetAsteroidCount { get; set; } = 32;
-    [Export] public float RiftCheckIntervalMin { get; set; } = 14.0f;
-    [Export] public float RiftCheckIntervalMax { get; set; } = 20.0f;
 
     public const float RiftOrbitRadius = 1550.0f;
 
@@ -36,6 +27,9 @@ public partial class AsteroidFieldManager : Node2D
     public float[] GravityWellInfallRatios { get; private set; } = Array.Empty<float>();
     public float[] GravityWellPullAccels { get; private set; } = Array.Empty<float>();
     public float[] GravityWellSwirlAccels { get; private set; } = Array.Empty<float>();
+    public static AsteroidFieldManager? Instance { get; private set; }
+    public IReadOnlyList<CosmicRift> CosmicRifts => _cosmicRifts;
+
     public float[] GravityWellHeatRates { get; private set; } = Array.Empty<float>();
 
     private readonly List<Vector2> _gravPosList = new(16);
@@ -47,8 +41,6 @@ public partial class AsteroidFieldManager : Node2D
     private readonly List<float> _gravHeatList = new(16);
 
     private readonly List<CosmicRift> _cosmicRifts = new();
-    private float _riftEjectionTimer = 5.0f;
-    private int _nextRiftIndex = 0;
 
     private Rect2 _sectorBounds;
     private static readonly Color PerimeterColor = new(0.35f, 0.15f, 0.55f, 0.45f);
@@ -56,6 +48,7 @@ public partial class AsteroidFieldManager : Node2D
 
     public override void _Ready()
     {
+        Instance = this;
         _sectorBounds = new Rect2(-SectorSize * 0.5f, SectorSize);
         SpawnCosmicRifts();
         SpawnColossalAsteroidField();
@@ -82,18 +75,6 @@ public partial class AsteroidFieldManager : Node2D
                 OrbitSpeed = 0.012f
             };
 
-            rift.RiftInfallStarted += (pos, power, radius) =>
-            {
-                EmitSignal(SignalName.CosmicRiftInfall, pos, power, radius);
-            };
-
-            rift.RiftErupted += (pos, power, radius) =>
-            {
-                EmitSignal(SignalName.CosmicRiftErupted, pos, power, radius);
-            };
-
-            rift.RiftSpawnAsteroidRequested += OnRiftSpawnAsteroid;
-
             _cosmicRifts.Add(rift);
             AddChild(rift);
         }
@@ -101,35 +82,7 @@ public partial class AsteroidFieldManager : Node2D
 
     public override void _PhysicsProcess(double delta)
     {
-        float dt = (float)delta;
-        _riftEjectionTimer -= dt;
-
         UpdateGravityWellTelemetry();
-
-        if (_riftEjectionTimer <= 0.0f && _cosmicRifts.Count > 0)
-        {
-            int currentAsteroidCount = Asteroid.ActiveAsteroids.Count;
-            // Aktif HANYA jika populasi asteroid di arena berkurang di bawah TargetAsteroidCount
-            if (currentAsteroidCount < TargetAsteroidCount)
-            {
-                var rift = _cosmicRifts[_nextRiftIndex];
-                _nextRiftIndex = (_nextRiftIndex + 1) % _cosmicRifts.Count;
-
-                if (rift.TriggerEjectionSequence())
-                {
-                    _riftEjectionTimer = (float)GD.RandRange(RiftCheckIntervalMin, RiftCheckIntervalMax);
-                }
-                else
-                {
-                    _riftEjectionTimer = 3.0f;
-                }
-            }
-            else
-            {
-                // Populasi asteroid masih penuh/cukup, cek lagi dalam interval periodik
-                _riftEjectionTimer = 4.0f;
-            }
-        }
     }
 
     private void UpdateGravityWellTelemetry()
@@ -167,49 +120,43 @@ public partial class AsteroidFieldManager : Node2D
             }
         }
 
-        GravityWellPositions = _gravPosList.ToArray();
-        GravityWellRadii = _gravRadList.ToArray();
-        GravityWellStrengths = _gravStrList.ToArray();
-        GravityWellInfallRatios = _gravInfallList.ToArray();
-        GravityWellPullAccels = _gravPullList.ToArray();
-        GravityWellSwirlAccels = _gravSwirlList.ToArray();
-        GravityWellHeatRates = _gravHeatList.ToArray();
-    }
-
-    private void OnRiftSpawnAsteroid(Vector2 spawnPos, Vector2 ejectVelocity)
-    {
-        var rng = new RandomNumberGenerator();
-        rng.Randomize();
-
-        // Cosmic Rift melontarkan asteroid batu mineral baru untuk menggantikan asteroid yang habis dipanen
-        SwarmRole role = PickRandomMineralRole(rng);
-        float radius = (float)GD.RandRange(320.0, 520.0);
-
-        float speed = ejectVelocity.Length();
-        Vector2 ejectDir = speed > 1.0f ? ejectVelocity.Normalized() : Vector2.Right;
-        if (speed < 420.0f)
+        // 2. Gravitasi Cosmic Rift (Distorsi Ruang Melingkar pada Grid Latar Belakang & Bintang Parallax)
+        for (int r = 0; r < _cosmicRifts.Count; r++)
         {
-            speed = 540.0f;
-            ejectVelocity = ejectDir * speed;
+            var rift = _cosmicRifts[r];
+            if (rift == null || !IsInstanceValid(rift)) continue;
+
+            _gravPosList.Add(rift.GlobalPosition);
+            _gravRadList.Add(520.0f);
+            _gravStrList.Add(1.4f);
+            _gravInfallList.Add(0.0f);
+            _gravPullList.Add(110.0f);
+            _gravSwirlList.Add(80.0f);
+            _gravHeatList.Add(0.0f);
         }
 
-        var asteroid = new Asteroid
+        int count = _gravPosList.Count;
+        if (GravityWellPositions.Length != count)
         {
-            Radius = radius,
-            MaxHealth = radius * 5.0f,
-            AsteroidType = role,
-            IsEnergyAsteroid = false,
-            IsBirthAnimationActive = true,
-            BirthRiftOrigin = spawnPos,
-            BirthEjectDirection = ejectDir,
-            BirthEjectSpeed = speed
-        };
+            GravityWellPositions = new Vector2[count];
+            GravityWellRadii = new float[count];
+            GravityWellStrengths = new float[count];
+            GravityWellInfallRatios = new float[count];
+            GravityWellPullAccels = new float[count];
+            GravityWellSwirlAccels = new float[count];
+            GravityWellHeatRates = new float[count];
+        }
 
-        AddChild(asteroid);
-        asteroid.GlobalPosition = spawnPos;
-        asteroid.Sleeping = false;
-        asteroid.LinearVelocity = ejectVelocity;
-        asteroid.AngularVelocity = (float)GD.RandRange(-0.08, 0.08);
+        for (int i = 0; i < count; i++)
+        {
+            GravityWellPositions[i] = _gravPosList[i];
+            GravityWellRadii[i] = _gravRadList[i];
+            GravityWellStrengths[i] = _gravStrList[i];
+            GravityWellInfallRatios[i] = _gravInfallList[i];
+            GravityWellPullAccels[i] = _gravPullList[i];
+            GravityWellSwirlAccels[i] = _gravSwirlList[i];
+            GravityWellHeatRates[i] = _gravHeatList[i];
+        }
     }
 
     public void SpawnColossalAsteroidField()
@@ -246,7 +193,7 @@ public partial class AsteroidFieldManager : Node2D
             for (int r = 0; r < _cosmicRifts.Count; r++)
             {
                 float distToRift = candPos.DistanceTo(_cosmicRifts[r].Position);
-                if (distToRift < effRadius + 320.0f)
+                if (distToRift < effRadius + 460.0f)
                 {
                     return false;
                 }
@@ -268,7 +215,7 @@ public partial class AsteroidFieldManager : Node2D
         {
             (5, 1250.0f, 2200.0f, 320.0f, 440.0f),
             (15, 2450.0f, 4250.0f, 440.0f, 700.0f),
-            (11, 4450.0f, 5500.0f, 680.0f, 1050.0f)
+            (12, 4450.0f, 5500.0f, 680.0f, 1050.0f)
         };
 
         foreach (var belt in beltConfigs)
@@ -331,6 +278,23 @@ public partial class AsteroidFieldManager : Node2D
                 }
             }
         }
+
+        // Tempatkan asteroid & Bintang Aether di dekat Cosmic Rift 0 agar langsung terlihat mengorbit, terlempar, dan memicu supernova
+        if (_cosmicRifts.Count > 0)
+        {
+            Vector2 r0 = _cosmicRifts[0].Position;
+            Vector2 p1 = r0 + new Vector2(520.0f, -220.0f);
+            Vector2 p2 = r0 + new Vector2(-280.0f, -540.0f);
+            Vector2 pStar = r0 + new Vector2(-380.0f, 320.0f);
+            SpawnAsteroid(p1, 260.0f, SwarmRole.DartNeedle, false, rng);
+            SpawnAsteroid(p2, 310.0f, SwarmRole.Guardian, false, rng);
+            SpawnAsteroid(pStar, 110.0f, SwarmRole.DartNeedle, true, rng);
+            placedAsteroids.Add((p1, 260.0f * 1.18f));
+            placedAsteroids.Add((p2, 310.0f * 1.18f));
+            placedAsteroids.Add((pStar, 110.0f * 1.28f));
+        }
+
+        TotalAsteroids = placedAsteroids.Count;
     }
 
     private void SpawnAsteroid(Vector2 pos, float radius, SwarmRole role, bool isEnergy, RandomNumberGenerator rng)
@@ -338,6 +302,7 @@ public partial class AsteroidFieldManager : Node2D
         float effectiveRadius = isEnergy ? rng.RandfRange(85.0f, 115.0f) : radius;
         var asteroid = new Asteroid
         {
+            Position = pos,
             GlobalPosition = pos,
             Radius = effectiveRadius,
             MaxHealth = effectiveRadius * 5.0f,
@@ -347,10 +312,14 @@ public partial class AsteroidFieldManager : Node2D
 
         float driftAngle = rng.Randf() * Mathf.Tau;
         float driftSpeed = rng.RandfRange(4.0f, 16.0f);
-        asteroid.LinearVelocity = new Vector2(MathF.Cos(driftAngle), MathF.Sin(driftAngle)) * driftSpeed;
-        asteroid.AngularVelocity = rng.RandfRange(-0.08f, 0.08f);
+        Vector2 driftVel = new Vector2(MathF.Cos(driftAngle), MathF.Sin(driftAngle)) * driftSpeed;
+        float angVel = rng.RandfRange(-0.08f, 0.08f);
 
         AddChild(asteroid);
+        asteroid.GlobalPosition = pos;
+        asteroid.Sleeping = false;
+        asteroid.LinearVelocity = driftVel;
+        asteroid.AngularVelocity = angVel;
     }
 
     private static SwarmRole PickRandomMineralRole(RandomNumberGenerator rng)

@@ -1619,11 +1619,30 @@ public partial class SwarmSimulation : Node2D
         outputList.Clear();
         _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref SwarmUnitComponent swarm) =>
         {
-            if (swarm.OwnerId == 1 && swarm.State == SwarmState.Orbiting && swarm.Role == SwarmRole.MiningDroid)
+            if (swarm.OwnerId == 1 && (swarm.State == SwarmState.Orbiting || swarm.State == SwarmState.Returning) && swarm.Role == SwarmRole.MiningDroid)
             {
                 outputList.Add(pos.Value);
             }
         });
+    }
+
+    /// <summary>
+    /// Mengumpulkan posisi serpihan kristal resource (IsCrystalMatter) yang tampak di sekitar originPos
+    /// agar AI dapat melihat dan menghampiri drop resource sebagaimana pemain melihatnya di layar.
+    /// </summary>
+    public void CollectNearbyCrystalPositions(Vector2 originPos, float maxRadius, List<Vector2> outputList)
+    {
+        outputList.Clear();
+        float maxRadSq = maxRadius * maxRadius;
+        for (int i = 0; i < _miningDebris.Count; i++)
+        {
+            var p = _miningDebris[i];
+            if (!p.IsCrystalMatter || p.Life <= 0.25f) continue;
+            if (originPos.DistanceSquaredTo(p.Position) <= maxRadSq)
+            {
+                outputList.Add(p.Position);
+            }
+        }
     }
 
     public void SpawnEnemySectorAttack(Vector2 attackOriginDirPos, int enemyCount = 50)
@@ -4435,8 +4454,11 @@ public partial class SwarmSimulation : Node2D
                     : new Vector2(99999f, 99999f);
                 float distEnemy = toEnemy.Length();
 
-                // 1. Penyerapan Kristal oleh Player Core (dist <= 28 px)
-                if (distPlayer <= 28.0f)
+                float playerPickupRad = _playerCore != null ? MathF.Max(28.0f, _playerCore.CoreCollisionRadius + 12.0f) : 28.0f;
+                float enemyPickupRad = (_enemyCore != null && IsInstanceValid(_enemyCore)) ? MathF.Max(28.0f, _enemyCore.CoreCollisionRadius + 12.0f) : 28.0f;
+
+                // 1. Penyerapan Kristal oleh Player Core (identik dengan ukuran Core saat itu)
+                if (distPlayer <= playerPickupRad)
                 {
                     int rIdx = (int)p.MatterType;
                     if (rIdx >= 0 && rIdx < _resourceStock.Length)
@@ -4450,8 +4472,8 @@ public partial class SwarmSimulation : Node2D
                     continue;
                 }
 
-                // 2. Penyerapan Kristal oleh Enemy Core (dist <= 28 px)
-                if (distEnemy <= 28.0f)
+                // 2. Penyerapan Kristal oleh Enemy Core (100% identik dengan Player Core)
+                if (distEnemy <= enemyPickupRad)
                 {
                     int rIdx = (int)p.MatterType;
                     _enemyController?.AddResource(rIdx, 1);
@@ -4459,14 +4481,14 @@ public partial class SwarmSimulation : Node2D
                     continue;
                 }
 
-                // 3. Tarikan Magnetis (Magnet Pull) ke kapal terdekat
+                // 3. Tarikan Magnetis (Magnet Pull 260 px identik 1:1 antara Pemain dan Musuh)
                 if (distPlayer <= 260.0f && distPlayer <= distEnemy)
                 {
                     Vector2 pullDir = toPlayer / MathF.Max(0.001f, distPlayer);
                     p.Velocity = p.Velocity.Lerp(pullDir * 860.0f, MathF.Min(1.0f, dt * 8.0f));
                     p.Position += p.Velocity * dt;
                 }
-                else if (distEnemy <= 360.0f)
+                else if (distEnemy <= 260.0f)
                 {
                     Vector2 pullDir = toEnemy / MathF.Max(0.001f, distEnemy);
                     p.Velocity = p.Velocity.Lerp(pullDir * 860.0f, MathF.Min(1.0f, dt * 8.0f));
@@ -4698,8 +4720,8 @@ public partial class SwarmSimulation : Node2D
             IsInward = true
         });
 
-        // Impuls negatif super kuat: menyedot simpul grid latar belakang melesak ke titik tengah seed
-        EmitSignal(SignalName.SwarmClashImpulse, position, -3400.0f, 560.0f);
+        // Impuls menyedot simpul grid latar belakang melesak ke titik tengah seed (radius teroptimasi)
+        EmitSignal(SignalName.SwarmClashImpulse, position, -1600.0f, 280.0f);
         QueueRedraw();
     }
 
@@ -4720,56 +4742,57 @@ public partial class SwarmSimulation : Node2D
             IsInward = false
         });
 
-        // Impuls positif dahsyat: meledakkan grid latar belakang melebar keluar secara spektakuler
-        EmitSignal(SignalName.SwarmClashImpulse, position, 3800.0f, 640.0f);
+        // Impuls grid latar belakang melebar keluar secara spektakuler (radius teroptimasi)
+        EmitSignal(SignalName.SwarmClashImpulse, position, 1800.0f, 320.0f);
         QueueRedraw();
     }
 
     /// <summary>
-    /// Efek letupan plasma & gelombang kejut saat tali pusar Genie Effect putus dari mulut White Hole.
+    /// Gelombang kejut primer raksasa Supernova dari Cosmic Rift saat pertama kali meledak.
+    /// Menghentak grid arena dengan radius terukur (~380 px) satu kali saja agar FPS tetap solid.
     /// </summary>
-    public void TriggerGenieUmbilicalSnapFx(Vector2 snapPos, Vector2 riftOrigin, Color resourceColor)
+    public void TriggerRiftSupernovaShockwave(Vector2 position, float radius, float impulsePower)
     {
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
         {
-            Center = snapPos,
-            Radius = 10.0f,
-            StartRadius = 10.0f,
-            MaxRadius = 210.0f,
-            Life = 0.42f,
-            MaxLife = 0.42f,
-            Color1 = new Color(5.2f, 4.6f, 2.2f, 0.95f),
-            Color2 = new Color(0.75f, 3.2f, 4.8f, 0.88f),
+            Center = position,
+            Radius = 24.0f,
+            StartRadius = 24.0f,
+            MaxRadius = radius,
+            Life = 0.65f,
+            MaxLife = 0.65f,
+            Color1 = new Color(7.5f, 7.0f, 6.2f, 1.0f),
+            Color2 = new Color(4.2f, 2.8f, 0.85f, 0.95f),
             IsEnergy = true,
             IsInward = false
         });
 
-        Vector2 toRift = (riftOrigin - snapPos);
-        Vector2 snapDir = toRift.LengthSquared() > 1.0f ? toRift.Normalized() : Vector2.Left;
-        Vector2 perp = new Vector2(-snapDir.Y, snapDir.X);
+        // Hentakan fisik grid arena berkekuatan terkontrol agar tidak lag
+        float gridDeformRadius = MathF.Min(radius * 0.15f, 380.0f);
+        float gridDeformPower = MathF.Min(impulsePower * 0.25f, 2200.0f);
+        EmitSignal(SignalName.SwarmClashImpulse, position, gridDeformPower, gridDeformRadius);
+        QueueRedraw();
+    }
 
-        for (int i = 0; i < 18; i++)
+    /// <summary>
+    /// Gelombang kejut visual sekunder (Echo Pulse) tanpa menghentak grid GDScript lagi,
+    /// menghasilkan visual gelombang kejut beruntun yang mulus dan bebas lag.
+    /// </summary>
+    public void TriggerVisualShockwaveEcho(Vector2 position, float radius)
+    {
+        _asteroidShockwaves.Add(new AsteroidShockwaveRing
         {
-            float spread = (GD.Randf() - 0.5f) * 2.2f;
-            Vector2 vel = (snapDir * (GD.Randf() > 0.4f ? 1.0f : -0.6f) + perp * spread).Normalized() * (140.0f + GD.Randf() * 240.0f);
-            float life = 0.65f + GD.Randf() * 0.55f;
-            _miningDebris.Add(new MiningDebrisParticle
-            {
-                Position = snapPos + perp * ((GD.Randf() - 0.5f) * 24.0f),
-                Velocity = vel,
-                Color = (i % 2 == 0) ? new Color(5.0f, 4.4f, 2.0f, 0.95f) : resourceColor * 1.4f,
-                Life = life,
-                MaxLife = life,
-                Size = 3.2f + GD.Randf() * 2.8f,
-                IsCrystalMatter = false,
-                Rotation = GD.Randf() * Mathf.Tau,
-                RotSpeed = (GD.Randf() - 0.5f) * 18.0f,
-                IsQuantumGlass = true,
-                IsPlasmaPuff = true
-            });
-        }
-
-        EmitSignal(SignalName.SwarmClashImpulse, snapPos, 1850.0f, 360.0f);
+            Center = position,
+            Radius = 24.0f,
+            StartRadius = 24.0f,
+            MaxRadius = radius,
+            Life = 0.52f,
+            MaxLife = 0.52f,
+            Color1 = new Color(6.8f, 6.2f, 5.5f, 0.90f),
+            Color2 = new Color(3.8f, 2.5f, 0.75f, 0.85f),
+            IsEnergy = true,
+            IsInward = false
+        });
         QueueRedraw();
     }
 

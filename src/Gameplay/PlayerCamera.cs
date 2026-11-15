@@ -45,6 +45,7 @@ public partial class PlayerCamera : Camera2D
         if (_playerCore != null)
         {
             GlobalPosition = _playerCore.GlobalPosition;
+            ResetSmoothing();
         }
 
         Zoom = new Vector2(_currentZoom, _currentZoom);

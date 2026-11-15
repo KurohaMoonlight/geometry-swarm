@@ -238,8 +238,11 @@ public sealed class BoidSystem
             if (ast == null || !ast.IsActiveInTree) continue;
 
             float checkDist = maxSwarmReach + ast.OuterBoundRadius;
-            Vector2 d = ast.CachedPosition - anchorPos;
-            if (MathF.Abs(d.X) <= checkDist && MathF.Abs(d.Y) <= checkDist)
+            Vector2 dPlayer = ast.CachedPosition - anchorPos;
+            Vector2 dEnemy = ast.CachedPosition - enemyCorePos;
+            bool nearPlayer = MathF.Abs(dPlayer.X) <= checkDist && MathF.Abs(dPlayer.Y) <= checkDist;
+            bool nearEnemy = MathF.Abs(dEnemy.X) <= checkDist && MathF.Abs(dEnemy.Y) <= checkDist;
+            if (nearPlayer || nearEnemy)
             {
                 if (_nearbyAsteroidCount < _nearbyAsteroids.Length)
                 {
@@ -587,6 +590,29 @@ public sealed class BoidSystem
                         else
                         {
                             vis.Color = baseCol;
+                        }
+                    }
+
+                    // Kolisi voxel & seluncur tangensial untuk unit Orbiting musuh (identik 1:1 dengan pemain)
+                    Vector2 toEnemyAnchor = enemyCorePos - pos.Value;
+                    float distEnemyAnchor = toEnemyAnchor.Length();
+                    if (distEnemyAnchor <= swarm.OrbitDistance + 220.0f)
+                    {
+                        for (int a = 0; a < nearbyCount; a++)
+                        {
+                            if (_nearbyAsteroids[a].ResolveCircleVoxelCollision(ref pos.Value, ref vel.Value, DroneVoxelRadius, out Vector2 hitNormal, 0.0f))
+                            {
+                                if (distEnemyAnchor > 4.0f)
+                                {
+                                    Vector2 dirToAnchor = toEnemyAnchor / distEnemyAnchor;
+                                    Vector2 n1 = new Vector2(-hitNormal.Y, hitNormal.X);
+                                    Vector2 n2 = -n1;
+                                    Vector2 slideTangent = (n1.Dot(dirToAnchor) >= n2.Dot(dirToAnchor)) ? n1 : n2;
+                                    float slideSpeed = MathF.Max(vel.Value.Length(), 310.0f);
+                                    vel.Value = (slideTangent * 0.82f + hitNormal * 0.18f).Normalized() * slideSpeed;
+                                }
+                                break;
+                            }
                         }
                     }
                     return;
