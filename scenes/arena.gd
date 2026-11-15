@@ -174,7 +174,7 @@ func _process(delta: float) -> void:
 						grid_physics.apply_gravity_well_pull(
 							well_pos,
 							g_pulls[i],
-							g_radii[i] * 0.88,
+							minf(g_radii[i] * 0.88, 380.0),
 							g_swirls[i],
 							g_heats[i],
 							delta

@@ -297,6 +297,50 @@ public partial class AsteroidFieldManager : Node2D
         TotalAsteroids = placedAsteroids.Count;
     }
 
+    public Asteroid SpawnEmptyAsteroidForWhiteHoleAssembly(Vector2 assemblyWorldPos, float radius = 320.0f)
+    {
+        var rng = new RandomNumberGenerator();
+        rng.Randomize();
+        SwarmRole role = PickRandomMineralRole(rng);
+
+        var asteroid = new Asteroid
+        {
+            Position = assemblyWorldPos,
+            GlobalPosition = assemblyWorldPos,
+            Radius = radius,
+            MaxHealth = radius * 5.0f,
+            AsteroidType = role,
+            IsEnergyAsteroid = false,
+            StartEmptyForWhiteHoleAssembly = true
+        };
+
+        AddChild(asteroid);
+        asteroid.GlobalPosition = assemblyWorldPos;
+        return asteroid;
+    }
+
+    public void TriggerDebugWhiteHoleAsteroidGenesis()
+    {
+        CosmicRift? bestRift = null;
+        float minDist = float.MaxValue;
+        Vector2 pPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
+        for (int i = 0; i < _cosmicRifts.Count; i++)
+        {
+            var r = _cosmicRifts[i];
+            if (r != null && IsInstanceValid(r))
+            {
+                float d = r.GlobalPosition.DistanceTo(pPos);
+                if (d < minDist)
+                {
+                    minDist = d;
+                    bestRift = r;
+                }
+            }
+        }
+        bestRift ??= (_cosmicRifts.Count > 0 && IsInstanceValid(_cosmicRifts[0])) ? _cosmicRifts[0] : null;
+        bestRift?.StartFullCinematicSequence();
+    }
+
     private void SpawnAsteroid(Vector2 pos, float radius, SwarmRole role, bool isEnergy, RandomNumberGenerator rng)
     {
         float effectiveRadius = isEnergy ? rng.RandfRange(85.0f, 115.0f) : radius;

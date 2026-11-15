@@ -4255,7 +4255,7 @@ public partial class SwarmSimulation : Node2D
 
                     if (destroyed)
                     {
-                        SpawnVoxelErosionDebris(brokenWorldCenter, -aimDir, brokenType);
+                        SpawnVoxelErosionDebris(brokenWorldCenter, -aimDir, brokenType, subHitAst.IsSupercharged ? 2 : 1);
                     }
                 }
             }
@@ -4304,8 +4304,9 @@ public partial class SwarmSimulation : Node2D
         QueueRedraw();
     }
 
-    public void SpawnVoxelErosionDebris(Vector2 worldCenter, Vector2 outNormal, VoxelType brokenType)
+    public void SpawnVoxelErosionDebris(Vector2 worldCenter, Vector2 outNormal, VoxelType brokenType, int yieldMultiplier = 1)
     {
+        int mult = Math.Max(1, yieldMultiplier);
         if (brokenType == VoxelType.Rock)
         {
             // Puing batu kosmik: 2 serpihan debu/gravel cepat pudar (0.22 - 0.35 detik)
@@ -4334,7 +4335,7 @@ public partial class SwarmSimulation : Node2D
         {
             // Resource Aether (Sangat Langka):
             // 1 serpihan Kaca Kuantum Bercahaya (+ 25% peluang pecahan bonus kedua)
-            int nuggetCount = (GD.Randf() < 0.25f) ? 2 : 1;
+            int nuggetCount = ((GD.Randf() < 0.25f) ? 2 : 1) * mult;
             for (int i = 0; i < nuggetCount; i++)
             {
                 float spread = (GD.Randf() - 0.5f) * 1.8f;
@@ -4382,7 +4383,7 @@ public partial class SwarmSimulation : Node2D
         {
             // Resource Mineral Padat (Quartz, Ferrite, Carbide, Vortexum):
             // 1 serpihan kristal padat (+ 20% peluang pecahan bonus kedua)
-            int nuggetCount = (GD.Randf() < 0.20f) ? 2 : 1;
+            int nuggetCount = ((GD.Randf() < 0.20f) ? 2 : 1) * mult;
             Color resCol = Asteroid.GetResourceColor(resType);
 
             for (int i = 0; i < nuggetCount; i++)
@@ -4533,7 +4534,7 @@ public partial class SwarmSimulation : Node2D
         }
     }
 
-    public void TriggerAsteroidDestructionFx(Vector2 position, float asteroidRadius, Color glowColor, bool isEnergy)
+    public void TriggerAsteroidDestructionFx(Vector2 position, float asteroidRadius, Color glowColor, bool isEnergy, bool suppressGridImpulse = false)
     {
         // 1. Gelombang kejut ledakan asteroid melingkar dinamis (Expanding Vector Shockwave Ring)
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
@@ -4567,10 +4568,11 @@ public partial class SwarmSimulation : Node2D
             _world.Query(in _allSwarmQuery, (ref PositionComponent pPos, ref VelocityComponent pVel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
             {
                 if (swarm.State == SwarmState.Dead) return;
-                float dDist = position.DistanceTo(pPos.Value);
-                if (dDist < 900.0f)
+                float dDistSq = position.DistanceSquaredTo(pPos.Value);
+                if (dDistSq < 810000.0f)
                 {
-                    Vector2 dDir = (pPos.Value - position).Normalized();
+                    float dDist = MathF.Sqrt(dDistSq);
+                    Vector2 dDir = (pPos.Value - position) / (dDist > 0.001f ? dDist : 1.0f);
                     float blast = Mathf.Lerp(980.0f, 240.0f, dDist / 900.0f);
                     pVel.Value += dDir * blast;
                 }
@@ -4581,25 +4583,29 @@ public partial class SwarmSimulation : Node2D
             {
                 var other = Asteroid.ActiveAsteroids[a];
                 if (!IsInstanceValid(other) || !other.IsActiveInTree) continue;
-                float aDist = position.DistanceTo(other.CachedPosition);
-                if (aDist < 950.0f && aDist > 1.0f)
+                float aDistSq = position.DistanceSquaredTo(other.CachedPosition);
+                if (aDistSq < 902500.0f && aDistSq > 1.0f)
                 {
-                    Vector2 aDir = (other.CachedPosition - position).Normalized();
+                    float aDist = MathF.Sqrt(aDistSq);
+                    Vector2 aDir = (other.CachedPosition - position) / aDist;
                     other.LinearVelocity += aDir * 360.0f;
                 }
             }
 
             // D. GELOMBANG KEJUT ROBEKAN GRID LATAR BELAKANG (SUPERNOVA GRID RUPTURE)
-            EmitSignal(SignalName.SwarmClashImpulse, position, 3800.0f, 750.0f);
+            if (!suppressGridImpulse)
+            {
+                EmitSignal(SignalName.SwarmClashImpulse, position, 2200.0f, 320.0f);
+            }
         }
         else
         {
             // Gelombang kejut runtuhnya cangkang asteroid batu saat 100% mineral tuntas dipanen
-            EmitSignal(SignalName.SwarmClashImpulse, position, 1950.0f, 410.0f);
+            EmitSignal(SignalName.SwarmClashImpulse, position, 1500.0f, 300.0f);
         }
 
         // 2. Serpihan bongkahan asteroid terbang berputar 360 derajat (Destruction Shards)
-        int shardCount = isEnergy ? GD.RandRange(28, 38) : GD.RandRange(26, 36);
+        int shardCount = isEnergy ? GD.RandRange(16, 22) : GD.RandRange(12, 18);
         for (int i = 0; i < shardCount; i++)
         {
             float angle = (float)i / shardCount * Mathf.Tau + (GD.Randf() - 0.5f) * 0.45f;
@@ -4629,7 +4635,7 @@ public partial class SwarmSimulation : Node2D
         }
 
         // 3. Pelepasan kristal Aether & Quartz saat Bintang Mini meledak (Supernova Loot Drop)
-        int dropCount = isEnergy ? GD.RandRange(24, 32) : GD.RandRange(2, 4);
+        int dropCount = isEnergy ? GD.RandRange(12, 16) : GD.RandRange(2, 3);
         for (int i = 0; i < dropCount; i++)
         {
             float angle = GD.Randf() * Mathf.Tau;
@@ -4768,8 +4774,8 @@ public partial class SwarmSimulation : Node2D
         });
 
         // Hentakan fisik grid arena berkekuatan terkontrol agar tidak lag
-        float gridDeformRadius = MathF.Min(radius * 0.15f, 380.0f);
-        float gridDeformPower = MathF.Min(impulsePower * 0.25f, 2200.0f);
+        float gridDeformRadius = MathF.Min(radius * 0.12f, 340.0f);
+        float gridDeformPower = MathF.Min(impulsePower * 0.28f, 2600.0f);
         EmitSignal(SignalName.SwarmClashImpulse, position, gridDeformPower, gridDeformRadius);
         QueueRedraw();
     }
@@ -5480,6 +5486,10 @@ public partial class SwarmSimulation : Node2D
                     break;
                 case Key.Q:
                     FireRadialNova(80);
+                    break;
+                case Key.T:
+                    // Cinematic Trigger [T]: Memicu urutan penuh Black Hole Charging -> Shockwave Supernova -> White Hole Assembly!
+                    AsteroidFieldManager.Instance?.TriggerDebugWhiteHoleAsteroidGenesis();
                     break;
             }
         }

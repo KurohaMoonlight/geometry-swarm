@@ -254,13 +254,14 @@ func apply_gravity_well_pull(
 	if total_points == 0 or radius <= 0.0 or pull_strength <= 0.01:
 		return
 		
-	var bounds: Rect2i = _get_grid_bounds(world_pos, radius)
+	var effective_radius: float = minf(radius, 380.0)
+	var bounds: Rect2i = _get_grid_bounds(world_pos, effective_radius)
 	if bounds.size.x <= 0 or bounds.size.y <= 0:
 		return
 	_mark_active_bounds(bounds)
 	
 	var dt: float = minf(delta, 0.033)
-	var r2: float = radius * radius
+	var r2: float = effective_radius * effective_radius
 	# Normalisasi faktor kekuatan (1.0 = bintang normal penuh, >1.3 = Infall / Overload)
 	var power_norm: float = clampf(pull_strength / 1100.0, 0.15, 2.2)
 	var swirl_norm: float = clampf(swirl_strength / 320.0, 0.0, 2.2)
@@ -275,7 +276,7 @@ func apply_gravity_well_pull(
 			var dist2: float = rel_from_center.length_squared()
 			if dist2 < r2 and dist2 > 0.25:
 				var dist: float = sqrt(dist2)
-				var norm_d: float = clampf(dist / radius, 0.0, 1.0)
+				var norm_d: float = clampf(dist / effective_radius, 0.0, 1.0)
 				var falloff: float = 1.0 - norm_d
 				
 				# Kurva corong materi eksotis: semakin dekat ke inti bintang, ruang-waktu makin melesak tajam!

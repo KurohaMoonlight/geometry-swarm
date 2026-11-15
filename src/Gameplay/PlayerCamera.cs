@@ -53,7 +53,7 @@ public partial class PlayerCamera : Camera2D
 
     public void TriggerShake(float amount)
     {
-        _shakeIntensity = MathF.Max(_shakeIntensity, amount);
+        _shakeIntensity = MathF.Min(22.0f, MathF.Max(_shakeIntensity, amount));
     }
 
     public override void _PhysicsProcess(double delta)

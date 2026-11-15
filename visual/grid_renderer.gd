@@ -100,10 +100,23 @@ func _draw_parallax_starfield() -> void:
 	
 	var view_half: Vector2 = Vector2(1280.0, 800.0)
 	var tile: float = maxf(120.0, star_tile_size)
-	var grav_count: int = mini(
+	var raw_grav_count: int = mini(
 		mini(grav_positions.size(), grav_radii.size()),
 		mini(grav_strengths.size(), grav_infall_ratios.size())
 	)
+	var local_g_pos: PackedVector2Array = []
+	var local_g_rad: PackedFloat32Array = []
+	var local_g_str: PackedFloat32Array = []
+	var local_g_inf: PackedFloat32Array = []
+	for g in range(raw_grav_count):
+		var gp: Vector2 = grav_positions[g]
+		var gr: float = grav_radii[g]
+		if absf(gp.x - camera_pos.x) <= view_half.x + gr and absf(gp.y - camera_pos.y) <= view_half.y + gr:
+			local_g_pos.append(gp)
+			local_g_rad.append(gr)
+			local_g_str.append(grav_strengths[g])
+			local_g_inf.append(grav_infall_ratios[g])
+	var grav_count: int = local_g_pos.size()
 	
 	var layer_drifts: Array[float] = [0.82, 0.56, 0.28]
 	var layer_counts: Array[int] = [2, 1, 1]
@@ -152,18 +165,18 @@ func _draw_parallax_starfield() -> void:
 					var streak_vec: Vector2 = Vector2.ZERO
 					var total_warp_energy: float = 0.0
 					
-					# Distorsi Gravitasi Materi Eksotis (Hisapan Dalam + Pembelokan Optik Einstein)
+					# Distorsi Gravitasi Materi Eksotis (Hisapan Dalam + Pembelokan Optik Einstein - Teroptimasi)
 					for g in range(grav_count):
-						var g_pos: Vector2 = grav_positions[g]
-						var g_rad: float = grav_radii[g]
+						var g_pos: Vector2 = local_g_pos[g]
+						var g_rad: float = minf(local_g_rad[g], 420.0)
 						var diff: Vector2 = world_p - g_pos
 						var dist_sq: float = diff.length_squared()
 						if dist_sq < g_rad * g_rad and dist_sq > 0.04:
 							var dist: float = sqrt(dist_sq)
 							var radial_dir: Vector2 = diff / dist
 							var tangent_dir: Vector2 = Vector2(-radial_dir.y, radial_dir.x)
-							var g_str: float = grav_strengths[g]
-							var g_infall: float = grav_infall_ratios[g]
+							var g_str: float = local_g_str[g]
+							var g_infall: float = local_g_inf[g]
 							
 							var falloff: float = 1.0 - (dist / g_rad)
 							var smooth_f: float = falloff * falloff * (1.6 + 1.4 * falloff)

@@ -204,8 +204,11 @@ public partial class EnemyController : Node
             return;
         }
 
-        // 1. Validasi Asteroid Target
-        if (TargetAsteroid == null || !IsInstanceValid(TargetAsteroid) || !TargetAsteroid.IsActiveInTree)
+        // 1. Validasi Asteroid Target (Lepaskan target jika sedang terpental kencang akibat Shockwave Black Hole)
+        if (TargetAsteroid == null
+            || !IsInstanceValid(TargetAsteroid)
+            || !TargetAsteroid.IsActiveInTree
+            || TargetAsteroid.CachedLinearVelocity.LengthSquared() > 180.0f * 180.0f)
         {
             TargetAsteroid = null;
             _isTunnelLocked = false;
@@ -1325,6 +1328,7 @@ public partial class EnemyController : Node
             var ast = asteroids[i];
             if (ast == null || !IsInstanceValid(ast) || !ast.IsActiveInTree || ast.IsDestroying) continue;
             if (ast.RemainingResourceVoxelCount <= 0) continue;
+            if (ast.CachedLinearVelocity.LengthSquared() > 180.0f * 180.0f) continue;
 
             if (ast.IsEnergyAsteroid)
             {
@@ -1516,7 +1520,7 @@ public partial class EnemyController : Node
                         {
                             _hasStickyAimVoxel = false;
                         }
-                        Simulation.SpawnVoxelErosionDebris(brokenWorldCenter, -LaserAimDir, brokenType);
+                        Simulation.SpawnVoxelErosionDebris(brokenWorldCenter, -LaserAimDir, brokenType, subHitAst.IsSupercharged ? 2 : 1);
                     }
                 }
             }
