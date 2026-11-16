@@ -186,6 +186,9 @@ public partial class Asteroid : RigidBody2D
     public bool IsActiveInTree => !_isDestroyed && !IsInSeedCycle && !IsAssemblingFromWhiteHole;
     public bool IsDestroyed => _isDestroyed;
     public bool IsDestroying => _isDestroying;
+    public float DestructionProgress => _isDestroying
+        ? (1.0f - Mathf.Clamp(_destructionTimer / MathF.Max(0.01f, _currentDestructionDuration), 0.0f, 1.0f))
+        : 0.0f;
     public int RemainingSolidVoxelCount => _remainingSolidVoxelCount;
     public int RemainingResourceVoxelCount => _remainingResourceVoxelCount;
 
@@ -3606,7 +3609,18 @@ public partial class Asteroid : RigidBody2D
 
     public bool ApplyKineticHitAtWorldPos(Vector2 worldHitPos, float kineticDamage, out VoxelType brokenType, out Vector2 brokenWorldCenter)
     {
+        return ApplyKineticHitAtWorldPos(worldHitPos, kineticDamage, out brokenType, out brokenWorldCenter, out _);
+    }
+
+    public bool ApplyKineticHitAtWorldPos(
+        Vector2 worldHitPos,
+        float kineticDamage,
+        out VoxelType brokenType,
+        out Vector2 brokenWorldCenter,
+        out VoxelType struckType)
+    {
         brokenType = VoxelType.Empty;
+        struckType = VoxelType.Empty;
         brokenWorldCenter = worldHitPos;
         if (_isDestroyed || IsInSeedCycle || GridSide == 0 || _remainingSolidVoxelCount <= 0) return false;
 
@@ -3653,6 +3667,7 @@ public partial class Asteroid : RigidBody2D
                 StartDestructionSequence();
             }
 
+            struckType = VoxelType.ResourceAether;
             brokenType = VoxelType.ResourceAether;
             brokenWorldCenter = worldHitPos;
             QueueRedraw();
@@ -3660,6 +3675,7 @@ public partial class Asteroid : RigidBody2D
         }
 
         int idx = bestGy * GridSide + bestGx;
+        struckType = _voxels[idx];
         _voxelKineticDamage[idx] += kineticDamage;
         float ratio = Mathf.Clamp(_voxelKineticDamage[idx] / NonLaserTileMaxHp, 0.0f, 1.0f);
 
@@ -4016,6 +4032,7 @@ public partial class Asteroid : RigidBody2D
 
         if (carvedNow > 0)
         {
+            GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerVoxelBreak(worldCenter, VoxelType.Rock);
             int startRow = Math.Max(0, minModifiedGy - 1);
             int endRow = Math.Min(GridSide - 1, maxModifiedGy + 1);
             for (int gy = startRow; gy <= endRow; gy++)
@@ -4435,6 +4452,7 @@ public partial class Asteroid : RigidBody2D
         _destructionTimer = _currentDestructionDuration;
         _preSupernovaShockwaveTimer = 0.18f;
         _preSupernovaShockwaveInterval = 0.65f;
+        GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerCatastrophicFractureStart(CachedPosition, Radius, IsEnergyAsteroid);
 
         // Nonaktifkan kolisi fisika agar kapal & armada swarm tidak terbentur saat animasi ledakan berlangsung
         if (_collisionShape != null)

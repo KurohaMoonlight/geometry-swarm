@@ -677,6 +677,10 @@ public sealed class BoidSystem
                                         // Drone pemain yang dilontarkan dan menabrak peluru musuh PASTI MATI
                                         lSwarm.State = SwarmState.Dead;
                                         ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: true));
+                                        if (lSwarm.Role == SwarmRole.DartNeedle)
+                                        {
+                                            GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.Enemy);
+                                        }
                                     }
 
                                     swarm.State = SwarmState.Dead; // Peluru musuh selalu hancur saat menabrak
@@ -1090,6 +1094,10 @@ public sealed class BoidSystem
                                 if (ApplyDamage(eoEnt, pos.Value, vel.Value))
                                 {
                                     swarm.State = SwarmState.Dead;
+                                    if (swarm.Role == SwarmRole.DartNeedle)
+                                    {
+                                        GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.Enemy);
+                                    }
                                     return;
                                 }
                             }
@@ -1106,6 +1114,10 @@ public sealed class BoidSystem
                         LastEnemyHitVelocity = vel.Value;
                         swarm.State = SwarmState.Dead;
                         ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
+                        if (swarm.Role == SwarmRole.DartNeedle)
+                        {
+                            GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.Enemy);
+                        }
                         return;
                     }
 
@@ -1214,9 +1226,26 @@ public sealed class BoidSystem
                     if (swarm.State == SwarmState.Launched)
                     {
                         // Aturan mutlak: Drone APAPUN yang dilontarkan dan menabrak asteroid PASTI MATI!
-                        _nearbyAsteroids[a].ApplyKineticHitAtWorldPos(pos.Value, 1.0f, out _, out _);
+                        var hitAst = _nearbyAsteroids[a];
+                        hitAst.ApplyKineticHitAtWorldPos(pos.Value, 1.0f, out Asteroid.VoxelType broken, out _, out Asteroid.VoxelType struck);
                         ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
                         swarm.State = SwarmState.Dead;
+
+                        if (swarm.Role == SwarmRole.DartNeedle)
+                        {
+                            if (hitAst.IsEnergyAsteroid)
+                            {
+                                GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.AetherStar);
+                            }
+                            else if (struck != Asteroid.VoxelType.Rock && struck != Asteroid.VoxelType.Empty)
+                            {
+                                GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.Resource, struck);
+                            }
+                            else
+                            {
+                                GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.RockAsteroid);
+                            }
+                        }
                         return;
                     }
                     else if (swarm.OwnerId == 0) // Drone pemain yang sedang Orbiting atau Returning

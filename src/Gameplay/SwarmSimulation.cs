@@ -279,6 +279,19 @@ public partial class SwarmSimulation : Node2D
     private readonly List<PlasmaSiphonWisp> _plasmaSiphonWisps = new();
     private bool _isMiningEnergyAsteroid = false;
 
+    public bool IsMiningLaserActive => _isMiningLaserActive;
+    public bool IsMiningLaserPriming => _isMiningLaserActive && _laserPrimingTimer < LaserPrimingDuration;
+    public float MiningLaserPrimingProgress => Mathf.Clamp(_laserPrimingTimer / LaserPrimingDuration, 0.0f, 1.0f);
+    public bool IsMiningLaserHittingAsteroid => _isMiningLaserActive && (_laserActiveHitBoxes.Count > 0 || _isMiningEnergyAsteroid);
+    public bool IsMiningEnergyAsteroid => _isMiningEnergyAsteroid;
+    public int ActiveLaserBlockSpan => _currentLaserBlockSpan;
+    public int ActiveLaserMinerCount => _activeMinerPositions.Count;
+    public Vector2 LaserImpactWorldPos => _laserImpactPoint;
+    public bool IsMiningResourceVein { get; private set; } = false;
+    public float MaxActiveVoxelHeat { get; private set; } = 0.0f;
+    public VoxelType DominantHeatedVoxelType { get; private set; } = VoxelType.Rock;
+    public bool IsGigaDrillGrindingAsteroid => _isGrindingAsteroid;
+
     // =========================================================================
     // INVENTORI 5 RESOURCE, GUI PABRIK, & TACTICAL SWARM DOCK (TENGAH BAWAH)
     // =========================================================================
@@ -1795,6 +1808,7 @@ public partial class SwarmSimulation : Node2D
             swarm.MaxLifeTime = 2.0f;
             vel.Value = dir * (_boidSystem.BulletMaxSpeed * (0.85f + GD.Randf() * 0.15f));
             fired++;
+            GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartLaunch(pos.Value);
         });
     }
 
@@ -2123,6 +2137,8 @@ public partial class SwarmSimulation : Node2D
         _laserPrimingTimer = 0.0f;
         _laserFocusWarmup = MathF.Max(0.0f, _laserFocusWarmup - dt * 8.0f);
         _isMiningEnergyAsteroid = false;
+        IsMiningResourceVein = false;
+        MaxActiveVoxelHeat = 0.0f;
         _plasmaSiphonWisps.Clear();
         if (_isMiningLaserActive)
         {
@@ -3950,6 +3966,7 @@ public partial class SwarmSimulation : Node2D
         if (hitAsteroid != null && IsInstanceValid(hitAsteroid))
         {
             float holeRadius = Mathf.Clamp(GigaDrillRadius * 0.85f, 22.0f, 36.0f);
+            GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerCraterBlast(detPos, holeRadius);
             _destroyedVoxelsBuffer.Clear();
             hitAsteroid.CarveVoxelCircle(detPos, holeRadius, _destroyedVoxelsBuffer);
             for (int v = 0; v < _destroyedVoxelsBuffer.Count; v++)
@@ -4241,6 +4258,9 @@ public partial class SwarmSimulation : Node2D
         Vector2 centerHitPoint = rayBaseOrigin + aimDir * maxRange;
         bool anyRayHit = false;
         _isMiningEnergyAsteroid = false;
+        IsMiningResourceVein = false;
+        MaxActiveVoxelHeat = 0.0f;
+        DominantHeatedVoxelType = VoxelType.Rock;
 
         var asteroids = Asteroid.ActiveAsteroids;
         float erosionBlocksPerSec = 2.8f + minerCount * 0.95f;
@@ -4301,6 +4321,15 @@ public partial class SwarmSimulation : Node2D
                     );
 
                     _laserActiveHitBoxes.Add((subBestHit.WorldCellCenter, updatedHeat, subBestHit.Type));
+                    if (updatedHeat > MaxActiveVoxelHeat)
+                    {
+                        MaxActiveVoxelHeat = updatedHeat;
+                    }
+                    if (subBestHit.Type != VoxelType.Rock && subBestHit.Type != VoxelType.Empty)
+                    {
+                        IsMiningResourceVein = true;
+                        DominantHeatedVoxelType = subBestHit.Type;
+                    }
 
                     if (destroyed)
                     {
@@ -4355,6 +4384,7 @@ public partial class SwarmSimulation : Node2D
 
     public void SpawnVoxelErosionDebris(Vector2 worldCenter, Vector2 outNormal, VoxelType brokenType, int yieldMultiplier = 1)
     {
+        GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerVoxelBreak(worldCenter, brokenType);
         int mult = Math.Max(1, yieldMultiplier);
         if (brokenType == VoxelType.Rock)
         {
@@ -4526,6 +4556,7 @@ public partial class SwarmSimulation : Node2D
                         stockChanged = true;
                     }
 
+                    GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerCrystalPickup(p.MatterType);
                     _miningDebris.RemoveAt(i);
                     continue;
                 }
@@ -4593,6 +4624,8 @@ public partial class SwarmSimulation : Node2D
 
     public void TriggerAsteroidDestructionFx(Vector2 position, float asteroidRadius, Color glowColor, bool isEnergy, bool suppressGridImpulse = false)
     {
+        GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerAsteroidDestruction(position, asteroidRadius, isEnergy);
+
         // 1. Gelombang kejut ledakan asteroid melingkar dinamis (Expanding Physical Vector Shockwave Ring)
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
         {
@@ -4802,6 +4835,7 @@ public partial class SwarmSimulation : Node2D
     /// </summary>
     public void TriggerAsteroidCollisionImpactFx(Vector2 impactPos, float impactSpeed, Color colA, Color colB)
     {
+        GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerAsteroidCollisionImpact(impactPos, impactSpeed);
         float intensity = Mathf.Clamp(impactSpeed / 260.0f, 0.25f, 1.5f);
 
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
@@ -4863,6 +4897,7 @@ public partial class SwarmSimulation : Node2D
 
     public void TriggerPreSupernovaShockwave(Vector2 position, float asteroidRadius, float progress)
     {
+        GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerPreSupernovaPulse(position, progress);
         _asteroidShockwaves.Add(new AsteroidShockwaveRing
         {
             Center = position,
@@ -5637,6 +5672,11 @@ public partial class SwarmSimulation : Node2D
 
             vel.Value = dir * (850.0f + GD.Randf() * 200.0f);
             fired++;
+
+            if (swarm.Role == SwarmRole.DartNeedle)
+            {
+                GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartLaunch(pos.Value);
+            }
         });
     }
 
@@ -5670,6 +5710,11 @@ public partial class SwarmSimulation : Node2D
 
             vel.Value = dir * (1000.0f + GD.Randf() * 300.0f);
             fired++;
+
+            if (swarm.Role == SwarmRole.DartNeedle)
+            {
+                GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartLaunch(pos.Value);
+            }
         });
     }
 
@@ -5699,6 +5744,11 @@ public partial class SwarmSimulation : Node2D
 
             vel.Value = dir * 1150.0f;
             fired++;
+
+            if (swarm.Role == SwarmRole.DartNeedle)
+            {
+                GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartLaunch(pos.Value);
+            }
         });
     }
 
