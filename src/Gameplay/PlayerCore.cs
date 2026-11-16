@@ -641,15 +641,16 @@ public partial class PlayerCore : CharacterBody2D
             Color activeAuraColor = isHit ? new Color(3.5f, 3.5f, 2.5f, 0.85f) : CoreAuraColor;
 
             // Ekor Thruster Darurat saat Escape Pod melesat kabur cepat (Dihilangkan secara default; dibatasi 15 detik jika ShowEscapeTrail diaktifkan)
-            if (ShowEscapeTrail && HasEscapeSpeedBuff && Velocity.LengthSquared() > 2500.0f)
+            if ((ShowEscapeTrail || EscapeBurstTimer > 0.0f) && HasEscapeSpeedBuff && Velocity.LengthSquared() > 2500.0f)
             {
                 Vector2 localBack = (-Velocity.Normalized()).Rotated(-Rotation);
                 Vector2 localTan = new Vector2(-localBack.Y, localBack.X);
-                float jetLen = Mathf.Clamp(Velocity.Length() * 0.085f, 22.0f, 95.0f);
-                DrawLine(localBack * 12.0f, localBack * (12.0f + jetLen), new Color(1.2f, 3.8f, 4.8f, 0.85f), 5.0f);
-                DrawLine(localBack * 12.0f, localBack * (12.0f + jetLen * 0.72f), new Color(4.8f, 5.2f, 5.8f, 0.95f), 2.4f);
-                DrawLine(localBack * 14.0f + localTan * 5.5f, localBack * (12.0f + jetLen * 0.5f), new Color(3.8f, 2.6f, 0.8f, 0.70f), 1.8f);
-                DrawLine(localBack * 14.0f - localTan * 5.5f, localBack * (12.0f + jetLen * 0.5f), new Color(3.8f, 2.6f, 0.8f, 0.70f), 1.8f);
+                float jetLen = Mathf.Clamp(Velocity.Length() * 0.095f, 26.0f, 105.0f);
+                DrawLine(localBack * 12.0f, localBack * (12.0f + jetLen), new Color(1.45f, 0.12f, 3.25f, 0.88f), 6.2f);
+                DrawLine(localBack * 12.0f, localBack * (12.0f + jetLen * 0.86f), new Color(0.012f, 0.004f, 0.025f, 0.94f), 3.8f);
+                DrawLine(localBack * 12.0f, localBack * (12.0f + jetLen * 0.72f), new Color(6.4f, 6.2f, 7.2f, 0.98f), 2.2f);
+                DrawLine(localBack * 14.0f + localTan * 5.5f, localBack * (12.0f + jetLen * 0.55f), new Color(2.4f, 0.25f, 4.8f, 0.80f), 1.8f);
+                DrawLine(localBack * 14.0f - localTan * 5.5f, localBack * (12.0f + jetLen * 0.55f), new Color(2.4f, 0.25f, 4.8f, 0.80f), 1.8f);
             }
 
             // 1. Gambar semua sel hexagon aktif yang sudah mengkristal permanen

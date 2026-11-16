@@ -2381,15 +2381,15 @@ public partial class SwarmSimulation : Node2D
             float targetSpin = (-feederDir).Angle() + Mathf.Pi * 0.5f;
             swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, targetSpin, MathF.Min(1.0f, 26.0f * dt));
 
-            // Warna pemanasan pengorbanan: makin lama di nozzle, makin membara sian-putih ke emas pijar
+            // Warna pemanasan pengorbanan: Ungu Tua Abyssal -> Putih Menyilaukan saat siap terbakar di nozzle
             float sacrificeHeat = Mathf.Clamp(swarm.LifeTime * 2.2f, 0.0f, 1.0f);
             vis.Color = new Color(
-                Mathf.Lerp(1.6f, 4.8f, sacrificeHeat),
-                Mathf.Lerp(3.6f, 4.4f, power),
-                Mathf.Lerp(5.2f, 2.2f, sacrificeHeat),
+                Mathf.Lerp(1.55f, 6.4f, sacrificeHeat),
+                Mathf.Lerp(0.16f, 6.0f, sacrificeHeat),
+                Mathf.Lerp(3.35f, 7.2f, sacrificeHeat),
                 1.0f
             );
-            vis.Scale = Mathf.Lerp(0.78f, 1.05f, sacrificeHeat);
+            vis.Scale = Mathf.Lerp(0.80f, 1.08f, sacrificeHeat);
 
             _activeThrusterJets.Add(new DartThrusterJet
             {
@@ -2411,32 +2411,33 @@ public partial class SwarmSimulation : Node2D
         UpdateParabolicFrontDome(dt, corePos, shipVel, aimDir, tangent, coreRadius, power);
 
         // =========================================================================
-        // 7. UPDATE GPU SHADER MESH AEROSPIKE PLASMA BOOST BEAM [SPACE]
+        // 7. UPDATE GPU SHADER MESH XF-09 ARES ABYSSAL PLASMA BOOST BEAM [SPACE]
         // =========================================================================
         if (_plasmaBoostMesh != null && _plasmaBoostMat != null)
         {
-            if (_isBoostFullPower)
-            {
-                float pulse = _boostPulseTimer;
-                float mainJetLen = Mathf.Lerp(175.0f, 360.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.2f));
-                float plumeWidth = (34.0f + 26.0f * power);
-                Vector2 midPos = focalChamberPos + backDir * (mainJetLen * 0.5f);
+            float pulse = _boostPulseTimer;
+            float primingRatio = Mathf.Clamp(_boostPrimingTimer / _boostPrimingDuration, 0.0f, 1.0f);
+            float shaderPower = _isBoostFullPower
+                ? power
+                : Mathf.Clamp(0.24f + primingRatio * 0.38f, 0.24f, 0.62f);
 
-                _plasmaBoostMesh.Visible = true;
-                _plasmaBoostMesh.GlobalPosition = midPos;
-                _plasmaBoostMesh.GlobalRotation = backDir.Angle();
-                _plasmaBoostMesh.Scale = new Vector2(mainJetLen, plumeWidth);
+            float mainJetLen = _isBoostFullPower
+                ? Mathf.Lerp(220.0f, 430.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.6f))
+                : Mathf.Lerp(95.0f, 195.0f, primingRatio) * (0.92f + 0.08f * MathF.Sin(pulse * 6.0f));
+            float plumeWidth = _isBoostFullPower
+                ? (76.0f + 58.0f * power)
+                : (42.0f + 34.0f * primingRatio);
+            Vector2 midPos = focalChamberPos + backDir * (mainJetLen * 0.48f);
 
-                _plasmaBoostMat.SetShaderParameter("power", power);
-                _plasmaBoostMat.SetShaderParameter("time", pulse);
-                _plasmaBoostMat.SetShaderParameter("flash_boost", _boostSacrificeFlash);
-                _plasmaBoostMat.SetShaderParameter("diamond_count", 6.8f);
-            }
-            else
-            {
-                // Semburan jet utama baru menyembur saat priming selesai
-                _plasmaBoostMesh.Visible = false;
-            }
+            _plasmaBoostMesh.Visible = true;
+            _plasmaBoostMesh.GlobalPosition = midPos;
+            _plasmaBoostMesh.GlobalRotation = backDir.Angle();
+            _plasmaBoostMesh.Scale = new Vector2(mainJetLen, plumeWidth);
+
+            _plasmaBoostMat.SetShaderParameter("power", shaderPower);
+            _plasmaBoostMat.SetShaderParameter("time", pulse);
+            _plasmaBoostMat.SetShaderParameter("flash_boost", _boostSacrificeFlash);
+            _plasmaBoostMat.SetShaderParameter("diamond_count", _isBoostFullPower ? 7.2f : 4.5f);
         }
 
         QueueRedraw();
@@ -2510,9 +2511,9 @@ public partial class SwarmSimulation : Node2D
         swarm.TargetDirection = exhaustDir;
         swarm.SpinAngle = exhaustDir.Angle() + Mathf.Pi * 0.5f;
 
-        // Warna lontaran pengorbanan: inti plasma putih-sian berpijar yang meluruh jadi ungu-emas
-        vis.Color = new Color(4.8f, 4.6f, 5.8f, 1.0f);
-        vis.Scale = 1.38f;
+        // Warna lontaran pengorbanan: inti plasma Putih Menyilaukan yang meluruh jadi Ungu Tua & Hitam Void
+        vis.Color = new Color(6.4f, 6.2f, 7.2f, 1.0f);
+        vis.Scale = 1.42f;
     }
 
     /// <summary>
@@ -3105,14 +3106,14 @@ public partial class SwarmSimulation : Node2D
                     float targetSpin = (-aimDir).Angle() + Mathf.Pi * 0.5f + MathF.Sin(spiralAngle * 2.0f) * 0.25f;
                     swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, targetSpin, MathF.Min(1.0f, 14.0f * dt));
 
-                    float ignitionPulse = 0.5f + 0.5f * MathF.Sin(_gigaDrillSpinTime * 3.2f + idx);
+                    float ignitionPulse = 0.5f + 0.5f * MathF.Sin(_gigaDrillSpinTime * 3.8f + idx);
                     vis.Color = new Color(
-                        Mathf.Lerp(3.4f, 4.2f, ignitionPulse * chargeProgress),
-                        Mathf.Lerp(0.9f, 2.8f, ignitionPulse * chargeProgress),
-                        Mathf.Lerp(0.4f, 3.2f, chargeProgress),
+                        Mathf.Lerp(1.6f, 6.4f, ignitionPulse * chargeProgress),
+                        Mathf.Lerp(0.15f, 6.0f, ignitionPulse * chargeProgress),
+                        Mathf.Lerp(3.5f, 7.2f, chargeProgress),
                         1.0f
                     );
-                    vis.Scale = Mathf.Lerp(0.95f, 1.22f, chargeProgress);
+                    vis.Scale = Mathf.Lerp(0.98f, 1.26f, chargeProgress);
                 }
             });
 
@@ -3214,8 +3215,8 @@ public partial class SwarmSimulation : Node2D
         swarm.TargetDirection = exhaustDir;
         swarm.SpinAngle = exhaustDir.Angle() + Mathf.Pi * 0.5f;
 
-        vis.Color = new Color(4.5f, 4.0f, 3.0f, 1.0f);
-        vis.Scale = 1.35f;
+        vis.Color = new Color(6.6f, 6.4f, 7.5f, 1.0f);
+        vis.Scale = 1.42f;
     }
 
     private void LaunchSuperGigaDrill(Vector2 corePos, Vector2 aimDir, Vector2 targetPos, float chargeProgress)
@@ -3709,38 +3710,38 @@ public partial class SwarmSimulation : Node2D
             pos.Value += vel.Value * dt;
             swarm.SpinAngle += 28.0f * dt;
 
-            if (lifeRatio < 0.30f)
+            if (lifeRatio < 0.32f)
             {
-                float u = lifeRatio / 0.30f;
+                float u = lifeRatio / 0.32f;
                 vis.Color = new Color(
-                    Mathf.Lerp(4.2f, 3.8f, u),
-                    Mathf.Lerp(3.8f, 1.6f, u),
-                    Mathf.Lerp(2.8f, 0.35f, u),
+                    Mathf.Lerp(6.6f, 3.2f, u),
+                    Mathf.Lerp(6.4f, 0.45f, u),
+                    Mathf.Lerp(7.4f, 5.6f, u),
                     1.0f
                 );
-                vis.Scale = Mathf.Lerp(1.42f, 1.10f, u);
+                vis.Scale = Mathf.Lerp(1.45f, 1.12f, u);
             }
             else if (lifeRatio < 0.72f)
             {
-                float u = (lifeRatio - 0.30f) / 0.42f;
+                float u = (lifeRatio - 0.32f) / 0.40f;
                 vis.Color = new Color(
-                    Mathf.Lerp(3.8f, 2.6f, u),
-                    Mathf.Lerp(1.6f, 0.35f, u),
-                    Mathf.Lerp(0.35f, 0.65f, u),
-                    Mathf.Lerp(1.0f, 0.75f, u)
+                    Mathf.Lerp(3.2f, 0.85f, u),
+                    Mathf.Lerp(0.45f, 0.04f, u),
+                    Mathf.Lerp(5.6f, 1.95f, u),
+                    Mathf.Lerp(1.0f, 0.88f, u)
                 );
-                vis.Scale = Mathf.Lerp(1.10f, 0.55f, u);
+                vis.Scale = Mathf.Lerp(1.12f, 0.60f, u);
             }
             else
             {
                 float u = (lifeRatio - 0.72f) / 0.28f;
                 vis.Color = new Color(
-                    Mathf.Lerp(2.6f, 0.8f, u),
-                    Mathf.Lerp(0.35f, 0.05f, u),
-                    Mathf.Lerp(0.65f, 0.25f, u),
-                    Mathf.Lerp(0.75f, 0.0f, u)
+                    Mathf.Lerp(0.85f, 0.015f, u),
+                    Mathf.Lerp(0.04f, 0.004f, u),
+                    Mathf.Lerp(1.95f, 0.030f, u),
+                    Mathf.Lerp(0.88f, 0.0f, u)
                 );
-                vis.Scale = Mathf.Lerp(0.55f, 0.12f, u);
+                vis.Scale = Mathf.Lerp(0.60f, 0.16f, u);
             }
 
             if (swarm.LifeTime >= swarm.MaxLifeTime)
@@ -5487,14 +5488,19 @@ public partial class SwarmSimulation : Node2D
             domeInnerPts[i] = _parabolaApexWorldPos - aimDir * (backX + 4.0f) + tangent * s;
         }
 
-        Color bowOuterCol = new Color(0.6f, 2.8f, 4.8f, (0.32f + 0.25f * power));
-        Color bowCoreCol = new Color(2.4f, 4.6f, 5.8f, (0.55f + 0.30f * power));
-        DrawPolyline(domeOuterPts, bowOuterCol, 3.2f, false);
-        DrawPolyline(domeInnerPts, bowCoreCol, 1.5f, false);
+        Color bowOuterCol = new Color(1.55f, 0.14f, 3.4f, (0.42f + 0.32f * power));
+        Color bowVoidCol = new Color(0.015f, 0.004f, 0.030f, (0.78f + 0.18f * power));
+        Color bowCoreCol = new Color(6.4f, 6.2f, 7.2f, (0.65f + 0.30f * power));
+        DrawPolyline(domeOuterPts, bowOuterCol, 3.8f, false);
+        DrawPolyline(domeInnerPts, bowVoidCol, 2.8f, false);
+        DrawPolyline(domeInnerPts, bowCoreCol, 1.4f, false);
 
-        // Kilau puncak kubah parabola (Apex Mach Nose)
+        // Kilau puncak kubah parabola (Apex Mach Nose: Ungu Tua + Hitam Void + Inti Putih)
         float apexPulse = 1.0f + 0.25f * MathF.Sin(pulse * 3.8f);
-        DrawCircle(_parabolaApexWorldPos + aimDir * 5.0f, 4.5f * apexPulse * power, new Color(3.2f, 5.0f, 6.0f, 0.65f * power));
+        Vector2 apexPt = _parabolaApexWorldPos + aimDir * 5.0f;
+        DrawCircle(apexPt, 6.2f * apexPulse * power, new Color(1.65f, 0.15f, 3.6f, 0.65f * power));
+        DrawCircle(apexPt, 3.8f * apexPulse * power, new Color(0.012f, 0.004f, 0.025f, 0.92f * power));
+        DrawCircle(apexPt, 2.2f * apexPulse * power, new Color(6.4f, 6.2f, 7.2f, 0.95f * power));
 
         // =========================================================================
         // B. BUSUR INDUKSI & FEEDER KONVERGEN DARI 10 DART KE FOCAL PLASMA CHAMBER
@@ -5502,16 +5508,19 @@ public partial class SwarmSimulation : Node2D
         bool isPriming = !_isBoostFullPower;
         float primingProgress = Mathf.Clamp(_boostPrimingTimer / _boostPrimingDuration, 0.0f, 1.0f);
 
-        // Efek Cincin Energi Menghisap (Imploding Rings) ala Godzilla Charge
+        // Efek Cincin Energi Menghisap (Imploding Abyssal Rings: Ungu Tua, Hitam Void, Putih)
         if (isPriming)
         {
             for (int r = 0; r < 3; r++)
             {
                 float ringPhase = Mathf.PosMod(_boostPrimingTimer * 2.8f + (float)r / 3.0f, 1.0f);
-                float ringRadius = Mathf.Lerp(85.0f, 8.0f, ringPhase);
-                float ringAlpha = MathF.Sin(ringPhase * Mathf.Pi) * (0.35f + 0.65f * primingProgress);
-                Color ringCol = new Color(0.9f, 3.8f, 5.8f, ringAlpha);
-                DrawArc(focalPos, ringRadius, 0.0f, Mathf.Tau, 24, ringCol, 2.0f);
+                float ringRadius = Mathf.Lerp(88.0f, 8.0f, ringPhase);
+                float ringAlpha = MathF.Sin(ringPhase * Mathf.Pi) * (0.40f + 0.60f * primingProgress);
+                Color ringCol = (r % 2 == 0)
+                    ? new Color(1.85f, 0.18f, 4.2f, ringAlpha)
+                    : new Color(6.2f, 6.0f, 7.0f, ringAlpha);
+                DrawArc(focalPos, ringRadius * 0.93f, 0.0f, Mathf.Tau, 24, new Color(0.012f, 0.004f, 0.025f, ringAlpha * 0.85f), 2.6f);
+                DrawArc(focalPos, ringRadius, 0.0f, Mathf.Tau, 24, ringCol, 1.8f);
             }
         }
 
@@ -5519,49 +5528,54 @@ public partial class SwarmSimulation : Node2D
         {
             Vector2 dPos = _activeThrusterDartPositions[i];
 
-            // Penyalaan sekuensial Dart ala sirip dorsal Godzilla (dari tepi luar ke tengah)
+            // Penyalaan sekuensial Dart (dari tepi luar ke tengah)
             float dartSlotNorm = (float)i / MathF.Max(1, dartCount - 1);
-            float igniteThreshold = MathF.Abs(dartSlotNorm - 0.5f) * 2.0f; // Luar dulu lalu menuju tengah
-            igniteThreshold = 1.0f - igniteThreshold; // 0.0 di ujung, 1.0 di tengah
+            float igniteThreshold = MathF.Abs(dartSlotNorm - 0.5f) * 2.0f;
+            igniteThreshold = 1.0f - igniteThreshold;
             bool isDartCharged = !isPriming || (primingProgress >= igniteThreshold * 0.85f);
 
             Color feederGlow = isDartCharged
-                ? new Color(0.8f, 3.8f, 5.6f, 0.75f * power + 0.25f)
-                : new Color(0.4f, 1.2f, 2.2f, 0.25f);
+                ? new Color(1.65f, 0.14f, 3.6f, 0.80f * power + 0.20f)
+                : new Color(0.45f, 0.04f, 1.05f, 0.35f);
+            Color feederVoid = new Color(0.012f, 0.004f, 0.025f, isDartCharged ? 0.90f : 0.45f);
             Color feederCore = isDartCharged
-                ? new Color(3.8f, 4.8f, 5.8f, 0.95f)
-                : new Color(1.2f, 2.2f, 3.2f, 0.40f);
+                ? new Color(6.4f, 6.2f, 7.2f, 0.96f)
+                : new Color(2.4f, 0.45f, 4.2f, 0.48f);
 
-            DrawLine(dPos, focalPos, feederGlow, isDartCharged ? 3.6f : 1.8f, false);
-            DrawLine(dPos, focalPos, feederCore, isDartCharged ? 1.6f : 0.8f, false);
+            DrawLine(dPos, focalPos, feederGlow, isDartCharged ? 4.2f : 2.2f, false);
+            DrawLine(dPos, focalPos, feederVoid, isDartCharged ? 2.6f : 1.3f, false);
+            DrawLine(dPos, focalPos, feederCore, isDartCharged ? 1.4f : 0.7f, false);
 
             if (isDartCharged && isPriming)
             {
-                // Percikan kilat mikro berdenyut pada Dart yang sudah terisi
-                float sparkRadius = 3.5f + MathF.Sin(pulse * 6.0f + i) * 1.5f;
-                DrawCircle(dPos, sparkRadius, new Color(3.5f, 4.8f, 6.0f, 0.85f));
+                float sparkRadius = 3.6f + MathF.Sin(pulse * 6.0f + i) * 1.5f;
+                DrawCircle(dPos, sparkRadius * 1.3f, new Color(1.65f, 0.15f, 3.6f, 0.75f));
+                DrawCircle(dPos, sparkRadius * 0.7f, new Color(6.4f, 6.2f, 7.2f, 0.92f));
             }
 
             if (i < dartCount - 1)
             {
                 Vector2 nextPos = _activeThrusterDartPositions[i + 1];
                 Vector2 mid = (dPos + nextPos) * 0.5f + backDir * (MathF.Sin(pulse * 4.2f + i * 1.7f) * 2.5f);
-                Color arcCol = isDartCharged ? new Color(1.8f, 4.0f, 5.5f, 0.75f * power + 0.20f) : new Color(0.8f, 1.6f, 2.5f, 0.30f);
-                DrawLine(dPos, mid, arcCol, 1.3f, false);
-                DrawLine(mid, nextPos, arcCol, 1.3f, false);
+                Color arcCol = isDartCharged
+                    ? new Color(3.2f, 0.55f, 5.6f, 0.80f * power + 0.20f)
+                    : new Color(0.65f, 0.06f, 1.5f, 0.35f);
+                DrawLine(dPos, mid, arcCol, 1.4f, false);
+                DrawLine(mid, nextPos, arcCol, 1.4f, false);
             }
         }
 
-        // Bola Ruang Bakar Plasma (Focal Pinch Orb) + Flash saat Dart dikorbankan
+        // Bola Ruang Bakar Plasma (Abyssal Focal Pinch Orb: Halo Ungu Tua -> Cincin Putih -> Inti Hitam Void -> Titik Putih)
         float flashBoost = _boostSacrificeFlash;
         float baseOrbRad = isPriming
-            ? (5.0f + 12.0f * primingProgress * (0.85f + 0.15f * MathF.Sin(pulse * 8.0f)))
-            : (7.5f + 5.0f * power + 6.5f * flashBoost) * (0.90f + 0.10f * MathF.Sin(pulse * 5.0f));
+            ? (5.5f + 12.0f * primingProgress * (0.85f + 0.15f * MathF.Sin(pulse * 8.0f)))
+            : (8.5f + 5.5f * power + 7.0f * flashBoost) * (0.90f + 0.10f * MathF.Sin(pulse * 5.5f));
 
         float orbRad = baseOrbRad;
-        DrawCircle(focalPos, orbRad * 1.85f, new Color(0.5f, 2.4f, 4.8f, 0.35f * power + (isPriming ? 0.30f * primingProgress : 0.0f)));
-        DrawCircle(focalPos, orbRad, new Color(2.8f + flashBoost * 2.0f, 4.6f, 5.8f, 0.92f));
-        DrawCircle(focalPos, orbRad * 0.52f, new Color(5.5f, 5.4f, 4.2f, 0.98f));
+        DrawCircle(focalPos, orbRad * 2.05f, new Color(1.45f, 0.12f, 3.25f, 0.42f * power + (isPriming ? 0.32f * primingProgress : 0.0f)));
+        DrawCircle(focalPos, orbRad * 1.18f, new Color(6.4f + flashBoost * 1.5f, 6.2f, 7.2f, 0.95f));
+        DrawCircle(focalPos, orbRad * 0.72f, new Color(0.012f, 0.004f, 0.025f, 0.96f));
+        DrawCircle(focalPos, orbRad * 0.28f, new Color(6.8f, 6.6f, 7.6f, 0.98f));
 
         // =========================================================================
         // C. SEMBURAN JET PLASMA UTAMA TERPUSAT (AEROSPIKE AFTERBURNER)
