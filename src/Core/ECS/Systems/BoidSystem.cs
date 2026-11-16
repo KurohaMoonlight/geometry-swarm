@@ -79,6 +79,7 @@ public sealed class BoidSystem
     public Vector2 LastEnemyHitVelocity { get; set; } = Vector2.Zero;
 
     private readonly int[] _enemyScanBuffer = new int[32];
+    private readonly int[] _guardianScanBuffer = new int[32];
     private readonly int[] _launchedHitBuffer = new int[16];
 
     // Buffer asteroid terdekat yang sudah disaring sekali per frame (Zero-GC, Zero-Interop di dalam loop)
@@ -99,6 +100,11 @@ public sealed class BoidSystem
     private bool _ringAngleInitialized = false;
     private float _enemyRingAimAngle = 0.0f;
     private bool _enemyRingAngleInitialized = false;
+
+    // Parameter Gyroscopic 3D Defense Ring untuk Guardian (Orbital Precession & Tumbling Ring)
+    public float GuardianRingAspect { get; set; } = 0.52f;
+    public float GuardianPrecessionSpeed { get; set; } = 0.35f;
+    private float _guardianPrecessionAngle = 0.0f;
 
     public const int SectorCount = 12;
     public const float SectorArc = Mathf.Tau / SectorCount;
@@ -180,6 +186,13 @@ public sealed class BoidSystem
         Vector2 ringMinorDir = new Vector2(MathF.Cos(ringAxisAngle), MathF.Sin(ringAxisAngle));
         Vector2 ringMajorDir = new Vector2(-ringMinorDir.Y, ringMinorDir.X);
         float coreRadiusOffset = MathF.Max(0.0f, playerCoreRadius - 16.0f);
+
+        // Orientasi Sumbu Giroskopik 3D Guardian (Tumbling Armillary Precession):
+        // Berputar perlahan mengitari Core dari North-South ke West-East secara berkelanjutan
+        _guardianPrecessionAngle = Mathf.Wrap(_guardianPrecessionAngle + GuardianPrecessionSpeed * dt, 0.0f, Mathf.Tau);
+        Vector2 gMinorDir = new Vector2(MathF.Cos(_guardianPrecessionAngle), MathF.Sin(_guardianPrecessionAngle));
+        Vector2 gMajorDir = new Vector2(-gMinorDir.Y, gMinorDir.X);
+        float gCurrentAspect = Math.Clamp(GuardianRingAspect + MathF.Sin(_organicWaveTime * 0.65f) * 0.10f, 0.40f, 0.64f);
 
         // Orientasi Cincin 3D Musuh: Dihaluskan terhadap arah bidik penambangan atau arah terbang
         float targetEnemyAimAngle;
@@ -321,7 +334,7 @@ public sealed class BoidSystem
                 }
             }
 
-            if (swarm.State == SwarmState.Launched)
+            if (swarm.State == SwarmState.Launched || swarm.State == SwarmState.ChargingDrill)
             {
                 if (_activeLaunchedCount < _launchedPositions.Length)
                 {
@@ -623,20 +636,13 @@ public sealed class BoidSystem
 
                 Vector2 toCore = anchorPos - pos.Value;
                 float distToCore = toCore.Length();
-                Vector2 dirToCore = distToCore > 0.001f ? toCore / distToCore : Vector2.Right;
 
-                vel.Value += dirToCore * (620.0f * dt);
-                vel.Value *= decayBullet;
-                if (vel.Value.LengthSquared() > 420.0f * 420.0f)
-                {
-                    vel.Value = vel.Value.Normalized() * 420.0f;
-                }
-
+                // Peluru musuh meluncur lurus satu arah dengan kecepatan tinggi (tanpa homing/lock ke pemain)
                 swarm.SpinAngle = vel.Value.Angle() + Mathf.Pi * 0.5f;
 
-                // 1. Midfield clash dengan Swarm Pemain yang Sedang Meluncur
-                // Defender di Ballistic Shield Giga Drill punya 5 HP, sedangkan semua drone proyektil biasa 1-hit mati
-                int launchHits = _launchedSpatialGrid.QueryNeighbors(pos.Value, 24.0f, _launchedHitBuffer);
+                // 1. Midfield clash dengan Swarm Pemain yang Sedang Meluncur / Sedang Priming Drill
+                // Radius pencarian diperlebar ke 38.0f agar peluru dan bor berkecepatan relatif 2050 px/s tidak pernah tunneling
+                int launchHits = _launchedSpatialGrid.QueryNeighbors(pos.Value, 38.0f, _launchedHitBuffer);
                 if (launchHits > 0)
                 {
                     for (int h = 0; h < launchHits; h++)
@@ -648,39 +654,56 @@ public sealed class BoidSystem
                             if (_world.IsAlive(lEnt))
                             {
                                 ref var lSwarm = ref _world.Get<SwarmUnitComponent>(lEnt);
-                                if (lSwarm.State == SwarmState.Launched)
+                                if (lSwarm.State == SwarmState.Launched || lSwarm.State == SwarmState.ChargingDrill)
                                 {
                                     _launchedHitConsumed[lIdx] = true;
 
-                                    if (lSwarm.Role == SwarmRole.Guardian && isGigaDrillActive)
+                                    Entity targetEnt = lEnt;
+                                    // Jika yang tertabrak frontal adalah Scanner Drone (sensor di moncong),
+                                    // tapi drill memiliki perisai hidung Guardian (5 HP), maka Guardian yang menyerap peluru musuh terlebih dahulu!
+                                    if (lSwarm.Role == SwarmRole.ScannerDrone)
                                     {
-                                        lSwarm.Health--;
-                                        lSwarm.HitFlashTimer = 0.12f;
-                                        if (_world.Has<VisualComponent>(lEnt))
+                                        Entity guardianEnt = default;
+                                        bool hasDefender = false;
+                                        _world.Query(in _boidQuery, (Entity gEnt, ref SwarmUnitComponent gSwarm) =>
                                         {
-                                            ref var lVis = ref _world.Get<VisualComponent>(lEnt);
-                                            lVis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
-                                        }
+                                            if (hasDefender) return;
+                                            if (gSwarm.OwnerId == 0 && gSwarm.Role == SwarmRole.Guardian &&
+                                                (gSwarm.State == SwarmState.Launched || gSwarm.State == SwarmState.ChargingDrill) &&
+                                                gSwarm.Health > 0)
+                                            {
+                                                guardianEnt = gEnt;
+                                                hasDefender = true;
+                                            }
+                                        });
 
-                                        if (lSwarm.Health <= 0)
+                                        if (hasDefender && _world.IsAlive(guardianEnt))
                                         {
-                                            lSwarm.State = SwarmState.Dead;
-                                            ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: true));
+                                            targetEnt = guardianEnt;
                                         }
-                                        else
+                                    }
+
+                                    ref var hitSwarm = ref _world.Get<SwarmUnitComponent>(targetEnt);
+                                    hitSwarm.Health--;
+                                    hitSwarm.HitFlashTimer = 0.12f;
+                                    if (_world.Has<VisualComponent>(targetEnt))
+                                    {
+                                        ref var hitVis = ref _world.Get<VisualComponent>(targetEnt);
+                                        hitVis.Color = new Color(5.0f, 5.0f, 5.0f, 1.0f);
+                                    }
+
+                                    if (hitSwarm.Health <= 0)
+                                    {
+                                        hitSwarm.State = SwarmState.Dead;
+                                        ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: true));
+                                        if (hitSwarm.Role == SwarmRole.DartNeedle)
                                         {
-                                            ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
+                                            GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.Enemy);
                                         }
                                     }
                                     else
                                     {
-                                        // Drone pemain yang dilontarkan dan menabrak peluru musuh PASTI MATI
-                                        lSwarm.State = SwarmState.Dead;
-                                        ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: true));
-                                        if (lSwarm.Role == SwarmRole.DartNeedle)
-                                        {
-                                            GeometrySwarm.Audio.EngineThrusterAudio.Instance?.TriggerDartImpact(pos.Value, GeometrySwarm.Audio.EngineThrusterAudio.DartImpactKind.Enemy);
-                                        }
+                                        ClashEvents.Add(new ClashEvent(pos.Value, dropScrap: false));
                                     }
 
                                     swarm.State = SwarmState.Dead; // Peluru musuh selalu hancur saat menabrak
@@ -822,54 +845,130 @@ public sealed class BoidSystem
                     //   * depthZ < 0: Lewat di BELAKANG Core (Back Ring ZIndex=1, agak redup & mengecil)
                     //   * depthZ >= 0: Lewat di DEPAN Core (Front Ring ZIndex=3, menyala terang & membesar)
                     // =====================================================================
-                    float angularSpd = MathF.Abs(swarm.OrbitSpeed) > 0.2f ? MathF.Abs(swarm.OrbitSpeed) : 1.75f;
-                    swarm.OrbitAngle = Mathf.Wrap(swarm.OrbitAngle + angularSpd * dt, 0.0f, Mathf.Tau);
+                    bool isGuardian = swarm.Role == SwarmRole.Guardian;
+                    float depthZ;
+                    Vector2 targetRingPos;
+                    Vector2 ringTangentVel;
+                    bool isGuardianIntercepting = false;
+                    Vector2 interceptFaceDir = Vector2.Zero;
 
-                    float waveJitter = MathF.Sin(_organicWaveTime * 2.2f + swarm.PersonalAngleOffset * 8.0f) * 0.035f;
-                    float effectiveTheta = swarm.OrbitAngle + waveJitter;
-                    float cosT = MathF.Cos(effectiveTheta);
-                    float sinT = MathF.Sin(effectiveTheta);
-
-                    float depthZ = sinT;
-                    swarm.OrbitDepth = depthZ;
-
-                    float baseRoleRadius = swarm.Role switch
+                    if (isGuardian)
                     {
-                        SwarmRole.Guardian => 80.0f,
-                        SwarmRole.MiningDroid or SwarmRole.ScannerDrone => 68.0f,
-                        _ => 74.0f
-                    };
-                    float majorR = baseRoleRadius + Math.Clamp(swarm.PersonalRadialOffset, -6.0f, 6.0f) + coreRadiusOffset;
-                    float minorR = majorR * RingTiltAspect;
+                        // =====================================================================
+                        // GUARDIAN GYROSCOPIC 3D DEFENSE RING (TUMBLING ARMILLARY PRECESSION)
+                        // - Bidang cincin berpresesi/bergulir lambat: North-South -> West-East -> North-South
+                        // - Aspect ratio bervolume/kubah (~0.52)
+                        // - Unit Guardian berpatroli mengalir di cincin giroskopik
+                        // - Menyentak keluar (Sortie) saat peluru musuh mendekat (< 190 px)
+                        // =====================================================================
+                        float angularSpd = MathF.Abs(swarm.OrbitSpeed) > 0.2f ? MathF.Abs(swarm.OrbitSpeed) : 1.35f;
+                        swarm.OrbitAngle = Mathf.Wrap(swarm.OrbitAngle + angularSpd * dt, 0.0f, Mathf.Tau);
 
-                    Vector2 ringOffset = ringMajorDir * (majorR * cosT) + ringMinorDir * (minorR * sinT);
-                    Vector2 targetRingPos = anchorPos + ringOffset;
+                        float waveJitter = MathF.Sin(_organicWaveTime * 1.8f + swarm.PersonalAngleOffset * 6.0f) * 0.04f;
+                        float effectiveTheta = swarm.OrbitAngle + waveJitter;
+                        float cosT = MathF.Cos(effectiveTheta);
+                        float sinT = MathF.Sin(effectiveTheta);
+                        depthZ = sinT;
+                        swarm.OrbitDepth = depthZ;
 
-                    // Kecepatan tangensial elips analitik (memberikan efek foreshortening 3D alami di ujung elips)
-                    Vector2 ringTangentVel = (-ringMajorDir * (majorR * sinT) + ringMinorDir * (minorR * cosT)) * angularSpd;
+                        float guardBaseR = 104.0f + Math.Clamp(swarm.PersonalRadialOffset, -4.0f, 4.0f) + coreRadiusOffset;
+                        float majorR = guardBaseR;
+                        float minorR = majorR * gCurrentAspect;
 
-                    Vector2 posError = targetRingPos - pos.Value;
-                    Vector2 desiredVel = anchorVelocity + ringTangentVel + posError * RingSpringStiffness;
-                    vel.Value = vel.Value.Lerp(desiredVel, MathF.Min(1.0f, 14.0f * dt));
+                        // Posisi dasar pada Cincin Giroskopik 3D yang sedang bergulir
+                        Vector2 ringBasePos = anchorPos + gMajorDir * (majorR * cosT) + gMinorDir * (minorR * sinT);
+                        ringTangentVel = (-gMajorDir * (majorR * sinT) + gMinorDir * (minorR * cosT)) * angularSpd;
 
-                    float dynamicMaxOrbitSpd = MathF.Max(MaxOrbitSpeed, anchorVelocity.Length() + 360.0f);
+                        // Cek apakah ada peluru musuh yang mendekat ke Guardian ini dalam radius 190 px
+                        int threatNear = _enemySpatialGrid.QueryNeighbors(pos.Value, 190.0f, _guardianScanBuffer);
+                        Vector2 sortieOffset = Vector2.Zero;
+                        float closestDist = float.MaxValue;
+                        Vector2 closestDir = Vector2.Zero;
+
+                        for (int t = 0; t < threatNear; t++)
+                        {
+                            int eIdx = _guardianScanBuffer[t];
+                            if (eIdx >= 0 && eIdx < _activeEnemyCount)
+                            {
+                                Vector2 ePos = _enemyPositions[eIdx];
+                                Vector2 toBullet = ePos - pos.Value;
+                                float d = toBullet.Length();
+                                if (d < closestDist)
+                                {
+                                    closestDist = d;
+                                    closestDir = toBullet / MathF.Max(0.001f, d);
+                                }
+                            }
+                        }
+
+                        if (closestDist < 190.0f)
+                        {
+                            isGuardianIntercepting = true;
+                            // Menyentak keluar 20 - 45 px memotong lintasan peluru musuh
+                            float surgeDist = Mathf.Lerp(45.0f, 20.0f, closestDist / 190.0f);
+                            sortieOffset = closestDir * surgeDist;
+                            interceptFaceDir = closestDir;
+                        }
+
+                        targetRingPos = ringBasePos + sortieOffset;
+
+                        Vector2 posError = targetRingPos - pos.Value;
+                        float stiffness = isGuardianIntercepting ? 28.0f : 16.5f;
+                        Vector2 desiredVel = anchorVelocity + (isGuardianIntercepting ? Vector2.Zero : ringTangentVel) + posError * stiffness;
+                        vel.Value = vel.Value.Lerp(desiredVel, MathF.Min(1.0f, (isGuardianIntercepting ? 24.0f : 14.0f) * dt));
+                    }
+                    else
+                    {
+                        // =====================================================================
+                        // FORMASI CINCIN 3D DALAM (WORKER SWARM: DART, DRILL, MINER, SCANNER)
+                        // - Berputar mulus mengikuti aliran cincin 3D miring (radius 68-74 px)
+                        // =====================================================================
+                        float angularSpd = MathF.Abs(swarm.OrbitSpeed) > 0.2f ? MathF.Abs(swarm.OrbitSpeed) : 1.75f;
+                        swarm.OrbitAngle = Mathf.Wrap(swarm.OrbitAngle + angularSpd * dt, 0.0f, Mathf.Tau);
+
+                        float waveJitter = MathF.Sin(_organicWaveTime * 2.2f + swarm.PersonalAngleOffset * 8.0f) * 0.035f;
+                        float effectiveTheta = swarm.OrbitAngle + waveJitter;
+                        float cosT = MathF.Cos(effectiveTheta);
+                        float sinT = MathF.Sin(effectiveTheta);
+                        depthZ = sinT;
+                        swarm.OrbitDepth = depthZ;
+
+                        float baseRoleRadius = (swarm.Role == SwarmRole.MiningDroid || swarm.Role == SwarmRole.ScannerDrone)
+                            ? 68.0f
+                            : 74.0f;
+                        float majorR = baseRoleRadius + Math.Clamp(swarm.PersonalRadialOffset, -6.0f, 6.0f) + coreRadiusOffset;
+                        float minorR = majorR * RingTiltAspect;
+
+                        Vector2 ringOffset = ringMajorDir * (majorR * cosT) + ringMinorDir * (minorR * sinT);
+                        targetRingPos = anchorPos + ringOffset;
+
+                        ringTangentVel = (-ringMajorDir * (majorR * sinT) + ringMinorDir * (minorR * cosT)) * angularSpd;
+
+                        Vector2 posError = targetRingPos - pos.Value;
+                        Vector2 desiredVel = anchorVelocity + ringTangentVel + posError * RingSpringStiffness;
+                        vel.Value = vel.Value.Lerp(desiredVel, MathF.Min(1.0f, 14.0f * dt));
+                    }
+
+                    float dynamicMaxOrbitSpd = MathF.Max(MaxOrbitSpeed, anchorVelocity.Length() + 380.0f);
                     if (vel.Value.LengthSquared() > dynamicMaxOrbitSpd * dynamicMaxOrbitSpd)
                     {
                         vel.Value = vel.Value.Normalized() * dynamicMaxOrbitSpd;
                     }
 
                     // Skala Perspektif 3D berdasarkan kedalaman depthZ
-                    float baseRoleScale = swarm.Role switch
-                    {
-                        SwarmRole.Guardian => 0.72f,
-                        SwarmRole.ScannerDrone => 0.60f,
-                        SwarmRole.MiningDroid => 0.62f,
-                        _ => 0.55f
-                    };
+                    float baseRoleScale = isGuardian
+                        ? (isGuardianIntercepting ? 0.88f : 0.74f)
+                        : (swarm.Role switch
+                        {
+                            SwarmRole.ScannerDrone => 0.60f,
+                            SwarmRole.MiningDroid => 0.62f,
+                            _ => 0.55f
+                        });
+
                     float depthScaleMult = depthZ < 0.0f
                         ? Mathf.Lerp(0.92f, 0.70f, -depthZ)
                         : Mathf.Lerp(0.92f, 1.12f, depthZ);
-                    vis.Scale = Mathf.Lerp(vis.Scale, baseRoleScale * depthScaleMult, MathF.Min(1.0f, dt * 12.0f));
+                    vis.Scale = Mathf.Lerp(vis.Scale, baseRoleScale * depthScaleMult, MathF.Min(1.0f, dt * 14.0f));
 
                     // Efek Redup Kedalaman (Depth Dimming) saat di belakang Core vs Terang di depan Core
                     if (swarm.HitFlashTimer > 0.0f)
@@ -879,7 +978,7 @@ public sealed class BoidSystem
                     }
                     else
                     {
-                        Color baseCol = vis.BaseColor;
+                        Color baseCol = isGuardian && isGuardianIntercepting ? new Color(1.2f, 4.8f, 6.5f, 1.0f) : vis.BaseColor;
                         Color targetDepthColor;
                         if (depthZ < 0.0f)
                         {
@@ -909,8 +1008,27 @@ public sealed class BoidSystem
                         vis.Color = vis.Color.Lerp(targetDepthColor, MathF.Min(1.0f, dt * 14.0f));
                     }
 
-                    // Orientasi hadap unit mengikuti aliran cincin (MiningDroid tetap siap membidik kursor)
-                    if (swarm.Role == SwarmRole.MiningDroid)
+                    // Orientasi Hadap Drone:
+                    if (isGuardian)
+                    {
+                        if (isGuardianIntercepting && interceptFaceDir.LengthSquared() > 0.01f)
+                        {
+                            // Saat mencegat: menghadap langsung ke arah peluru musuh
+                            float faceBulletAngle = interceptFaceDir.Angle() + Mathf.Pi * 0.5f;
+                            swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, faceBulletAngle, MathF.Min(1.0f, 22.0f * dt));
+                        }
+                        else
+                        {
+                            // Mengalir anggun mengikuti arah rotasi cincin giroskopik 3D
+                            Vector2 flowDir = ringTangentVel.LengthSquared() > 1.0f ? ringTangentVel : vel.Value;
+                            if (flowDir.LengthSquared() > 1.0f)
+                            {
+                                float desiredFaceAngle = flowDir.Angle() + Mathf.Pi * 0.5f;
+                                swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, desiredFaceAngle, MathF.Min(1.0f, 12.0f * dt));
+                            }
+                        }
+                    }
+                    else if (swarm.Role == SwarmRole.MiningDroid)
                     {
                         Vector2 toCursor = cursorThreatPos - pos.Value;
                         if (toCursor.LengthSquared() > 4.0f)
@@ -944,7 +1062,7 @@ public sealed class BoidSystem
 
                     // Jika unit ini adalah bagian dari formasi Super Giga Drill yang sedang aktif,
                     // seluruh posisi, rotasi, dan kolisi diatur oleh SwarmSimulation.UpdateActiveGigaDrill!
-                    if (isGigaDrillActive && (swarm.Role == SwarmRole.Guardian || (swarm.Role == SwarmRole.DrillDrone && swarm.FormationIndex >= 0)))
+                    if (isGigaDrillActive && (swarm.Role == SwarmRole.Guardian || swarm.Role == SwarmRole.ScannerDrone || (swarm.Role == SwarmRole.DartNeedle && swarm.FormationIndex >= 0) || (swarm.Role == SwarmRole.DrillDrone && swarm.FormationIndex >= 0)))
                     {
                         return;
                     }

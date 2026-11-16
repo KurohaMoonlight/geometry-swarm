@@ -61,9 +61,9 @@ public partial class SwarmSimulation : Node2D
     private EnemyController? _enemyController;
     public EnemyCore? EnemyCore => _enemyCore;
     public EnemyController? EnemyController => _enemyController;
-    public bool IsEnemyFiring { get; set; } = false;
+    public bool IsEnemyFiring { get; set; } = true;
     private float _duelFireTimer = 0.0f;
-    private const float EnemyFireInterval = 0.20f;
+    private const float EnemyFireInterval = 0.028f;
     private readonly List<ClashSparkParticle> _clashSparks = new();
 
     private struct MiningDebrisParticle
@@ -169,6 +169,14 @@ public partial class SwarmSimulation : Node2D
     public Vector2 GigaDrillTargetPosition => _gigaDrillTargetPos;
     public float GigaDrillNoseLength => (_activeDefenderCoreCount > 0 && !_hasDefenderNoseBreached) ? MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f) : 0.0f;
     public float GigaDrillNoseRadius => (_activeDefenderCoreCount > 0 && !_hasDefenderNoseBreached) ? MathF.Min(28.0f, 12.0f + MathF.Sqrt(_activeDefenderCoreCount) * 3.6f) : 0.0f;
+    public int GigaDrillScannerCount => _activeDrillScannerCount;
+    public int GigaDrillCanardDartCount => _activeDrillCanardDartCount;
+    public int GigaDrillCanardRightCount => _activeDrillCanardRightCount;
+    public int GigaDrillCanardLeftCount => _activeDrillCanardLeftCount;
+    public Vector2 GigaDrillScannerPosition { get; private set; } = Vector2.Zero;
+    public bool IsGigaDrillAligning => _isGigaDrillAligning;
+    public float GigaDrillCanardFireSide => _gigaDrillCanardFireSide;
+    public bool GigaDrillCanardPulseActive => _gigaDrillCanardPulseActive;
 
     // =========================================================================
     // PARAMETER SACRIFICIAL DART PLASMA BOOST, KUBAH PARABOLA, & RETRO-BRAKE [SPACE]
@@ -312,18 +320,28 @@ public partial class SwarmSimulation : Node2D
     private readonly List<TacticalSwarmSlot> _tacticalSlots = new();
     private readonly bool[] _roleToggledOn = new bool[7];
 
-    // Parameter Super Giga Drill Break
+    // Parameter Super Giga Drill Break (2.5s Priming Assembly)
     private bool _isChargingDrill = false;
     private float _drillChargeTimer = 0.0f;
-    private const float MaxDrillChargeTime = 1.65f;
+    private const float MaxDrillChargeTime = 2.5f;
     private float _gigaDrillSpinTime = 0.0f;
     private float _overchargeExhaustTimer = 0.0f;
 
     private bool _isGigaDrillActive = false;
+    private bool _isGigaDrillAligning = false;
+    private float _gigaDrillAlignTimer = 0.0f;
+    private float _gigaDrillCanardPulseTimer = 0.0f;
+    private float _gigaDrillCanardFireSide = 0.0f;
+    private bool _gigaDrillCanardPulseActive = false;
+    private float _canardSteerFuelAccumulator = 0.0f;
+    private float _gigaDrillLaunchCharge = 1.0f;
     private Vector2 _gigaDrillTipPos = Vector2.Zero;
     private Vector2 _gigaDrillAimDir = Vector2.Right;
+    private float _gigaDrillAngularVel = 0.0f;
     private Vector2 _gigaDrillVel = Vector2.Zero;
     private Vector2 _gigaDrillTargetPos = Vector2.Zero;
+    private Vector2 _gigaDrillHoverCenter = Vector2.Zero;
+    private bool _drillChargeInterrupted = false;
     private bool _hasDefenderNoseBreached = false;
     private float _gigaDrillFlightTimer = 0.0f;
     private float _gigaDrillElapsedFlight = 0.0f;
@@ -331,6 +349,10 @@ public partial class SwarmSimulation : Node2D
 
     private int _activeDrillFormationCount = 0;
     private int _activeDefenderCoreCount = 0;
+    private int _activeDrillScannerCount = 0;
+    private int _activeDrillCanardDartCount = 0;
+    private int _activeDrillCanardRightCount = 0;
+    private int _activeDrillCanardLeftCount = 0;
     private int _gigaDrillExhaustStartIndex = 0;
 
     private float _drillAsteroidGrindTimer = 0.0f;
@@ -345,6 +367,9 @@ public partial class SwarmSimulation : Node2D
     private float _coreRamAttritionAccumulator = 0.0f;
     private bool _isGrindingAsteroid = false;
     private Vector2 _gigaDrillSafeOutsidePos = Vector2.Zero;
+    private Vector2 _gigaDrillLaunchOrigin = Vector2.Zero;
+    private float _gigaDrillLinearDist = 0.0f;
+    private float _gigaDrillLaunchSpeed = 1850.0f;
     private readonly List<(Vector2 worldCenter, VoxelType type)> _destroyedVoxelsBuffer = new();
 
     public bool IsRammingEnemyCore => _isRammingEnemyCore;
@@ -364,7 +389,7 @@ public partial class SwarmSimulation : Node2D
     public int GetResource(int index) => (index >= 0 && index < _resourceStock.Length) ? _resourceStock[index] : 0;
     public bool IsInfiniteResources => InfiniteDebugResources;
 
-    public int GigaDrillTotalUnits => _activeDrillFormationCount + _activeDefenderCoreCount;
+    public int GigaDrillTotalUnits => _activeDrillFormationCount + _activeDefenderCoreCount + _activeDrillScannerCount + _activeDrillCanardDartCount;
     public int GigaDrillDefenderCoreCount => _activeDefenderCoreCount;
     public int GigaDrillLanceCount => _activeDrillFormationCount;
 
@@ -415,18 +440,10 @@ public partial class SwarmSimulation : Node2D
             AddChild(_plasmaBoostMesh);
         }
 
-        // Inisialisasi Rival Hive Core & AI Controller di Sabuk Asteroid yang aman & jauh dari pemain
+        // Inisialisasi Rival Hive Core dekat pemain untuk pengujian target bergerak (Wandering Target)
         _enemyCore = new EnemyCore();
-        if (AsteroidFieldManager.Instance != null && _playerCore != null)
-        {
-            var rng = new RandomNumberGenerator();
-            rng.Randomize();
-            _enemyCore.GlobalPosition = AsteroidFieldManager.Instance.FindSafeRandomSpawnPoint(rng, _playerCore.GlobalPosition, 4200.0f);
-        }
-        else
-        {
-            _enemyCore.GlobalPosition = new Vector2(2800.0f, 1500.0f);
-        }
+        Vector2 playerPos = _playerCore?.GlobalPosition ?? Vector2.Zero;
+        _enemyCore.GlobalPosition = playerPos + new Vector2(500.0f, 0.0f);
         AddChild(_enemyCore);
         _enemyCore.EnemyEscapePodEjected += OnEnemyEscapePodEjected;
         _enemyCore.EnemyCoreDestroyed += OnEnemyCoreDestroyed;
@@ -435,16 +452,18 @@ public partial class SwarmSimulation : Node2D
         _enemyCore.AddChild(_enemyController);
         _enemyController.Initialize(this, _enemyCore);
 
-        // Spawn armada awal Rival Hive (fokus penambangan mandiri)
-        AddEnemySwarm(SwarmRole.MiningDroid, 3);
-        AddEnemySwarm(SwarmRole.DartNeedle, 10);
+        // Spawn armada awal Rival Hive (pengawal Guardian & Dart)
+        AddEnemySwarm(SwarmRole.Guardian, 8);
+        AddEnemySwarm(SwarmRole.DartNeedle, 12);
     }
 
     public void SpawnStartingSwarm()
     {
         AddSpecificSwarm(SwarmRole.DartNeedle, 40);
-        AddSpecificSwarm(SwarmRole.ScannerDrone, 5);
+        AddSpecificSwarm(SwarmRole.ScannerDrone, 10);
         AddSpecificSwarm(SwarmRole.MiningDroid, 10);
+        AddSpecificSwarm(SwarmRole.DrillDrone, 50);
+        AddSpecificSwarm(SwarmRole.Guardian, 20);
     }
 
     private void InitializeRecipes()
@@ -1174,12 +1193,12 @@ public partial class SwarmSimulation : Node2D
         return role switch
         {
             SwarmRole.MiningDroid => MiningCount,
-            SwarmRole.DartNeedle => DartNeedleCount,
+            SwarmRole.DartNeedle => Math.Max(0, DartNeedleCount - _activeDrillCanardDartCount),
             SwarmRole.GigaShuriken => GigaShurikenCount,
             SwarmRole.CrescentBoomerang => CrescentBoomerangCount,
-            SwarmRole.DrillDrone => DrillDroneCount,
-            SwarmRole.Guardian => GuardianCount,
-            SwarmRole.ScannerDrone => ScannerCount,
+            SwarmRole.DrillDrone => Math.Max(0, DrillDroneCount - _activeDrillFormationCount),
+            SwarmRole.Guardian => Math.Max(0, GuardianCount - _activeDefenderCoreCount),
+            SwarmRole.ScannerDrone => Math.Max(0, ScannerCount - _activeDrillScannerCount),
             _ => 0
         };
     }
@@ -1814,32 +1833,97 @@ public partial class SwarmSimulation : Node2D
 
     public void FireEnemyDuelStream(Vector2 targetPos, int count = 1)
     {
+        if (_enemyCore == null || !IsInstanceValid(_enemyCore)) return;
+
         int fired = 0;
-        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm) =>
+        Vector2 enemyCenter = _enemyCore.GlobalPosition;
+        Color enemyColor = new Color(3.4f, 0.35f, 0.9f, 1.0f);
+
+        // 1. Ambil unit musuh yang sedang orbiting jika ada
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
             if (fired >= count) return;
             if (swarm.OwnerId == 0 || swarm.State != SwarmState.Orbiting) return;
 
-            Vector2 toTarget = targetPos - pos.Value;
-            if (toTarget.LengthSquared() < 1.0f) return;
+            // Tirai flak intensitas sangat tinggi (bullet wall) selebar moncong & badan Giga Drill
+            float spreadY = (GD.Randf() - 0.5f) * 44.0f;
+            Vector2 launchPos = enemyCenter + new Vector2(-15.0f, spreadY);
+            Vector2 dir = Vector2.Left;
 
-            // Tembakan lurus berkecepatan agak tinggi (720 px/s) untuk skenario uji coba menembus Giga Drill
-            Vector2 dir = toTarget.Normalized();
-
+            pos.Value = launchPos;
             swarm.State = SwarmState.Launched;
+            swarm.FormationIndex = -1;
+            swarm.ExhaustTriggerTime = -1.0f;
             swarm.MaxHealth = 1;
             swarm.Health = 1;
             swarm.TargetDirection = dir;
-            swarm.TargetPosition = targetPos;
+            swarm.TargetPosition = launchPos + dir * 2500.0f;
             swarm.LifeTime = 0.0f;
             swarm.MaxLifeTime = 3.5f;
-            vel.Value = dir * 720.0f;
+            vel.Value = dir * 1050.0f;
+            vis.Color = enemyColor;
+            vis.Scale = 0.95f;
             fired++;
         });
 
-        if (fired < count && _enemyCore != null)
+        // 2. Daur ulang entitas Dead bila orbiting tidak cukup
+        if (fired < count)
         {
-            SpawnInitialEnemySwarm(6);
+            _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+            {
+                if (fired >= count) return;
+                if (swarm.State != SwarmState.Dead) return;
+
+                float spreadY = (GD.Randf() - 0.5f) * 44.0f;
+                Vector2 launchPos = enemyCenter + new Vector2(-15.0f, spreadY);
+                Vector2 dir = Vector2.Left;
+
+                pos.Value = launchPos;
+                vel.Value = dir * 1050.0f;
+                swarm = new SwarmUnitComponent(SwarmRole.DartNeedle, ownerId: 1, orbitDist: 0.0f, orbitSpd: 0.0f)
+                {
+                    State = SwarmState.Launched,
+                    FormationIndex = -1,
+                    ExhaustTriggerTime = -1.0f,
+                    MaxHealth = 1,
+                    Health = 1,
+                    TargetDirection = dir,
+                    TargetPosition = launchPos + dir * 2500.0f,
+                    LifeTime = 0.0f,
+                    MaxLifeTime = 3.5f
+                };
+                vis = new VisualComponent(enemyColor, 0.95f);
+                fired++;
+            });
+        }
+
+        // 3. Buat entitas baru bila masih kurang agar stream peluru tidak pernah terputus
+        while (fired < count)
+        {
+            float spreadY = (GD.Randf() - 0.5f) * 44.0f;
+            Vector2 launchPos = enemyCenter + new Vector2(-15.0f, spreadY);
+            Vector2 dir = Vector2.Left;
+
+            var u = new SwarmUnitComponent(SwarmRole.DartNeedle, ownerId: 1, orbitDist: 0.0f, orbitSpd: 0.0f)
+            {
+                State = SwarmState.Launched,
+                FormationIndex = -1,
+                ExhaustTriggerTime = -1.0f,
+                MaxHealth = 1,
+                Health = 1,
+                TargetDirection = dir,
+                TargetPosition = launchPos + dir * 2500.0f,
+                LifeTime = 0.0f,
+                MaxLifeTime = 3.5f
+            };
+
+            _world.Create(
+                new PositionComponent(launchPos),
+                new VelocityComponent(dir * 1050.0f),
+                u,
+                new VisualComponent(enemyColor, 0.95f)
+            );
+            fired++;
         }
     }
 
@@ -1994,7 +2078,6 @@ public partial class SwarmSimulation : Node2D
             UpdateActiveGigaDrill(dt);
             UpdateDartBoost(dt, corePos, coreVel, mousePos);
             UpdateExhaustDrones(dt);
-            CheckAsteroidCollisions(dt);
 
             // Tembakan musuh berkala untuk menguji perisai pertahanan swarm (autofire swarm pemain dimatikan)
             if (IsEnemyFiring && _enemyCore != null && IsInstanceValid(_enemyCore))
@@ -2058,10 +2141,14 @@ public partial class SwarmSimulation : Node2D
 
             if (_boidSystem.PlayerCoreHitsThisFrame > 0 && _playerCore != null && IsInstanceValid(_playerCore))
             {
-                Vector2 hitDir = _boidSystem.LastPlayerHitVelocity.LengthSquared() > 0.01f
-                    ? _boidSystem.LastPlayerHitVelocity.Normalized()
-                    : Vector2.Right;
-                _playerCore.TakeDamage(_boidSystem.PlayerCoreHitsThisFrame * 40.0f, hitDir);
+                // Selama uji coba koridor tembak Giga Drill (IsEnemyFiring), jangan kuras HP kapal pemain agar bisa tes berkali-kali
+                if (!IsEnemyFiring)
+                {
+                    Vector2 hitDir = _boidSystem.LastPlayerHitVelocity.LengthSquared() > 0.01f
+                        ? _boidSystem.LastPlayerHitVelocity.Normalized()
+                        : Vector2.Right;
+                    _playerCore.TakeDamage(_boidSystem.PlayerCoreHitsThisFrame * 40.0f, hitDir);
+                }
             }
 
             UpdateClashSparks(dt);
@@ -2124,6 +2211,10 @@ public partial class SwarmSimulation : Node2D
                 ScannerCount = liveScanner;
                 MiningCount = liveMining;
                 RefreshFoundryGui();
+            }
+            else if (_isChargingDrill || _isGigaDrillActive)
+            {
+                RefreshTacticalDockGui();
             }
         }
         catch (Exception ex)
@@ -2422,11 +2513,11 @@ public partial class SwarmSimulation : Node2D
                 : Mathf.Clamp(0.24f + primingRatio * 0.38f, 0.24f, 0.62f);
 
             float mainJetLen = _isBoostFullPower
-                ? Mathf.Lerp(220.0f, 430.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.6f))
-                : Mathf.Lerp(95.0f, 195.0f, primingRatio) * (0.92f + 0.08f * MathF.Sin(pulse * 6.0f));
+                ? Mathf.Lerp(250.0f, 470.0f, power) * (0.94f + 0.06f * MathF.Sin(pulse * 3.6f))
+                : Mathf.Lerp(115.0f, 225.0f, primingRatio) * (0.92f + 0.08f * MathF.Sin(pulse * 6.0f));
             float plumeWidth = _isBoostFullPower
-                ? (76.0f + 58.0f * power)
-                : (42.0f + 34.0f * primingRatio);
+                ? (108.0f + 78.0f * power)
+                : (58.0f + 46.0f * primingRatio);
             Vector2 midPos = focalChamberPos + backDir * (mainJetLen * 0.48f);
 
             _plasmaBoostMesh.Visible = true;
@@ -2860,6 +2951,8 @@ public partial class SwarmSimulation : Node2D
 
             swarm.State = SwarmState.ChargingDrill;
             swarm.FormationIndex = tempCounter;
+            swarm.MaxHealth = 1;
+            swarm.Health = 1;
             sortList.Add((pos.Value.DistanceSquaredTo(frontAnchor), tempCounter));
             tempCounter++;
         });
@@ -2887,6 +2980,23 @@ public partial class SwarmSimulation : Node2D
             }
         });
 
+        // 1. REKRUT SCANNER DRONE (Seeker Hub di bawah Defender Cone): maksimal 1 unit
+        int scannerFound = 0;
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
+        {
+            if (scannerFound >= 1) return;
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.ScannerDrone && (swarm.State == SwarmState.Orbiting || swarm.State == SwarmState.Returning))
+            {
+                swarm.State = SwarmState.ChargingDrill;
+                swarm.FormationIndex = 0;
+                swarm.MaxHealth = 1;
+                swarm.Health = 1;
+                scannerFound++;
+            }
+        });
+        _activeDrillScannerCount = scannerFound;
+
+        // 2. REKRUT GUARDIAN (Ablative AP Radome Cone): 25% kuota (3 HP per guardian)
         int readyDefenderCount = 0;
         _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
         {
@@ -2906,17 +3016,84 @@ public partial class SwarmSimulation : Node2D
             {
                 swarm.State = SwarmState.ChargingDrill;
                 swarm.FormationIndex = defCounter;
+                swarm.MaxHealth = 5;
+                swarm.Health = 5;
                 defCounter++;
             }
         });
-
         _activeDefenderCoreCount = defCounter;
+
+        // 3. REKRUT DART NEEDLE (Canard Steering Fins / Lateral RCS): up to 6 unit genap (3 kiri, 3 kanan) - 1 HP (1 hit destroy)
+        int readyDartCount = 0;
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
+        {
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DartNeedle && swarm.State == SwarmState.Orbiting)
+            {
+                readyDartCount++;
+            }
+        });
+
+        int dartCanardQuota = Math.Min(6, (readyDartCount / 2) * 2);
+        int dartCounter = 0;
+
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
+        {
+            if (dartCounter >= dartCanardQuota) return;
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DartNeedle && swarm.State == SwarmState.Orbiting)
+            {
+                swarm.State = SwarmState.ChargingDrill;
+                swarm.FormationIndex = dartCounter;
+                // Genap = Sisi Kanan (+1), Ganjil = Sisi Kiri (-1)
+                swarm.AssignedSector = (dartCounter % 2 == 0) ? 1 : -1;
+                swarm.MaxHealth = 1;
+                swarm.Health = 1;
+                dartCounter++;
+            }
+        });
+        _activeDrillCanardDartCount = dartCounter;
+        _activeDrillCanardRightCount = dartCounter / 2;
+        _activeDrillCanardLeftCount = dartCounter / 2;
+        RefreshTacticalDockGui();
+    }
+
+    private void CancelGigaDrillChargeDueToDestruction(Vector2 corePos, Vector2 aimDir)
+    {
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        {
+            if (swarm.OwnerId == 0 && swarm.State == SwarmState.ChargingDrill)
+            {
+                swarm.State = SwarmState.Orbiting;
+                vis.Color = vis.BaseColor;
+                vis.Scale = (swarm.Role == SwarmRole.Guardian) ? 1.15f : 0.95f;
+            }
+        });
+
+        _isChargingDrill = false;
+        _drillChargeTimer = 0.0f;
+        _drillChargeInterrupted = true;
+        _activeDrillFormationCount = 0;
+        _activeDefenderCoreCount = 0;
+        _activeDrillScannerCount = 0;
+        _activeDrillCanardDartCount = 0;
+        _activeDrillCanardRightCount = 0;
+        _activeDrillCanardLeftCount = 0;
+
+        Vector2 detPos = corePos + aimDir * 56.0f;
+        TriggerClashAnimation(detPos, dropScrap: true);
+        EmitSignal(SignalName.GigaDrillDetonated, detPos, corePos, 0);
+        RefreshFoundryGui();
     }
 
     private void HandleGigaDrillCharge(float dt, Vector2 corePos, Vector2 coreVel, Vector2 mousePos)
     {
         if (Input.IsMouseButtonPressed(MouseButton.Right) && !_isGigaDrillActive)
         {
+            if (_drillChargeInterrupted)
+            {
+                // Perakitan bor telah hancur oleh peluru musuh; tunggu sampai pemain melepas klik kanan sebelum charge baru
+                return;
+            }
+
             Vector2 toMouse = mousePos - corePos;
             Vector2 aimDir = toMouse.LengthSquared() > 1.0f ? toMouse.Normalized() : Vector2.Right;
             Vector2 tangent = new Vector2(-aimDir.Y, aimDir.X);
@@ -2929,7 +3106,101 @@ public partial class SwarmSimulation : Node2D
             _drillChargeTimer += dt;
             float chargeProgress = DrillChargeRatio;
 
-            float spinSpeed = Mathf.Lerp(9.0f, 38.0f, chargeProgress * chargeProgress);
+            // Recount unit yang masih hidup selama perakitan/priming (jika terkena tembakan musuh)
+            int aliveDrillers = 0;
+            int aliveDefenders = 0;
+            int aliveScanners = 0;
+            int aliveRightCanards = 0;
+            int aliveLeftCanards = 0;
+
+            _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
+            {
+                if (s.OwnerId == 0 && s.State == SwarmState.ChargingDrill)
+                {
+                    if (s.Role == SwarmRole.DrillDrone)
+                    {
+                        s.FormationIndex = aliveDrillers++;
+                    }
+                    else if (s.Role == SwarmRole.Guardian)
+                    {
+                        s.FormationIndex = aliveDefenders++;
+                    }
+                    else if (s.Role == SwarmRole.ScannerDrone)
+                    {
+                        aliveScanners++;
+                    }
+                    else if (s.Role == SwarmRole.DartNeedle)
+                    {
+                        if (s.AssignedSector == 1)
+                        {
+                            s.FormationIndex = aliveRightCanards * 2;
+                            aliveRightCanards++;
+                        }
+                        else
+                        {
+                            s.FormationIndex = aliveLeftCanards * 2 + 1;
+                            aliveLeftCanards++;
+                        }
+                    }
+                }
+            });
+
+            if (aliveScanners == 0)
+            {
+                // Rekrut scanner cadangan dari orbit jika scanner sebelumnya tertembak hancur saat perakitan
+                _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
+                {
+                    if (aliveScanners >= 1) return;
+                    if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.ScannerDrone && 
+                        (swarm.State == SwarmState.Orbiting || swarm.State == SwarmState.Returning))
+                    {
+                        swarm.State = SwarmState.ChargingDrill;
+                        swarm.FormationIndex = 0;
+                        swarm.MaxHealth = 1;
+                        swarm.Health = 1;
+                        aliveScanners++;
+                    }
+                });
+            }
+
+            _activeDrillFormationCount = aliveDrillers;
+            _activeDefenderCoreCount = aliveDefenders;
+            _activeDrillScannerCount = aliveScanners;
+            _activeDrillCanardRightCount = aliveRightCanards;
+            _activeDrillCanardLeftCount = aliveLeftCanards;
+            _activeDrillCanardDartCount = aliveRightCanards + aliveLeftCanards;
+
+            // Jika semua driller hancur saat priming ditembaki musuh -> priming meledak & batalkan rakitan
+            if (aliveDrillers == 0)
+            {
+                CancelGigaDrillChargeDueToDestruction(corePos, aimDir);
+                return;
+            }
+
+            // =========================================================================
+            // 4-STAGE ACCELERATED ROTATION SEQUENCE (Total 2.5s Priming)
+            // Fase 1 (0.00-0.22): 0 rad/s (Tenang, Blueprint Hologram & Scanner Socketing)
+            // Fase 2 (0.22-0.50): 2.5 -> 7 rad/s (Torsi gir berat saat Guardian berlabuh)
+            // Fase 3 (0.50-0.75): 7.0 -> 26 rad/s (Akselerasi torsi spiral ulir bor)
+            // Fase 4 (0.75-1.00): 26.0 -> 52 rad/s (Full Overdrive Roar saat Canards menempel)
+            // =========================================================================
+            float spinSpeed;
+            if (chargeProgress < 0.22f)
+            {
+                spinSpeed = 0.0f;
+            }
+            else if (chargeProgress < 0.50f)
+            {
+                spinSpeed = Mathf.Lerp(2.5f, 7.0f, (chargeProgress - 0.22f) / 0.28f);
+            }
+            else if (chargeProgress < 0.75f)
+            {
+                spinSpeed = Mathf.Lerp(7.0f, 26.0f, (chargeProgress - 0.50f) / 0.25f);
+            }
+            else
+            {
+                spinSpeed = Mathf.Lerp(26.0f, 52.0f, (chargeProgress - 0.75f) / 0.25f);
+            }
             _gigaDrillSpinTime += dt * spinSpeed;
 
             int totalUnits = Math.Max(1, _activeDrillFormationCount);
@@ -2938,7 +3209,6 @@ public partial class SwarmSimulation : Node2D
             float desiredTipDist = 52.0f + chargeProgress * 38.0f;
             if (TryRaycastClosestAsteroidVoxel(corePos, aimDir, desiredTipDist + 10.0f, out _, out VoxelRayHit chargeHit))
             {
-                // Jangan biarkan ujung bor menembus melewati kulit pinggir asteroid saat sedang charge di dekat batu!
                 desiredTipDist = MathF.Min(desiredTipDist, MathF.Max(16.0f, chargeHit.Distance));
             }
             Vector2 tipPos = corePos + aimDir * desiredTipDist;
@@ -2960,6 +3230,41 @@ public partial class SwarmSimulation : Node2D
                 if (swarm.State != SwarmState.ChargingDrill || swarm.OwnerId != 0)
                     return;
 
+                // -------------------------------------------------------------
+                // FASE 1: SCANNER DRONE DOCKING (Seeker Socket tepat di belakang tip)
+                // -------------------------------------------------------------
+                if (swarm.Role == SwarmRole.ScannerDrone)
+                {
+                    int defTotal = Math.Max(1, _activeDefenderCoreCount);
+                    float defConeLength = (_activeDefenderCoreCount > 0) ? MathF.Min(56.0f, 20.0f + MathF.Sqrt(defTotal) * 6.5f) : 22.0f;
+                    Vector2 seekerSocket = tipPos + aimDir * (defConeLength * 0.38f);
+
+                    float scanProgress = Mathf.Clamp(chargeProgress / 0.20f, 0.0f, 1.0f);
+                    float scanLock = scanProgress * scanProgress * (3.0f - 2.0f * scanProgress);
+
+                    Vector2 toSocket = seekerSocket - pos.Value;
+                    Vector2 scanTargetVel = toSocket * Mathf.Lerp(12.0f, 36.0f, scanLock) + coreVel;
+                    vel.Value = vel.Value.Lerp(scanTargetVel, MathF.Min(1.0f, (8.0f + 20.0f * scanLock) * dt));
+                    pos.Value += vel.Value * dt;
+
+                    if (scanLock > 0.60f)
+                    {
+                        float lockFactor = (scanLock - 0.60f) / 0.40f;
+                        pos.Value = pos.Value.Lerp(seekerSocket, lockFactor * MathF.Min(1.0f, 24.0f * dt));
+                    }
+
+                    GigaDrillScannerPosition = pos.Value;
+                    swarm.SpinAngle = aimDir.Angle() + Mathf.Pi * 0.5f;
+
+                    float pulseScan = (chargeProgress >= 0.18f) ? (0.85f + 0.15f * MathF.Sin(_gigaDrillSpinTime * 6.0f)) : 1.0f;
+                    vis.Color = new Color(0.9f * pulseScan, 3.8f * pulseScan, 5.5f * pulseScan, 1.0f);
+                    vis.Scale = 1.15f * pulseScan;
+                    return;
+                }
+
+                // -------------------------------------------------------------
+                // FASE 2: GUARDIAN BALLISTIC RADOME INTERLOCKING (0.20 - 0.50)
+                // -------------------------------------------------------------
                 if (swarm.Role == SwarmRole.Guardian)
                 {
                     int defTotal = Math.Max(1, _activeDefenderCoreCount);
@@ -2976,11 +3281,11 @@ public partial class SwarmSimulation : Node2D
                                          + defT * (Mathf.Tau * 2.0f)
                                          + _gigaDrillSpinTime * 0.95f;
 
-                    float defActivationDelay = (1.0f - defT) * 0.35f;
-                    float defLocalProgress = Mathf.Clamp((chargeProgress - defActivationDelay) / 0.55f, 0.0f, 1.0f);
+                    float defActivationDelay = 0.18f + (1.0f - defT) * 0.14f;
+                    float defLocalProgress = Mathf.Clamp((chargeProgress - defActivationDelay) / 0.24f, 0.0f, 1.0f);
                     float defSmoothLock = defLocalProgress * defLocalProgress * (3.0f - 2.0f * defLocalProgress);
 
-                    float defVortexExpansion = (1.0f - defSmoothLock) * (32.0f + defR * 1.35f);
+                    float defVortexExpansion = (1.0f - defSmoothLock) * (34.0f + defR * 1.35f);
                     float defCurrentR = defR + defVortexExpansion;
 
                     Vector2 defSlotPos = (tipPos + aimDir * defDistForward)
@@ -2988,16 +3293,16 @@ public partial class SwarmSimulation : Node2D
                                        + (aimDir * (0.18f * defCurrentR * MathF.Sin(defSpiralAngle)));
 
                     Vector2 toDefSlot = defSlotPos - pos.Value;
-                    float defPull = Mathf.Lerp(8.0f, 26.0f, defSmoothLock);
+                    float defPull = Mathf.Lerp(8.0f, 28.0f, defSmoothLock);
                     Vector2 defTargetVel = toDefSlot * defPull + coreVel;
 
-                    vel.Value = vel.Value.Lerp(defTargetVel, MathF.Min(1.0f, (7.0f + 16.0f * defSmoothLock) * dt));
+                    vel.Value = vel.Value.Lerp(defTargetVel, MathF.Min(1.0f, (7.0f + 18.0f * defSmoothLock) * dt));
                     pos.Value += vel.Value * dt;
 
                     if (defSmoothLock > 0.65f)
                     {
                         float defLockFactor = (defSmoothLock - 0.65f) / 0.35f;
-                        pos.Value = pos.Value.Lerp(defSlotPos, defLockFactor * MathF.Min(1.0f, 18.0f * dt));
+                        pos.Value = pos.Value.Lerp(defSlotPos, defLockFactor * MathF.Min(1.0f, 22.0f * dt));
                     }
 
                     swarm.SpinAngle = aimDir.Angle() + Mathf.Pi * 0.5f + MathF.Sin(defSpiralAngle) * 0.35f;
@@ -3008,6 +3313,62 @@ public partial class SwarmSimulation : Node2D
                     return;
                 }
 
+                // -------------------------------------------------------------
+                // FASE 4: DART NEEDLE LATERAL CANARDS (0.68 - 1.00)
+                // Diposisikan di ujung depan dekat tip (momen lengan torsi kemudi)
+                // Tanpa semburan thruster saat priming! Bersih & presisi terkunci.
+                // -------------------------------------------------------------
+                if (swarm.Role == SwarmRole.DartNeedle)
+                {
+                    int cIdx = swarm.FormationIndex;
+                    float side = (cIdx % 2 == 0) ? 1.0f : -1.0f;
+                    int slotRank = cIdx / 2;
+
+                    float canardDist = drillLength * (0.05f + slotRank * 0.055f);
+                    float bodyRadiusAtSlot = drillBaseRadius * MathF.Pow(MathF.Max(0.04f, canardDist / MathF.Max(1.0f, drillLength)), 0.82f);
+                    float rCanard = bodyRadiusAtSlot + 14.0f + slotRank * 4.5f;
+
+                    float canardDelay = 0.68f + slotRank * 0.05f;
+                    float dartProg = Mathf.Clamp((chargeProgress - canardDelay) / 0.18f, 0.0f, 1.0f);
+                    float dartLock = dartProg * dartProg * (3.0f - 2.0f * dartProg);
+
+                    float floatOffset = (1.0f - dartLock) * (34.0f + rCanard * 0.7f);
+                    Vector2 targetCanardPos = (tipPos - aimDir * canardDist)
+                                            + (tangent * (side * (rCanard + floatOffset)));
+
+                    Vector2 toCanard = targetCanardPos - pos.Value;
+                    float dartPull = Mathf.Lerp(9.0f, 32.0f, dartLock);
+                    Vector2 dartTargetVel = toCanard * dartPull + coreVel;
+
+                    vel.Value = vel.Value.Lerp(dartTargetVel, MathF.Min(1.0f, (8.0f + 22.0f * dartLock) * dt));
+                    pos.Value += vel.Value * dt;
+
+                    if (dartLock > 0.60f)
+                    {
+                        float lockFactor = (dartLock - 0.60f) / 0.40f;
+                        pos.Value = pos.Value.Lerp(targetCanardPos, lockFactor * MathF.Min(1.0f, 24.0f * dt));
+                    }
+
+                    float canardAngle = aimDir.Rotated(side * 0.18f).Angle() + Mathf.Pi * 0.5f;
+                    swarm.SpinAngle = Mathf.LerpAngle(swarm.SpinAngle, canardAngle, MathF.Min(1.0f, 20.0f * dt));
+
+                    // Tidak mengeluarkan thruster saat priming: bersih, presisi terkunci
+                    if (dartLock < 0.85f)
+                    {
+                        vis.Color = new Color(1.6f, 2.4f, 0.35f, 1.0f);
+                        vis.Scale = 1.0f;
+                    }
+                    else
+                    {
+                        vis.Color = new Color(2.4f, 3.8f, 0.6f, 1.0f);
+                        vis.Scale = 1.15f;
+                    }
+                    return;
+                }
+
+                // -------------------------------------------------------------
+                // FASE 3: DRILL DRONE SPIRAL BODY CLAMPING & NOZZLE (0.42 - 0.76)
+                // -------------------------------------------------------------
                 if (swarm.Role != SwarmRole.DrillDrone)
                     return;
 
@@ -3015,8 +3376,12 @@ public partial class SwarmSimulation : Node2D
                 bool isExhaustStage = idx >= exhaustStartIdx;
                 float t = (totalUnits > 1) ? (float)idx / (totalUnits - 1) : 0.0f;
 
-                float activationDelay = t * 0.44f;
-                float localProgress = Mathf.Clamp((chargeProgress - activationDelay) / 0.54f, 0.0f, 1.0f);
+                float bodyT = (exhaustStartIdx > 1) ? (float)idx / (exhaustStartIdx - 1) : 0.0f;
+                float exhaustCount = Math.Max(1, totalUnits - exhaustStartIdx);
+                float exhaustT = (float)(idx - exhaustStartIdx) / exhaustCount;
+
+                float activationDelay = isExhaustStage ? (0.64f + exhaustT * 0.12f) : (0.42f + bodyT * 0.22f);
+                float localProgress = Mathf.Clamp((chargeProgress - activationDelay) / 0.22f, 0.0f, 1.0f);
                 float smoothLock = localProgress * localProgress * (3.0f - 2.0f * localProgress);
 
                 float d;
@@ -3025,7 +3390,6 @@ public partial class SwarmSimulation : Node2D
 
                 if (!isExhaustStage)
                 {
-                    float bodyT = (exhaustStartIdx > 1) ? (float)idx / (exhaustStartIdx - 1) : 0.0f;
                     d = bodyT * (drillLength * 0.84f);
 
                     int shell = idx % shellCount;
@@ -3047,9 +3411,6 @@ public partial class SwarmSimulation : Node2D
                 }
                 else
                 {
-                    int exhaustCount = Math.Max(1, totalUnits - exhaustStartIdx);
-                    float exhaustT = (float)(idx - exhaustStartIdx) / exhaustCount;
-
                     d = drillLength * (0.84f + exhaustT * 0.20f);
                     rCone = drillBaseRadius * (0.55f + 0.55f * exhaustT);
 
@@ -3127,34 +3488,40 @@ public partial class SwarmSimulation : Node2D
                 }
             }
         }
-        else if (_isChargingDrill)
+        else
         {
-            _isChargingDrill = false;
-            float chargeProgress = DrillChargeRatio;
-
-            Vector2 toMouse = mousePos - corePos;
-            Vector2 aimDir = toMouse.LengthSquared() > 1.0f ? toMouse.Normalized() : Vector2.Right;
-
-            if (chargeProgress >= 0.30f && _activeDrillFormationCount > 0)
+            _drillChargeInterrupted = false;
+            if (_isChargingDrill)
             {
-                LaunchSuperGigaDrill(corePos, aimDir, mousePos, chargeProgress);
-            }
-            else
-            {
-                _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+                _isChargingDrill = false;
+                float chargeProgress = DrillChargeRatio;
+
+                Vector2 toMouse = mousePos - corePos;
+                Vector2 aimDir = toMouse.LengthSquared() > 1.0f ? toMouse.Normalized() : Vector2.Right;
+
+                if (chargeProgress >= 0.25f && _activeDrillFormationCount > 0)
                 {
-                    if (swarm.State == SwarmState.ChargingDrill)
+                    LaunchSuperGigaDrill(corePos, aimDir, mousePos, chargeProgress);
+                }
+                else
+                {
+                    _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
                     {
-                        swarm.State = SwarmState.Orbiting;
-                        vis.Color = vis.BaseColor;
-                        vis.Scale = (swarm.Role == SwarmRole.Guardian) ? 1.15f : 0.95f;
-                    }
-                });
-                _activeDefenderCoreCount = 0;
-                FireSwarmVolley(mousePos, 25);
-            }
+                        if (swarm.State == SwarmState.ChargingDrill)
+                        {
+                            swarm.State = SwarmState.Orbiting;
+                            vis.Color = vis.BaseColor;
+                            vis.Scale = (swarm.Role == SwarmRole.Guardian) ? 1.15f : 0.95f;
+                        }
+                    });
+                    _activeDefenderCoreCount = 0;
+                    _activeDrillScannerCount = 0;
+                    _activeDrillCanardDartCount = 0;
+                    FireSwarmVolley(mousePos, 25);
+                }
 
-            _drillChargeTimer = 0.0f;
+                _drillChargeTimer = 0.0f;
+            }
         }
     }
 
@@ -3219,6 +3586,117 @@ public partial class SwarmSimulation : Node2D
         vis.Scale = 1.42f;
     }
 
+    private static void IgniteCanardAsRCSBurn(
+        ref PositionComponent pos,
+        ref VelocityComponent vel,
+        ref SwarmUnitComponent swarm,
+        ref VisualComponent vis,
+        Vector2 canardPos,
+        Vector2 fireDir,
+        float exhaustSpeed)
+    {
+        swarm.State = SwarmState.DrillExhaust;
+        swarm.LifeTime = 0.0f;
+        swarm.MaxLifeTime = 0.24f + GD.Randf() * 0.12f;
+
+        pos.Value = canardPos;
+        float speed = exhaustSpeed * (0.85f + GD.Randf() * 0.30f);
+        float spread = (GD.Randf() - 0.5f) * 0.25f;
+        vel.Value = fireDir.Rotated(spread) * speed;
+
+        vis.Color = new Color(7.8f, 7.5f, 9.2f, 1.0f);
+        vis.Scale = 1.30f;
+    }
+
+    private void BurnOneCanardDart(int targetSide = 0)
+    {
+        if (_activeDrillCanardDartCount <= 0) return;
+
+        int targetDartIdx = -1;
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
+        {
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DartNeedle && swarm.State == SwarmState.Launched)
+            {
+                if (targetSide == 0 || swarm.AssignedSector == targetSide)
+                {
+                    if (swarm.FormationIndex > targetDartIdx)
+                    {
+                        targetDartIdx = swarm.FormationIndex;
+                    }
+                }
+            }
+        });
+
+        // Fallback jika sisi target habis tapi masih ada dart di sisi lain
+        if (targetDartIdx < 0 && targetSide != 0)
+        {
+            _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent swarm) =>
+            {
+                if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DartNeedle && swarm.State == SwarmState.Launched)
+                {
+                    if (swarm.FormationIndex > targetDartIdx)
+                    {
+                        targetDartIdx = swarm.FormationIndex;
+                    }
+                }
+            });
+        }
+
+        if (targetDartIdx >= 0)
+        {
+            bool burned = false;
+            _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+            {
+                if (burned) return;
+                if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DartNeedle && swarm.State == SwarmState.Launched && swarm.FormationIndex == targetDartIdx)
+                {
+                    float side = (swarm.AssignedSector == 1) ? 1.0f : -1.0f;
+                    Vector2 rcsExhaustDir = (-_gigaDrillAimDir).Rotated(side * 0.35f);
+
+                    IgniteCanardAsRCSBurn(ref pos, ref vel, ref swarm, ref vis, pos.Value, rcsExhaustDir, 840.0f);
+                    if (swarm.AssignedSector == 1)
+                    {
+                        _activeDrillCanardRightCount = Math.Max(0, _activeDrillCanardRightCount - 1);
+                    }
+                    else
+                    {
+                        _activeDrillCanardLeftCount = Math.Max(0, _activeDrillCanardLeftCount - 1);
+                    }
+                    _activeDrillCanardDartCount = Math.Max(0, _activeDrillCanardDartCount - 1);
+                    burned = true;
+                }
+            });
+        }
+    }
+
+    private void TriggerRearIgnitionAfterAlignment()
+    {
+        _isGigaDrillAligning = false;
+        _gigaDrillCanardFireSide = 0.0f;
+        _gigaDrillCanardPulseActive = false;
+        _gigaDrillVel = _gigaDrillAimDir * _gigaDrillLaunchSpeed;
+
+        int totalUnits = Math.Max(1, _activeDrillFormationCount);
+        ComputeGigaDrillDimensions(totalUnits, out float drillLength, out _, out _);
+        Vector2 nozzlePos = _gigaDrillTipPos - _gigaDrillAimDir * drillLength;
+
+        // Picu guncangan kamera dan ledakan radial di pangkal bor
+        EmitSignal(SignalName.GigaDrillLaunched, _gigaDrillTipPos, nozzlePos, _gigaDrillAimDir, _gigaDrillLaunchCharge);
+
+        // Nyalakan unit exhaust driller terawal jika trigger time <= 0.04s
+        int exhaustStartIdx = _gigaDrillExhaustStartIndex;
+        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+        {
+            if (swarm.OwnerId == 0 && swarm.Role == SwarmRole.DrillDrone && swarm.State == SwarmState.Launched)
+            {
+                if (swarm.ExhaustTriggerTime >= 0.0f && swarm.ExhaustTriggerTime <= 0.04f)
+                {
+                    IgniteUnitAsExhaust(ref pos, ref vel, ref swarm, ref vis, nozzlePos, _gigaDrillAimDir, 1050.0f);
+                }
+            }
+        });
+    }
+
     private void LaunchSuperGigaDrill(Vector2 corePos, Vector2 aimDir, Vector2 targetPos, float chargeProgress)
     {
         _isGigaDrillActive = true;
@@ -3231,28 +3709,42 @@ public partial class SwarmSimulation : Node2D
         _drillEnemyGrindTimer = 0.0f;
         _drillAttritionTimer = 0.0f;
 
+        _gigaDrillLaunchOrigin = corePos;
         _gigaDrillSafeOutsidePos = corePos;
         float launchTipDist = 52.0f + chargeProgress * 38.0f;
         if (TryRaycastClosestAsteroidVoxel(corePos, aimDir, launchTipDist + 10.0f, out _, out VoxelRayHit launchHit))
         {
             launchTipDist = MathF.Min(launchTipDist, MathF.Max(16.0f, launchHit.Distance));
         }
-        _gigaDrillTipPos = corePos + aimDir * launchTipDist;
-        _gigaDrillAimDir = aimDir;
+        _gigaDrillLinearDist = launchTipDist;
+        _gigaDrillAimDir = aimDir.Normalized();
+        _gigaDrillTipPos = _gigaDrillLaunchOrigin + _gigaDrillAimDir * _gigaDrillLinearDist;
         _gigaDrillTargetPos = targetPos;
         _hasDefenderNoseBreached = false;
-        _gigaDrillVel = aimDir * (1650.0f + chargeProgress * 450.0f);
+        _gigaDrillLaunchSpeed = 1000.0f;
+        _gigaDrillLaunchCharge = chargeProgress;
+        _canardSteerFuelAccumulator = 0.0f;
         _gigaDrillFlightTimer = GigaDrillFlightDuration;
         _gigaDrillElapsedFlight = 0.0f;
 
         int totalUnits = Math.Max(1, _activeDrillFormationCount);
+        ComputeGigaDrillDimensions(totalUnits, out float initDrillLength, out _, out _);
+        _gigaDrillHoverCenter = _gigaDrillTipPos - _gigaDrillAimDir * (initDrillLength * 0.5f);
+
+        // FASE 1 SETELAH RELEASE: Auto-Correction Phase (2.0 DETIK PENUH!)
+        // Seperti peluncuran dingin rudal: bor melayang diam di tempat selama 2.0 detik,
+        // canard dart memutar arah ke target dengan dorongan RCS dan scanner mengunci koordinat.
+        // Mesin utama belakang BELUM menyala!
+        _isGigaDrillAligning = true;
+        _gigaDrillAlignTimer = 2.0f;
+        _gigaDrillCanardPulseTimer = 0.0f;
+        _gigaDrillCanardFireSide = 0.0f;
+        _gigaDrillCanardPulseActive = false;
+        _gigaDrillAngularVel = 0.0f;
+        _gigaDrillVel = Vector2.Zero;
+
         int exhaustStartIdx = _gigaDrillExhaustStartIndex;
         int exhaustStageCount = Math.Max(1, totalUnits - exhaustStartIdx);
-
-        ComputeGigaDrillDimensions(totalUnits, out float drillLength, out float drillBaseRadius, out _);
-        Vector2 nozzlePos = _gigaDrillTipPos - aimDir * drillLength;
-
-        EmitSignal(SignalName.GigaDrillLaunched, _gigaDrillTipPos, nozzlePos, aimDir, chargeProgress);
 
         _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
         {
@@ -3261,17 +3753,18 @@ public partial class SwarmSimulation : Node2D
                 swarm.State = SwarmState.Launched;
                 if (swarm.Role == SwarmRole.Guardian)
                 {
-                    swarm.MaxHealth = 5; // Defender di Ballistic Shield punya 5 HP
-                    swarm.Health = 5;
+                    swarm.MaxHealth = 5; // Defender Ballistic Shield punya 5 HP (5 hit)
+                    if (swarm.Health <= 0 || swarm.Health > 5) swarm.Health = 5;
                 }
                 else
                 {
+                    // Semua bagian lain (Dart Needle, Scanner, Driller) memiliki 1 HP (1 hit destroy)
                     swarm.MaxHealth = 1;
-                    swarm.Health = 1;
+                    if (swarm.Health <= 0 || swarm.Health > 1) swarm.Health = 1;
                 }
                 swarm.TargetDirection = aimDir;
                 swarm.LifeTime = 0.0f;
-                swarm.MaxLifeTime = GigaDrillFlightDuration + 0.5f;
+                swarm.MaxLifeTime = GigaDrillFlightDuration + 2.5f;
 
                 if (swarm.Role == SwarmRole.DrillDrone)
                 {
@@ -3282,11 +3775,6 @@ public partial class SwarmSimulation : Node2D
                         int orderInExhaust = (totalUnits - 1) - swarm.FormationIndex;
                         float ratio = (float)(orderInExhaust + 1) / exhaustStageCount;
                         swarm.ExhaustTriggerTime = ratio * (GigaDrillFlightDuration * 0.90f);
-
-                        if (swarm.ExhaustTriggerTime <= 0.04f)
-                        {
-                            IgniteUnitAsExhaust(ref pos, ref vel, ref swarm, ref vis, nozzlePos, aimDir, 1050.0f);
-                        }
                     }
                     else
                     {
@@ -3299,6 +3787,8 @@ public partial class SwarmSimulation : Node2D
                 }
             }
         });
+
+        RefreshTacticalDockGui();
     }
 
     private void TriggerNoseShieldBreach(float defConeLength)
@@ -3331,57 +3821,279 @@ public partial class SwarmSimulation : Node2D
     {
         if (!_isGigaDrillActive) return;
 
-        int totalUnits = Math.Max(1, _activeDrillFormationCount);
-        int exhaustStartIdx = Math.Max(1, _gigaDrillExhaustStartIndex);
-        ComputeGigaDrillDimensions(totalUnits, out float drillLength, out float drillBaseRadius, out float densityFactor);
+        int aliveDrillers = 0;
+        int aliveDefenders = 0;
+        int aliveScanners = 0;
+        int aliveRightCanards = 0;
+        int aliveLeftCanards = 0;
 
-        // =====================================================================
-        // 1. CEK JARAK DEKAT ENEMY CORE -> PECAHKAN BALLISTIC SHIELD (DEFENDER)
-        // =====================================================================
-        if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
+        _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
         {
-            float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
-            float distToEnemyCore = (_enemyCore != null && IsInstanceValid(_enemyCore))
-                ? _gigaDrillTipPos.DistanceTo(_enemyCore.GlobalPosition)
-                : 9999.0f;
-            float shieldShatterDist = (_enemyCore != null && IsInstanceValid(_enemyCore))
-                ? (_enemyCore.CoreCollisionRadius + defConeLength + 42.0f)
-                : 130.0f;
-
-            int aliveConeDefenders = 0;
-            _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
+            if (s.OwnerId == 0 && s.State == SwarmState.Launched)
             {
-                if (s.OwnerId == 0 && s.Role == SwarmRole.Guardian && s.State == SwarmState.Launched)
+                if (s.Role == SwarmRole.DrillDrone && s.FormationIndex >= 0)
                 {
-                    aliveConeDefenders++;
+                    s.FormationIndex = aliveDrillers++;
                 }
-            });
+                else if (s.Role == SwarmRole.Guardian)
+                {
+                    s.FormationIndex = aliveDefenders++;
+                }
+                else if (s.Role == SwarmRole.ScannerDrone)
+                {
+                    aliveScanners++;
+                }
+                else if (s.Role == SwarmRole.DartNeedle && s.FormationIndex >= 0)
+                {
+                    // Jaga posisi canard di sisi aslinya (AssignedSector: 1 = Kanan, -1 = Kiri)
+                    if (s.AssignedSector == 1)
+                    {
+                        s.FormationIndex = aliveRightCanards * 2; // Genap = Sisi Kanan
+                        aliveRightCanards++;
+                    }
+                    else
+                    {
+                        s.FormationIndex = aliveLeftCanards * 2 + 1; // Ganjil = Sisi Kiri
+                        aliveLeftCanards++;
+                    }
+                }
+            }
+        });
 
-            if (aliveConeDefenders == 0)
-            {
-                _hasDefenderNoseBreached = true;
-                _activeDefenderCoreCount = 0;
-            }
-            else if (distToEnemyCore <= shieldShatterDist)
-            {
-                // Begitu dekat dengan Core, Ballistic Shield Defender pecah & mati semua!
-                TriggerNoseShieldBreach(defConeLength);
-            }
+        _activeDrillFormationCount = aliveDrillers;
+        _activeDefenderCoreCount = aliveDefenders;
+        _activeDrillScannerCount = aliveScanners;
+        _activeDrillCanardRightCount = aliveRightCanards;
+        _activeDrillCanardLeftCount = aliveLeftCanards;
+        _activeDrillCanardDartCount = aliveRightCanards + aliveLeftCanards;
+
+        if (_activeDefenderCoreCount == 0)
+        {
+            _hasDefenderNoseBreached = true;
         }
 
-        // =====================================================================
-        // 2. MEKANIK TABRAKAN KE ENEMY CORE (CORE-RAMMING SEQUENCE):
-        //    - Menabrak permukaan Core (TIDAK menembus) + Inersia Core berat
-        //    - Berhenti berputar sejenak (Stall)
-        //    - 0.5 detik berputar kencang selama sisa driller menggerus Core
-        //    - Saat hampir habis -> Meledak Spektakuler (Efek Grid + Supernova)
-        // =====================================================================
-        if (_enemyCore != null && IsInstanceValid(_enemyCore))
+        // Jika seluruh driller tertembak habis sebelum sampai -> bor hancur lebur di tengah jalan!
+        if (aliveDrillers == 0)
         {
-            float distToEnemy = _gigaDrillTipPos.DistanceTo(_enemyCore.GlobalPosition);
-            float coreContactDist = _enemyCore.CoreCollisionRadius + 8.0f;
+            _isGigaDrillActive = false;
+            _isGigaDrillAligning = false;
+            _isRammingEnemyCore = false;
+            _isGrindingAsteroid = false;
+            _gigaDrillFlightTimer = 0.0f;
+            Vector2 detPos = _gigaDrillTipPos;
+            Vector2 baseDetPos = _gigaDrillTipPos - _gigaDrillAimDir * 50.0f;
+            TriggerClashAnimation(detPos, dropScrap: true);
+            EmitSignal(SignalName.GigaDrillDetonated, detPos, baseDetPos, 0);
+            RefreshFoundryGui();
+            return;
+        }
 
-            if (_isRammingEnemyCore || distToEnemy <= coreContactDist)
+        bool hasScanner = (_activeDrillScannerCount > 0);
+        // FISIKA KEMUDI ASIMETRIS REALISTIS:
+        // Untuk belok KIRI (angleDiff < 0), thruster di sisi KANAN harus mendorong keluar -> butuh Dart Kanan!
+        // Jika Dart kanan hancur -> TIDAK BISA BELOK KIRI!
+        // Untuk belok KANAN (angleDiff > 0), thruster di sisi KIRI harus mendorong keluar -> butuh Dart Kiri!
+        // Jika Dart kiri hancur -> TIDAK BISA BELOK KANAN!
+        // Jika Scanner hancur -> TIDAK BISA BELOK SAMA SEKALI (buta arah, terbang lurus)!
+        bool canTurnLeft = hasScanner && (_activeDrillCanardRightCount > 0);
+        bool canTurnRight = hasScanner && (_activeDrillCanardLeftCount > 0);
+        bool canSteer = hasScanner && (_activeDrillCanardRightCount > 0 || _activeDrillCanardLeftCount > 0);
+
+        int totalUnits = Math.Max(1, _activeDrillFormationCount);
+        int exhaustStartIdx = Math.Min(_gigaDrillExhaustStartIndex, Math.Max(1, totalUnits - 1));
+        ComputeGigaDrillDimensions(totalUnits, out float drillLength, out float drillBaseRadius, out float densityFactor);
+
+        Vector2 wobbledAimDir = _gigaDrillAimDir;
+
+        // =====================================================================
+        // FASE ALIGNMENT (2.0 DETIK PENUH AUTO-CORRECTION DI TEMPAT):
+        // Scanner membidik musuh, Canard Dart menembak RCS puff untuk memutar moncong bor.
+        // Rudal melayang diam di tempat (hover in place). Thruster belakang OFF.
+        // Asimetris: Dart Kanan hancur -> tidak bisa belok kiri.
+        //           Dart Kiri hancur -> tidak bisa belok kanan.
+        //           Scanner hancur -> tidak bisa koreksi arah sama sekali.
+        // Setelah genap 2.0 detik -> picu thruster belakang dan meluncur cepat!
+        // =====================================================================
+        if (_isGigaDrillAligning)
+        {
+            _gigaDrillAlignTimer -= dt;
+            _gigaDrillCanardPulseTimer += dt;
+            _gigaDrillSpinTime += dt * 32.0f;
+
+            // Rudal melayang diam di tempat (pivot around hover center)
+            _gigaDrillVel = Vector2.Zero;
+
+            if (canSteer)
+            {
+                Vector2 alignTarget = (_enemyCore != null && IsInstanceValid(_enemyCore) && !_enemyCore.IsEscapePod && _enemyCore.Health > 0)
+                    ? _enemyCore.GlobalPosition
+                    : _gigaDrillTargetPos;
+
+                Vector2 toAlign = alignTarget - _gigaDrillHoverCenter;
+                Vector2 desiredAlignDir = (toAlign.LengthSquared() > 1.0f) ? toAlign.Normalized() : _gigaDrillAimDir;
+
+                float cross = _gigaDrillAimDir.Cross(desiredAlignDir);
+                float dot = _gigaDrillAimDir.Dot(desiredAlignDir);
+                float angleDiff = MathF.Atan2(cross, dot);
+
+                // Jika target hampir tepat berlawanan arah 180 derajat (dot < -0.98f):
+                // Pilih arah putar sesuai ketersediaan Canard Dart
+                if (dot < -0.98f)
+                {
+                    if (canTurnLeft && !canTurnRight)
+                        angleDiff = -MathF.PI;
+                    else if (canTurnRight && !canTurnLeft)
+                        angleDiff = MathF.PI;
+                }
+
+                // =========================================================================
+                // ATTITUDE CONTROL PD REALISTIS DENGAN INERSIA MASSA, OVERSHOOT & COUNTER-THRUST:
+                // Kp = 15.0 rad/s^2 per radian (tarikan torsi ke arah target)
+                // Kd = 4.2 rad/s^2 per (rad/s) (redaman pengereman canard lawan)
+                // =========================================================================
+                float desiredTorque = 15.0f * angleDiff - 4.2f * _gigaDrillAngularVel;
+                float maxCanardTorque = 18.0f; // rad/s^2 batas tenaga semburan canard
+                float appliedTorque = 0.0f;
+
+                // Torsi positif (putar ke kanan / CW): Diberikan oleh semburan Dart Kiri (canTurnRight)
+                // Torsi negatif (putar ke kiri / CCW): Diberikan oleh semburan Dart Kanan (canTurnLeft)
+                if (desiredTorque > 0.15f)
+                {
+                    if (canTurnRight)
+                    {
+                        appliedTorque = MathF.Min(desiredTorque, maxCanardTorque);
+                        _gigaDrillCanardFireSide = -1.0f; // Semburan thruster kiri aktif
+                        _gigaDrillCanardPulseActive = MathF.Sin(_gigaDrillCanardPulseTimer * 35.0f) > -0.2f;
+                    }
+                    else
+                    {
+                        // Dart kiri hancur -> tidak bisa beri torsi kanan / pengereman counter-thrust ke kanan
+                        _gigaDrillCanardFireSide = 0.0f;
+                        _gigaDrillCanardPulseActive = false;
+                    }
+                }
+                else if (desiredTorque < -0.15f)
+                {
+                    if (canTurnLeft)
+                    {
+                        appliedTorque = MathF.Max(desiredTorque, -maxCanardTorque);
+                        _gigaDrillCanardFireSide = 1.0f; // Semburan thruster kanan aktif
+                        _gigaDrillCanardPulseActive = MathF.Sin(_gigaDrillCanardPulseTimer * 35.0f) > -0.2f;
+                    }
+                    else
+                    {
+                        // Dart kanan hancur -> tidak bisa beri torsi kiri / pengereman counter-thrust ke kiri
+                        _gigaDrillCanardFireSide = 0.0f;
+                        _gigaDrillCanardPulseActive = false;
+                    }
+                }
+                else
+                {
+                    // Seimbang / dalam zona mati presisi: kedua canard istirahat
+                    _gigaDrillCanardFireSide = 0.0f;
+                    _gigaDrillCanardPulseActive = false;
+                }
+
+                _gigaDrillAngularVel += appliedTorque * dt;
+                _gigaDrillAngularVel *= MathF.Exp(-2.2f * dt); // Hambatan angular pasif
+                _gigaDrillAngularVel = Math.Clamp(_gigaDrillAngularVel, -3.8f, 3.8f);
+
+                _gigaDrillAimDir = _gigaDrillAimDir.Rotated(_gigaDrillAngularVel * dt).Normalized();
+            }
+            else
+            {
+                // Tidak ada scanner atau dart: inersia perlahan mereda, bor melayang diam tanpa koreksi arah
+                _gigaDrillAngularVel *= MathF.Exp(-3.5f * dt);
+                _gigaDrillAimDir = _gigaDrillAimDir.Rotated(_gigaDrillAngularVel * dt).Normalized();
+                _gigaDrillCanardFireSide = 0.0f;
+                _gigaDrillCanardPulseActive = false;
+            }
+
+            // =====================================================================
+            // FISIKA GOYANGAN MELAYANG & HENTAKAN REAKSI RCS (HOVER OSCILLATION):
+            // 1. Ayunan melayang bebas (microgravity float drift)
+            // 2. Sentakan getar impuls RCS (RCS Thruster Kick & Micro-shudder)
+            // 3. Goyangan sudut orientasi (Angular torque oscillation & overshoot damping)
+            // =====================================================================
+            float elapsedAlign = 2.0f - _gigaDrillAlignTimer;
+            bool isFiring = _gigaDrillCanardPulseActive && _gigaDrillCanardFireSide != 0.0f;
+
+            Vector2 baseTangent = new Vector2(-_gigaDrillAimDir.Y, _gigaDrillAimDir.X);
+            float driftLat = MathF.Sin(elapsedAlign * 4.6f) * 2.4f + MathF.Sin(elapsedAlign * 11.2f) * 0.9f;
+            float driftAxial = MathF.Cos(elapsedAlign * 3.6f) * 1.5f;
+
+            float rcsKick = (isFiring ? 1.0f : 0.0f) * (_gigaDrillCanardFireSide * 2.8f + MathF.Sin(_gigaDrillCanardPulseTimer * 42.0f) * 1.6f);
+            Vector2 hoverWobble = baseTangent * (driftLat + rcsKick) + _gigaDrillAimDir * driftAxial;
+
+            float angularWobble = isFiring
+                ? (MathF.Sin(_gigaDrillCanardPulseTimer * 32.0f) * 0.035f + (GD.Randf() - 0.5f) * 0.016f)
+                : (MathF.Sin(elapsedAlign * 5.2f) * 0.014f);
+
+            wobbledAimDir = _gigaDrillAimDir.Rotated(angularWobble).Normalized();
+
+            Vector2 currentHoverCenter = _gigaDrillHoverCenter + hoverWobble;
+            _gigaDrillTipPos = currentHoverCenter + wobbledAimDir * (drillLength * 0.5f);
+            _gigaDrillSafeOutsidePos = _gigaDrillTipPos - wobbledAimDir * 24.0f;
+
+            // TIDAK ADA EARLY EXIT! Tunggu genap 2.0 detik penuh auto-correction di tempat!
+            if (_gigaDrillAlignTimer <= 0.0f)
+            {
+                TriggerRearIgnitionAfterAlignment();
+            }
+        }
+        else
+        {
+            // =====================================================================
+            // 1. CEK JARAK DEKAT ENEMY CORE -> PECAHKAN BALLISTIC SHIELD (DEFENDER)
+            // =====================================================================
+            if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0 && _enemyCore != null && IsInstanceValid(_enemyCore))
+            {
+                float defConeLength = MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f);
+                Vector2 toEnemyCore = _enemyCore.GlobalPosition - _gigaDrillTipPos;
+                float fwdCore = toEnemyCore.Dot(_gigaDrillAimDir);
+                float latCore = MathF.Abs(toEnemyCore.Cross(_gigaDrillAimDir));
+                float shieldShatterDist = _enemyCore.CoreCollisionRadius + defConeLength + 42.0f;
+
+                if (latCore <= (_enemyCore.CoreCollisionRadius + 20.0f) && fwdCore >= 0.0f && fwdCore <= shieldShatterDist)
+                {
+                    TriggerNoseShieldBreach(defConeLength);
+                }
+            }
+
+            // =====================================================================
+            // 2. MEKANIK TABRAKAN KE ENEMY CORE (CORE-RAMMING SEQUENCE):
+            //    - Menabrak permukaan Core (TIDAK menembus) + Inersia Core berat
+            //    - Berhenti berputar sejenak (Stall)
+            //    - 0.5 detik berputar kencang selama sisa driller menggerus Core
+            //    - Saat hampir habis -> Meledak Spektakuler (Efek Grid + Supernova)
+            // =====================================================================
+            if (_enemyCore != null && IsInstanceValid(_enemyCore))
+            {
+                float coreContactDist = _enemyCore.CoreCollisionRadius + 8.0f;
+                bool triggerRam = false;
+
+                if (_isRammingEnemyCore)
+                {
+                    triggerRam = true;
+                }
+                else
+                {
+                    // Cek tabrakan frontal (HANYA jika core berada di depan tip dan berpapasan pada koridor tabrak):
+                    Vector2 toEnemy = _enemyCore.GlobalPosition - _gigaDrillTipPos;
+                    float forwardDot = toEnemy.Dot(_gigaDrillAimDir);
+                    float lateralDist = MathF.Abs(toEnemy.Cross(_gigaDrillAimDir));
+                    float stepDist = _gigaDrillLaunchSpeed * dt;
+
+                    // Tabrakan hanya sah jika Core berada tepat di depan moncong bor dan dalam batas lateral radius Core!
+                    // Jika forwardDot < -4.0f (Core sudah berada di belakang moncong bor / overshoot),
+                    // maka bor SUDAH LEWAT -> JANGAN PERNAH ram atau teleport ke Core!
+                    if (lateralDist <= coreContactDist && forwardDot >= -4.0f && forwardDot <= (coreContactDist + stepDist))
+                    {
+                        triggerRam = true;
+                    }
+                }
+
+                if (triggerRam)
             {
                 if (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
                 {
@@ -3408,7 +4120,10 @@ public partial class SwarmSimulation : Node2D
                     _coreRamInitialDrillerCount = Math.Max(1, currentAlive);
 
                     // Dorongan inersia awal ke EnemyCore (Core sangat berat: bergeser mundur sedikit tanpa terpental jauh)
-                    _enemyCore.Velocity += _gigaDrillAimDir * 115.0f;
+                    if (!_enemyCore.ZeroKnockbackDebug)
+                    {
+                        _enemyCore.Velocity += _gigaDrillAimDir * 115.0f;
+                    }
                     EmitSignal(SignalName.SwarmClashImpulse, _gigaDrillTipPos, 1650.0f, 220.0f);
                 }
 
@@ -3422,7 +4137,10 @@ public partial class SwarmSimulation : Node2D
                 {
                     // FASE A: Berhenti berputar sejenak akibat impak keras menahan beban Core
                     _coreRamStallTimer -= dt;
-                    _enemyCore.Velocity += _gigaDrillAimDir * (135.0f * dt);
+                    if (!_enemyCore.ZeroKnockbackDebug)
+                    {
+                        _enemyCore.Velocity += _gigaDrillAimDir * (135.0f * dt);
+                    }
                     bool ejectedNow = _enemyCore.TakeDamage(950.0f * dt, _gigaDrillAimDir);
                     if (ejectedNow || _enemyCore.Health <= 0.0f)
                     {
@@ -3443,7 +4161,10 @@ public partial class SwarmSimulation : Node2D
                     _gigaDrillSpinTime += dt * 56.0f;
 
                     // Inersia berat terus menekan Core perlahan
-                    _enemyCore.Velocity += _gigaDrillAimDir * (95.0f * dt);
+                    if (!_enemyCore.ZeroKnockbackDebug)
+                    {
+                        _enemyCore.Velocity += _gigaDrillAimDir * (95.0f * dt);
+                    }
                     bool ejectedDuringSpin = _enemyCore.TakeDamage(2600.0f * dt, _gigaDrillAimDir);
                     if (ejectedDuringSpin)
                     {
@@ -3487,42 +4208,121 @@ public partial class SwarmSimulation : Node2D
             }
         }
 
-        // Jika tidak sedang menempel di Core, cek pergerakan maju dengan Swept Raycast terhadap kulit pinggir Asteroid
+        // Jika tidak sedang menempel di Core, gerakkan sepanjang rel garis lurus / kurva tracking
         if (!_isRammingEnemyCore)
         {
             _gigaDrillFlightTimer -= dt;
             _gigaDrillElapsedFlight += dt;
-            _gigaDrillSpinTime += dt * (_isGrindingAsteroid ? 52.0f : 44.0f);
+            _gigaDrillSpinTime += dt * (_isGrindingAsteroid ? 54.0f : 44.0f);
 
             if (!_isGrindingAsteroid)
             {
-                Vector2 nextTip = _gigaDrillTipPos + _gigaDrillVel * dt;
-                float sweepDist = _gigaDrillSafeOutsidePos.DistanceTo(nextTip) + 8.0f;
+                // =========================================================
+                // AKTIF KOREKSI ARAH (HOMING/TRACKING) MENGGUNAKAN DART CANARD
+                // HANYA JIKA canSteer == true (Scanner + Dart keduanya aktif!)
+                // OPSI A: TERMINAL COMMIT ZONE (< 180 px) & OVERSHOOT PROTECTION
+                // =========================================================
+                if (canSteer)
+                {
+                    Vector2 flightTarget = (_enemyCore != null && IsInstanceValid(_enemyCore) && !_enemyCore.IsEscapePod && _enemyCore.Health > 0)
+                        ? _enemyCore.GlobalPosition
+                        : _gigaDrillTargetPos;
+                    Vector2 toTgt = flightTarget - _gigaDrillTipPos;
+                    float distToTargetSq = toTgt.LengthSquared();
+                    const float TerminalCommitDistance = 180.0f;
+                    const float TerminalCommitDistSq = TerminalCommitDistance * TerminalCommitDistance;
+
+                    Vector2 desiredFlightDir = (distToTargetSq > 1.0f) ? toTgt.Normalized() : _gigaDrillAimDir;
+                    float fDot = _gigaDrillAimDir.Dot(desiredFlightDir);
+
+                    // Opsi A: Hanya belok jika masih di luar terminal commit zone (> 180 px)
+                    // DAN target masih berada di sektor depan seeker (fDot > 0.20f, ~78 derajat).
+                    // Jika musuh sudah terlalu dekat (< 180 px) atau sudah lewat ke belakang (overshoot),
+                    // bor mengunci arah lurus menusuk ke depan tanpa banting setir tajam/patah!
+                    if (distToTargetSq > TerminalCommitDistSq && fDot > 0.20f)
+                    {
+                        float fCross = _gigaDrillAimDir.Cross(desiredFlightDir);
+                        float fAngleDiff = MathF.Atan2(fCross, fDot);
+
+                        // FISIKA KEMUDI:
+                        // Belok Kiri (fAngleDiff < 0) butuh Dart Kanan (canTurnLeft).
+                        // Belok Kanan (fAngleDiff > 0) butuh Dart Kiri (canTurnRight).
+                        bool canTurnThisWay = (fAngleDiff < -0.02f) ? canTurnLeft : ((fAngleDiff > 0.02f) ? canTurnRight : false);
+
+                        if (canTurnThisWay && MathF.Abs(fAngleDiff) > 0.02f)
+                        {
+                            // Torsi kemudi terkontrol yang halus & realistis (~2.4 rad/s)
+                            float fTurn = MathF.Sign(fAngleDiff) * MathF.Min(MathF.Abs(fAngleDiff), 2.4f * dt);
+                            _gigaDrillAimDir = _gigaDrillAimDir.Rotated(fTurn).Normalized();
+
+                            // Belok kiri (fCross < 0) -> thruster kanan (+1) menyala. Belok kanan (fCross > 0) -> thruster kiri (-1) menyala.
+                            _gigaDrillCanardFireSide = (fCross < 0.0f) ? 1.0f : -1.0f;
+                            _gigaDrillCanardPulseActive = true;
+
+                            // "terbakar habis bertahap" saat mengoreksi arah:
+                            // Belok kiri (fTurn < 0) membakar dart kanan (+1). Belok kanan (fTurn > 0) membakar dart kiri (-1).
+                            _canardSteerFuelAccumulator += MathF.Abs(fTurn) * 1.5f + dt * 0.80f;
+                            if (_canardSteerFuelAccumulator >= 1.0f)
+                            {
+                                _canardSteerFuelAccumulator -= 1.0f;
+                                int sideToBurn = (fTurn < 0.0f) ? 1 : -1;
+                                BurnOneCanardDart(sideToBurn);
+                            }
+                        }
+                        else
+                        {
+                            // Arah ini tidak bisa dibelokkan (Dart sisi terkait sudah hancur tertembak / habis)
+                            _gigaDrillCanardFireSide = 0.0f;
+                            _gigaDrillCanardPulseActive = false;
+                        }
+                    }
+                    else
+                    {
+                        // Terminal Ram Commit / Overshoot: kemudi lurus tanpa patahan aneh
+                        _gigaDrillCanardFireSide = 0.0f;
+                        _gigaDrillCanardPulseActive = false;
+                    }
+                }
+                else
+                {
+                    _gigaDrillCanardFireSide = 0.0f;
+                    _gigaDrillCanardPulseActive = false;
+                }
+
+                float stepDist = _gigaDrillLaunchSpeed * dt;
+                float sweepDist = 24.0f + stepDist + 8.0f;
 
                 if (TryRaycastClosestAsteroidVoxel(_gigaDrillSafeOutsidePos, _gigaDrillAimDir, sweepDist, out _, out VoxelRayHit edgeHit))
                 {
-                    // Kunci tepat di tile kulit pinggir terluar asteroid! Tidak boleh melompat ke tengah batu!
-                    _gigaDrillTipPos = edgeHit.WorldCellCenter;
+                    _gigaDrillTipPos = _gigaDrillSafeOutsidePos + _gigaDrillAimDir * edgeHit.Distance;
+                    _gigaDrillSafeOutsidePos = _gigaDrillTipPos - _gigaDrillAimDir * 24.0f;
                     _gigaDrillVel = Vector2.Zero;
                 }
                 else
                 {
-                    _gigaDrillTipPos = nextTip;
+                    _gigaDrillTipPos += _gigaDrillAimDir * stepDist;
                     _gigaDrillSafeOutsidePos = _gigaDrillTipPos - _gigaDrillAimDir * 24.0f;
+                    _gigaDrillVel = _gigaDrillAimDir * _gigaDrillLaunchSpeed;
                 }
             }
+
+            // Proses gerusan lurus terhadap asteroid SEBELUM posisi drone dihitung agar 100% sinkron
+            CheckAsteroidCollisions(dt);
+            if (!_isGigaDrillActive) return;
         }
+        } // Penutup blok else (!_isGigaDrillAligning)
 
         totalUnits = Math.Max(1, _activeDrillFormationCount);
         exhaustStartIdx = Math.Max(1, _gigaDrillExhaustStartIndex);
         ComputeGigaDrillDimensions(totalUnits, out drillLength, out drillBaseRadius, out densityFactor);
 
-        Vector2 tangent = new Vector2(-_gigaDrillAimDir.Y, _gigaDrillAimDir.X);
-        Vector2 basePos = _gigaDrillTipPos - _gigaDrillAimDir * drillLength;
+        Vector2 activeAimDir = _isGigaDrillAligning ? wobbledAimDir : _gigaDrillAimDir;
+        Vector2 tangent = new Vector2(-activeAimDir.Y, activeAimDir.X);
+        Vector2 basePos = _gigaDrillTipPos - activeAimDir * drillLength;
 
         GigaDrillTipPosition = _gigaDrillTipPos;
         GigaDrillBasePosition = basePos;
-        GigaDrillDirection = _gigaDrillAimDir;
+        GigaDrillDirection = activeAimDir;
         GigaDrillLength = drillLength;
         GigaDrillRadius = drillBaseRadius;
         GigaDrillDensityFactor = densityFactor;
@@ -3552,17 +4352,64 @@ public partial class SwarmSimulation : Node2D
                                      + defT * (Mathf.Tau * 2.0f)
                                      + _gigaDrillSpinTime * 0.95f;
 
-                Vector2 defTargetPos = (_gigaDrillTipPos + _gigaDrillAimDir * defDistForward)
+                Vector2 defTargetPos = (_gigaDrillTipPos + activeAimDir * defDistForward)
                                      + (tangent * (defR * MathF.Cos(defSpiralAngle)))
-                                     + (_gigaDrillAimDir * (0.18f * defR * MathF.Sin(defSpiralAngle)));
+                                     + (activeAimDir * (0.18f * defR * MathF.Sin(defSpiralAngle)));
 
                 pos.Value = defTargetPos;
                 vel.Value = _gigaDrillVel;
-                swarm.SpinAngle = _gigaDrillAimDir.Angle() + Mathf.Pi * 0.5f + MathF.Sin(defSpiralAngle) * 0.35f;
+                swarm.SpinAngle = activeAimDir.Angle() + Mathf.Pi * 0.5f + MathF.Sin(defSpiralAngle) * 0.35f;
                 vis.Color = (defT < 0.28f)
                     ? new Color(2.8f, 5.5f, 7.0f, 1.0f)
                     : new Color(0.9f, 3.8f, 5.5f, 1.0f);
                 vis.Scale = 1.15f;
+                return;
+            }
+
+            if (swarm.Role == SwarmRole.ScannerDrone)
+            {
+                float noseLength = (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
+                    ? MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f)
+                    : 18.0f;
+                Vector2 seekerSocket = _gigaDrillTipPos + activeAimDir * (noseLength * 0.38f);
+                pos.Value = seekerSocket;
+                vel.Value = _gigaDrillVel;
+                swarm.SpinAngle = activeAimDir.Angle() + Mathf.Pi * 0.5f;
+                vis.Color = new Color(0.9f, 3.8f, 5.5f, 1.0f);
+                vis.Scale = 1.15f;
+                GigaDrillScannerPosition = pos.Value;
+                return;
+            }
+
+            if (swarm.Role == SwarmRole.DartNeedle)
+            {
+                int cIdx = swarm.FormationIndex;
+                float side = (cIdx % 2 == 0) ? 1.0f : -1.0f;
+                int slotRank = cIdx / 2;
+                float canardDist = drillLength * (0.05f + slotRank * 0.055f);
+                float bodyRadiusAtSlot = drillBaseRadius * MathF.Pow(MathF.Max(0.04f, canardDist / MathF.Max(1.0f, drillLength)), 0.82f);
+                float rCanard = bodyRadiusAtSlot + 14.0f + slotRank * 4.5f;
+                Vector2 canardPos = (_gigaDrillTipPos - activeAimDir * canardDist) + (tangent * (side * rCanard));
+
+                pos.Value = canardPos;
+                vel.Value = _gigaDrillVel;
+                swarm.SpinAngle = activeAimDir.Rotated(side * 0.18f).Angle() + Mathf.Pi * 0.5f;
+
+                bool isFiring = _gigaDrillCanardPulseActive && (
+                    (_gigaDrillCanardFireSide > 0.0f && side > 0.0f) ||
+                    (_gigaDrillCanardFireSide < 0.0f && side < 0.0f)
+                );
+
+                if (isFiring)
+                {
+                    vis.Color = new Color(6.8f, 6.2f, 8.5f, 1.0f);
+                    vis.Scale = 1.35f;
+                }
+                else
+                {
+                    vis.Color = new Color(2.4f, 3.8f, 0.6f, 1.0f);
+                    vis.Scale = 1.15f;
+                }
                 return;
             }
 
@@ -3614,37 +4461,21 @@ public partial class SwarmSimulation : Node2D
                 spiralAngle = nozzleRing * (Mathf.Tau / Math.Max(4, fluteCount)) - _gigaDrillSpinTime * 1.5f;
             }
 
-            Vector2 targetPos = (_gigaDrillTipPos - _gigaDrillAimDir * d)
+            Vector2 targetPos = (_gigaDrillTipPos - activeAimDir * d)
                               + (tangent * (r * MathF.Cos(spiralAngle)))
-                              + (_gigaDrillAimDir * (0.28f * r * MathF.Sin(spiralAngle)));
+                              + (activeAimDir * (0.28f * r * MathF.Sin(spiralAngle)));
 
             pos.Value = targetPos;
             vel.Value = _gigaDrillVel;
-            swarm.SpinAngle = _gigaDrillAimDir.Angle() + Mathf.Pi * 0.5f + MathF.Sin(spiralAngle) * 0.48f;
+            swarm.SpinAngle = activeAimDir.Angle() + Mathf.Pi * 0.5f + MathF.Sin(spiralAngle) * 0.48f;
 
             vis.Color = (idx < Math.Max(4, totalUnits / 12))
                 ? new Color(4.2f, 4.0f, 2.6f, 1.0f)
                 : new Color(3.5f, 1.25f, 0.4f, 1.0f);
         });
 
-        float killRadiusSq = (drillBaseRadius + 30.0f) * (drillBaseRadius + 30.0f);
-        Vector2 noseTip = (!_hasDefenderNoseBreached && _activeDefenderCoreCount > 0)
-            ? _gigaDrillTipPos + _gigaDrillAimDir * MathF.Min(56.0f, 20.0f + MathF.Sqrt(_activeDefenderCoreCount) * 6.5f)
-            : _gigaDrillTipPos;
-
-        _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref SwarmUnitComponent swarm) =>
-        {
-            if (swarm.State == SwarmState.Dead || swarm.OwnerId == 0) return;
-            if (pos.Value.DistanceSquaredTo(_gigaDrillTipPos) <= killRadiusSq
-                || pos.Value.DistanceSquaredTo(basePos) <= killRadiusSq
-                || pos.Value.DistanceSquaredTo(noseTip) <= killRadiusSq)
-            {
-                swarm.State = SwarmState.Dead;
-            }
-        });
-
         // Cek berapa driller yang masih hidup di formasi Giga Drill
-        int aliveDrillers = 0;
+        aliveDrillers = 0;
         _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
         {
             if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched && s.FormationIndex >= 0)
@@ -3656,26 +4487,48 @@ public partial class SwarmSimulation : Node2D
         if (aliveDrillers == 0)
         {
             _isGigaDrillActive = false;
+            _isGigaDrillAligning = false;
             _isRammingEnemyCore = false;
             _isGrindingAsteroid = false;
             _gigaDrillFlightTimer = 0.0f;
             TriggerClashAnimation(_gigaDrillTipPos, dropScrap: true);
-            EmitSignal(SignalName.GigaDrillDetonated, _gigaDrillTipPos, basePos, 0);
-            return;
-        }
-
-        // Jika waktu terbang habis di ruang hampa (MISS: tidak menabrak Core dan tidak menabrak Asteroid)
-        // Sesuai aturan: drone yang MISS dan tidak menabrak apapun kembali ke orbit (Returning)!
-        if (!_isRammingEnemyCore && !_isGrindingAsteroid && _gigaDrillFlightTimer <= 0.0f)
-        {
-            _isGigaDrillActive = false;
             EmitSignal(SignalName.GigaDrillDetonated, _gigaDrillTipPos, basePos, 0);
 
             _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
             {
                 if (swarm.State == SwarmState.Launched && swarm.OwnerId == 0)
                 {
-                    if (swarm.Role == SwarmRole.DrillDrone || swarm.Role == SwarmRole.Guardian)
+                    swarm.State = SwarmState.Returning;
+                    swarm.FormationIndex = -1;
+                    swarm.ExhaustTriggerTime = -1.0f;
+                    swarm.LifeTime = 0.0f;
+                    float scatter = (GD.Randf() - 0.5f) * Mathf.Tau;
+                    vel.Value = new Vector2(MathF.Cos(scatter), MathF.Sin(scatter)) * 420.0f;
+                }
+            });
+            _activeDefenderCoreCount = 0;
+            _activeDrillScannerCount = 0;
+            _activeDrillCanardDartCount = 0;
+            _activeDrillCanardRightCount = 0;
+            _activeDrillCanardLeftCount = 0;
+            _activeDrillFormationCount = 0;
+            RefreshFoundryGui();
+            return;
+        }
+
+        // Jika waktu terbang habis di ruang hampa (MISS: tidak menabrak Core dan tidak menabrak Asteroid)
+        // Sesuai aturan: drone yang MISS dan tidak menabrak apapun kembali ke orbit (Returning)!
+        if (!_isRammingEnemyCore && !_isGrindingAsteroid && !_isGigaDrillAligning && _gigaDrillFlightTimer <= 0.0f)
+        {
+            _isGigaDrillActive = false;
+            _isGigaDrillAligning = false;
+            EmitSignal(SignalName.GigaDrillDetonated, _gigaDrillTipPos, basePos, 0);
+
+            _world.Query(in _allSwarmQuery, (ref PositionComponent pos, ref VelocityComponent vel, ref SwarmUnitComponent swarm, ref VisualComponent vis) =>
+            {
+                if (swarm.State == SwarmState.Launched && swarm.OwnerId == 0)
+                {
+                    if (swarm.Role == SwarmRole.DrillDrone || swarm.Role == SwarmRole.Guardian || swarm.Role == SwarmRole.ScannerDrone || swarm.Role == SwarmRole.DartNeedle)
                     {
                         swarm.State = SwarmState.Returning;
                         swarm.FormationIndex = -1;
@@ -3687,6 +4540,10 @@ public partial class SwarmSimulation : Node2D
                 }
             });
             _activeDefenderCoreCount = 0;
+            _activeDrillScannerCount = 0;
+            _activeDrillCanardDartCount = 0;
+            _activeDrillCanardRightCount = 0;
+            _activeDrillCanardLeftCount = 0;
             _activeDrillFormationCount = 0;
             RefreshFoundryGui();
         }
@@ -3807,28 +4664,29 @@ public partial class SwarmSimulation : Node2D
     {
         if (!_isGigaDrillActive || _isRammingEnemyCore) return;
 
-        // Cari tile padat paling pinggir di sepanjang jalur mata bor dari titik luar (_gigaDrillSafeOutsidePos)
-        float maxScanDist = _gigaDrillSafeOutsidePos.DistanceTo(_gigaDrillTipPos) + 18.0f;
+        float focusedGrindRadius = Mathf.Clamp(GigaDrillRadius * 0.72f, 20.0f, 34.0f);
+        Vector2 probeAheadPos = _gigaDrillTipPos + _gigaDrillAimDir * 6.0f;
         Asteroid? targetAst = null;
-        Vector2 grindCenter = _gigaDrillTipPos;
+        bool blockedRightInFront = false;
 
-        if (TryRaycastClosestAsteroidVoxel(_gigaDrillSafeOutsidePos, _gigaDrillAimDir, maxScanDist, out Asteroid? rayAst, out VoxelRayHit rayHit))
+        // 1. Cek ray lurus tepat di sumbu tengah mata bor
+        if (TryRaycastClosestAsteroidVoxel(_gigaDrillSafeOutsidePos, _gigaDrillAimDir, 42.0f, out Asteroid? rayAst, out VoxelRayHit rayHit))
         {
             targetAst = rayAst;
-            grindCenter = rayHit.WorldCellCenter;
+            blockedRightInFront = rayHit.Distance <= 26.0f;
         }
         else
         {
-            // Fallback: cek apakah sisi samping mata bor menyentuh tile pinggir asteroid
+            // 2. Cek apakah silinder mata bor di sekitar sumbu lurus masih menyentuh voxel padat
             var asteroids = Asteroid.ActiveAsteroids;
             for (int i = 0; i < asteroids.Count; i++)
             {
                 var ast = asteroids[i];
                 if (ast == null || !ast.IsActiveInTree) continue;
-                if (ast.HasSolidVoxelsInRadius(_gigaDrillTipPos, GigaDrillRadius * 0.62f, out Vector2 closestVox))
+                if (ast.HasSolidVoxelsInRadius(probeAheadPos, focusedGrindRadius * 0.85f, out _))
                 {
                     targetAst = ast;
-                    grindCenter = closestVox;
+                    blockedRightInFront = ast.HasSolidVoxelsInRadius(_gigaDrillTipPos + _gigaDrillAimDir * 8.0f, focusedGrindRadius * 0.48f, out _);
                     break;
                 }
             }
@@ -3845,7 +4703,6 @@ public partial class SwarmSimulation : Node2D
             if (!_isGrindingAsteroid)
             {
                 _isGrindingAsteroid = true;
-                // Matikan timer exhaust belakang agar seluruh sisa driller dipakai menggerus batu sampai habis
                 _world.Query(in _allSwarmQuery, (ref SwarmUnitComponent s) =>
                 {
                     if (s.OwnerId == 0 && s.Role == SwarmRole.DrillDrone && s.State == SwarmState.Launched)
@@ -3855,35 +4712,38 @@ public partial class SwarmSimulation : Node2D
                 });
             }
 
-            // KUNCI UJUNG BOR TEPAT DI PERMUKAAN TILE PINGGIR!
-            // Bor berhenti (_gigaDrillVel = Zero) dan hanya maju 1 tile ke dalam SETELAH tile pinggir di depannya pecah!
-            _gigaDrillVel = Vector2.Zero;
-            _gigaDrillTipPos = _gigaDrillTipPos.Lerp(grindCenter, MathF.Min(1.0f, 35.0f * dt));
+            // SANGAT PENTING: JANGAN PERNAH menggeser _gigaDrillTipPos ke samping (closestVox / WorldCellCenter)!
+            // Majukan _gigaDrillLinearDist secara mulus MURNI di sepanjang garis lurus _gigaDrillAimDir:
+            // - Pelan (28 px/s) saat menahan batu keras di depan mata bor
+            // - Maju mantap (165 px/s) begitu voxel di depan pecah untuk langsung menggali lurus ke lapisan berikutnya!
+            float linearAdvanceSpeed = blockedRightInFront ? 28.0f : 165.0f;
+            _gigaDrillLinearDist += linearAdvanceSpeed * dt;
+            _gigaDrillTipPos += _gigaDrillAimDir * (linearAdvanceSpeed * dt);
+            _gigaDrillSafeOutsidePos = _gigaDrillTipPos - _gigaDrillAimDir * 24.0f;
+            _gigaDrillVel = _gigaDrillAimDir * linearAdvanceSpeed;
             _gigaDrillFlightTimer = MathF.Max(_gigaDrillFlightTimer, 0.35f);
 
-            // Gerus tile pinggir di titik kontak melawan NonLaserTileMaxHp (45.0f)
-            // Radius gerusan dibuat terfokus di ujung mata bor agar mengikis dari tepi luar ke dalam secara berurutan
-            float focusedGrindRadius = Mathf.Clamp(GigaDrillRadius * 0.65f, 18.0f, 30.0f);
+            // Gerus melingkar tepat berpusat pada sumbu lurus (_gigaDrillTipPos + sedikit ke depan)
+            Vector2 straightGrindCenter = _gigaDrillTipPos + _gigaDrillAimDir * 4.0f;
             _destroyedVoxelsBuffer.Clear();
-            targetAst.ApplyDrillGrindAtRadius(grindCenter, focusedGrindRadius, 62.0f, dt, _destroyedVoxelsBuffer);
+            targetAst.ApplyDrillGrindAtRadius(straightGrindCenter, focusedGrindRadius, 72.0f, dt, _destroyedVoxelsBuffer);
             for (int v = 0; v < _destroyedVoxelsBuffer.Count; v++)
             {
                 var broken = _destroyedVoxelsBuffer[v];
                 SpawnVoxelErosionDebris(broken.worldCenter, -_gigaDrillAimDir, broken.type);
             }
 
-            // Gaya dorong fisik ke asteroid
-            targetAst.ApplyCentralImpulse(_gigaDrillAimDir * (28000.0f * dt));
-            targetAst.ApplyTorqueImpulse((GD.Randf() > 0.5f ? 1.0f : -1.0f) * 12000.0f * dt);
+            // Dorong lurus searah mata bor tanpa torsi acak agar batu tidak berputar liar di bawah mata bor
+            targetAst.ApplyCentralImpulse(_gigaDrillAimDir * (5500.0f * dt));
 
-            // Percikan bunga api penggalian batuan tepat di permukaan pinggir
+            // Percikan bunga api penggalian tepat di ujung mata bor
             for (int s = 0; s < 2; s++)
             {
-                Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 14.0f, (GD.Randf() - 0.5f) * 14.0f);
-                TriggerClashAnimation(grindCenter + sparkJitter, dropScrap: false);
+                Vector2 sparkJitter = new Vector2((GD.Randf() - 0.5f) * 10.0f, (GD.Randf() - 0.5f) * 10.0f);
+                TriggerClashAnimation(straightGrindCenter + sparkJitter, dropScrap: false);
             }
 
-            // Auskan driller terus-menerus sampai driller habis
+            // Auskan driller secara teratur selama menggerus batu
             _drillAttritionTimer += dt;
             if (_drillAttritionTimer >= 0.055f)
             {
@@ -3900,17 +4760,20 @@ public partial class SwarmSimulation : Node2D
                 }
             });
 
-            // Begitu driller habis -> Meledak kecil tepat di mulut coakan pinggir yang sedang digerus!
             if (remainingDrillers <= 1)
             {
-                _gigaDrillTipPos = grindCenter;
                 TriggerGigaDrillAsteroidSmallBlast(targetAst);
                 return;
             }
         }
         else
         {
-            _isGrindingAsteroid = false;
+            if (_isGrindingAsteroid)
+            {
+                // Jika sudah tembus melewati tepi batu, pulihkan kecepatan luncur lurus penuh!
+                _isGrindingAsteroid = false;
+                _gigaDrillVel = _gigaDrillAimDir * _gigaDrillLaunchSpeed;
+            }
             _drillAsteroidGrindTimer = MathF.Max(0.0f, _drillAsteroidGrindTimer - dt * 2.0f);
         }
     }
@@ -3956,6 +4819,7 @@ public partial class SwarmSimulation : Node2D
     private void TriggerGigaDrillAsteroidSmallBlast(Asteroid hitAsteroid)
     {
         _isGigaDrillActive = false;
+        _isGigaDrillAligning = false;
         _isGrindingAsteroid = false;
         _isRammingEnemyCore = false;
         _gigaDrillFlightTimer = 0.0f;
@@ -4011,6 +4875,7 @@ public partial class SwarmSimulation : Node2D
     private void TriggerGigaDrillCoreSupernova(EnemyCore hitEnemyCore, bool applyFinalDamage = true)
     {
         _isGigaDrillActive = false;
+        _isGigaDrillAligning = false;
         _isRammingEnemyCore = false;
         _isGrindingAsteroid = false;
         _gigaDrillFlightTimer = 0.0f;
@@ -4038,7 +4903,7 @@ public partial class SwarmSimulation : Node2D
             {
                 bool ejectedNow = hitEnemyCore.TakeDamage(1600.0f + _coreRamInitialDrillerCount * 28.0f, _gigaDrillAimDir);
                 // Hanya berikan dorongan inersia berat jika belum berubah menjadi Escape Pod yang sedang lari cepat!
-                if (!ejectedNow && !hitEnemyCore.IsEscapePod)
+                if (!ejectedNow && !hitEnemyCore.IsEscapePod && !hitEnemyCore.ZeroKnockbackDebug)
                 {
                     hitEnemyCore.Velocity += _gigaDrillAimDir * 135.0f;
                 }
@@ -4494,7 +5359,7 @@ public partial class SwarmSimulation : Node2D
 
     private void UpdateMiningDebris(float dt, Vector2 corePos)
     {
-        bool redrawNeeded = !_isMiningLaserActive && !_isBoostActive;
+        bool redrawNeeded = _miningDebris.Count > 0 || _asteroidShockwaves.Count > 0;
         bool stockChanged = false;
 
         // Update gelombang kejut & dorongan fisika wavefront seamless
@@ -4810,9 +5675,12 @@ public partial class SwarmSimulation : Node2D
             float eDist = toE.Length();
             if (eDist > 1.0f && eDist >= minWaveR - 45.0f && eDist <= maxWaveR + 45.0f)
             {
-                float shieldMult = _enemyCore.HasShockwaveShield ? 0.22f : 1.0f;
-                float atten = Mathf.Clamp(1.0f - (eDist / (sw.MaxRadius + 80.0f)), 0.15f, 1.0f);
-                _enemyCore.Velocity += (toE / eDist) * (sw.PushPower * atten * shieldMult * dt * 1.35f);
+                if (!_enemyCore.ZeroKnockbackDebug)
+                {
+                    float shieldMult = _enemyCore.HasShockwaveShield ? 0.22f : 1.0f;
+                    float atten = Mathf.Clamp(1.0f - (eDist / (sw.MaxRadius + 80.0f)), 0.15f, 1.0f);
+                    _enemyCore.Velocity += (toE / eDist) * (sw.PushPower * atten * shieldMult * dt * 1.35f);
+                }
             }
         }
 
@@ -5565,17 +6433,46 @@ public partial class SwarmSimulation : Node2D
             }
         }
 
-        // Bola Ruang Bakar Plasma (Abyssal Focal Pinch Orb: Halo Ungu Tua -> Cincin Putih -> Inti Hitam Void -> Titik Putih)
+        // Bola Ruang Bakar & Erupsi Korona Bintang (Solar-Abyssal Corona Crown di Mulut Nozzle)
         float flashBoost = _boostSacrificeFlash;
+        float activeCoronaPower = isPriming ? (0.35f + 0.65f * primingProgress) : power;
         float baseOrbRad = isPriming
-            ? (5.5f + 12.0f * primingProgress * (0.85f + 0.15f * MathF.Sin(pulse * 8.0f)))
-            : (8.5f + 5.5f * power + 7.0f * flashBoost) * (0.90f + 0.10f * MathF.Sin(pulse * 5.5f));
+            ? (6.5f + 13.5f * primingProgress * (0.85f + 0.15f * MathF.Sin(pulse * 8.0f)))
+            : (10.5f + 6.5f * power + 7.5f * flashBoost) * (0.90f + 0.10f * MathF.Sin(pulse * 5.5f));
 
         float orbRad = baseOrbRad;
-        DrawCircle(focalPos, orbRad * 2.05f, new Color(1.45f, 0.12f, 3.25f, 0.42f * power + (isPriming ? 0.32f * primingProgress : 0.0f)));
-        DrawCircle(focalPos, orbRad * 1.18f, new Color(6.4f + flashBoost * 1.5f, 6.2f, 7.2f, 0.95f));
-        DrawCircle(focalPos, orbRad * 0.72f, new Color(0.012f, 0.004f, 0.025f, 0.96f));
-        DrawCircle(focalPos, orbRad * 0.28f, new Color(6.8f, 6.6f, 7.6f, 0.98f));
+        DrawCircle(focalPos, orbRad * 2.45f, new Color(1.85f, 0.14f, 4.20f, 0.45f * activeCoronaPower));
+        DrawArc(focalPos, orbRad * 1.65f, 0.0f, Mathf.Tau, 28, new Color(3.8f, 0.55f, 6.4f, 0.85f * activeCoronaPower), 2.2f);
+
+        // Busur Prominence Korona Matahari (Solar Corona Loops & Spikes) yang meledak di pangkal thruster
+        const int coronaLoopCount = 6;
+        for (int c = 0; c < coronaLoopCount; c++)
+        {
+            float sideSign = (c % 2 == 0) ? 1.0f : -1.0f;
+            float loopPhase = Mathf.PosMod(pulse * 2.4f + c * 0.37f, 1.0f);
+            float loopSpread = (0.32f + (c / 2) * 0.28f) * sideSign;
+            Vector2 loopDir = backDir.Rotated(loopSpread + MathF.Sin(pulse * 5.0f + c) * 0.10f);
+            Vector2 loopNormal = new Vector2(-loopDir.Y, loopDir.X) * sideSign;
+
+            float loopReach = (24.0f + 38.0f * activeCoronaPower) * MathF.Sin(loopPhase * Mathf.Pi);
+            Vector2 p0 = focalPos + tangent * (sideSign * orbRad * 0.65f);
+            Vector2 pMid = focalPos + loopDir * loopReach + loopNormal * (12.0f * activeCoronaPower);
+            Vector2 p1 = focalPos + backDir * (loopReach * 1.15f);
+
+            float loopAlpha = MathF.Sin(loopPhase * Mathf.Pi) * (0.75f + 0.25f * activeCoronaPower);
+            Color loopPurple = new Color(2.45f, 0.20f, 5.20f, loopAlpha);
+            Color loopWhite = new Color(7.2f, 6.8f, 8.2f, loopAlpha * 0.90f);
+
+            DrawLine(p0, pMid, loopPurple, 3.2f, false);
+            DrawLine(pMid, p1, loopPurple, 2.8f, false);
+            DrawLine(p0, pMid, loopWhite, 1.3f, false);
+            DrawLine(pMid, p1, loopWhite, 1.1f, false);
+        }
+
+        // Inti Singularitas Korona (Cincin Putih Menyilaukan -> Hitam Void Pekat -> Titik Fusi Putih)
+        DrawCircle(focalPos, orbRad * 1.22f, new Color(7.4f + flashBoost * 1.5f, 7.2f, 8.4f, 0.96f));
+        DrawCircle(focalPos, orbRad * 0.78f, new Color(0.010f, 0.002f, 0.020f, 0.97f));
+        DrawCircle(focalPos, orbRad * 0.30f, new Color(7.8f, 7.6f, 8.8f, 0.99f));
 
         // =========================================================================
         // C. SEMBURAN JET PLASMA UTAMA TERPUSAT (AEROSPIKE AFTERBURNER)

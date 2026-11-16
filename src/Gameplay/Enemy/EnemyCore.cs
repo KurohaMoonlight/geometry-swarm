@@ -23,6 +23,8 @@ public partial class EnemyCore : Node2D
     public delegate void EnemyCoreDestroyedEventHandler();
 
     [Export] public float BaseHealthPerCell { get; set; } = 600.0f;
+    [Export] public bool IsInvincibleDebug { get; set; } = true;
+    [Export] public bool ZeroKnockbackDebug { get; set; } = true;
     public float MaxHealth => MathF.Max(600.0f, _hexCellOffsets.Count * BaseHealthPerCell);
     public float Health { get; private set; } = 600.0f;
 
@@ -255,6 +257,12 @@ public partial class EnemyCore : Node2D
         float dt = (float)delta;
         _pulseTimer += dt * 3.2f;
 
+        // Sandbag Testing Mode: Redam gaya dorong eksternal / ledakan (kebal knockback)
+        if (ZeroKnockbackDebug && Velocity.Length() > MaxSpeed)
+        {
+            Velocity = Velocity.Normalized() * MaxSpeed;
+        }
+
         // Inersia Jangkar Perisai Neon Anti-Terpental saat gelombang kejut Supernova Rift
         if (_shockwaveShieldTimer > 0.0f)
         {
@@ -406,8 +414,17 @@ public partial class EnemyCore : Node2D
     {
         if (InvulnerableTimer > 0.0f) return false;
 
-        Health = MathF.Max(0.0f, Health - amount);
         _hitFlashTimer = 0.10f;
+
+        // Sandbag Testing Mode: HP abadi & tidak memicu kematian / escape pod
+        if (IsInvincibleDebug)
+        {
+            Health = MaxHealth;
+            EmitSignal(SignalName.EnemyCoreDamageTaken, Health, MaxHealth);
+            return false;
+        }
+
+        Health = MathF.Max(0.0f, Health - amount);
         EmitSignal(SignalName.EnemyCoreDamageTaken, Health, MaxHealth);
 
         if (Health <= 0.0f)

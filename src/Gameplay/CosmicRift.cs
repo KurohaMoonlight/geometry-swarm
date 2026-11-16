@@ -452,8 +452,17 @@ public partial class CosmicRift : Node2D
                 _whiteHolePolarity = Mathf.Lerp(_whiteHolePolarity, 0.0f, dt * 2.0f);
                 _riftMaterial?.SetShaderParameter("black_hole_radius", 0.102f);
 
-                // Efek fisika & distorsi jarak dekat Black Hole terhadap bintang & asteroid di sekitarnya!
-                ApplyCloseRangeBlackHoleEffects(dt, chargeFactor: 0.0f);
+                // Hanya jalankan erosi voxel & distorsi jarak dekat jika Black Hole dekat dengan layar pemain!
+                // Ini mencegah 3 Black Hole di luar layar mengikis voxel asteroid kolosal secara acak dan memicu lag.
+                if (distToPlayer < 1750.0f)
+                {
+                    ApplyCloseRangeBlackHoleEffects(dt, chargeFactor: 0.0f);
+                }
+                else if (_accretionVoxels.Count > 0)
+                {
+                    _accretionVoxels.Clear();
+                    QueueRedraw();
+                }
                 break;
 
             case RiftState.Charging:

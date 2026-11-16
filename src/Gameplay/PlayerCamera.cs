@@ -4,11 +4,8 @@ using Godot;
 namespace GeometrySwarm.Gameplay;
 
 /// <summary>
-/// Kamera dinamis 2D dengan pelacakan halus (smoothing) & zoom adaptif otomatis murni.
-/// - Scroll roda mouse dinonaktifkan: kamera murni otomatis menjauh (zoom out)
-///   seiring bertambahnya jumlah swarm agar formasi kawanan dan asteroid kolosal
-///   selalu terlihat proporsional dan tidak sesak di layar.
-/// - Memberikan zoom out sinematik ekstra saat Super Giga Drill Break aktif.
+/// Kamera 2D dengan pelacakan halus (smoothing) dan zoom tetap (Fixed Zoom)
+/// tanpa efek scaling/zoom-out dinamis agar skala visual dan grid selalu stabil.
 /// </summary>
 public partial class PlayerCamera : Camera2D
 {
@@ -16,13 +13,9 @@ public partial class PlayerCamera : Camera2D
 
     [Export] public NodePath PlayerCorePath { get; set; } = "../SwarmSimulation/PlayerCore";
     [Export] public NodePath SwarmSimPath { get; set; } = "../SwarmSimulation";
+    [Export] public float FixedZoom { get; set; } = 0.85f;
 
     private Node2D? _playerCore;
-    private SwarmSimulation? _swarmSim;
-
-    // Nilai zoom real-time
-    private float _currentZoom = 0.88f;
-    private const float ZoomLerpSpeed = 2.8f;
 
     // Shake kamera independen
     private float _shakeIntensity = 0.0f;
@@ -31,15 +24,11 @@ public partial class PlayerCamera : Camera2D
     {
         Instance = this;
         PositionSmoothingEnabled = true;
-        PositionSmoothingSpeed = 7.5f;
+        PositionSmoothingSpeed = 10.0f;
 
         if (HasNode(PlayerCorePath))
         {
             _playerCore = GetNode<Node2D>(PlayerCorePath);
-        }
-        if (HasNode(SwarmSimPath))
-        {
-            _swarmSim = GetNode<SwarmSimulation>(SwarmSimPath);
         }
 
         if (_playerCore != null)
@@ -48,7 +37,7 @@ public partial class PlayerCamera : Camera2D
             ResetSmoothing();
         }
 
-        Zoom = new Vector2(_currentZoom, _currentZoom);
+        Zoom = new Vector2(FixedZoom, FixedZoom);
     }
 
     public void TriggerShake(float amount)
@@ -60,29 +49,19 @@ public partial class PlayerCamera : Camera2D
     {
         float dt = (float)delta;
 
-        // 1. Pelacakan Posisi Kapal Induk
+        // 1. Pelacakan Posisi Kapal Induk (Tanpa efek scaling/zoom kamera)
         if (_playerCore != null)
         {
             GlobalPosition = _playerCore.GlobalPosition;
         }
 
-        // 2. Hitung Zoom Murni Otomatis Berdasarkan Jumlah Swarm
-        // Semakin banyak swarm (15 -> 2.000 unit), kamera otomatis mundur secara organik (0.90x -> 0.35x)
-        int swarmCount = _swarmSim?.EntityCount ?? 15;
-        
-        float targetZoom = 0.90f - MathF.Sqrt(MathF.Max(0, swarmCount - 10)) * 0.0135f;
-        targetZoom = Mathf.Clamp(targetZoom, 0.35f, 0.90f);
-
-        // Zoom out ekstra sinematik ketika Super Giga Drill aktif/charging
-        if (_swarmSim != null && (_swarmSim.IsChargingDrill || _swarmSim.IsGigaDrillActive))
+        // Pastikan Zoom selalu terkunci konstan
+        if (MathF.Abs(Zoom.X - FixedZoom) > 0.001f)
         {
-            targetZoom *= 0.82f;
+            Zoom = new Vector2(FixedZoom, FixedZoom);
         }
 
-        _currentZoom = Mathf.Lerp(_currentZoom, targetZoom, ZoomLerpSpeed * dt);
-        Zoom = new Vector2(_currentZoom, _currentZoom);
-
-        // 3. Redam Shake Kamera
+        // 2. Redam Shake Kamera
         if (_shakeIntensity > 0.05f)
         {
             Offset = new Vector2(

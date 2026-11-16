@@ -924,19 +924,19 @@ public partial class EngineThrusterAudio : AudioStreamPlayer
             {
                 if (isThrusting)
                 {
-                    // Dengungan magnetik / gravitasi saat mengarahkan Core kapal (Hover dengan mid presence yang jelas)
-                    subVol = 0.38f;
-                    jetVol = 0.14f; // Desis jet thruster hangat agar suasana tidak sepi / hampa
-                    swarmPadVol = Mathf.Lerp(0.12f, 0.18f, swarmSizeFactor);
-                    subFreq = Mathf.Lerp(58.0f, 78.0f, Mathf.Clamp(speedRatio, 0.0f, 1.0f));
+                    // Dengungan magnetik / gravitasi saat gerak biasa WASD (dipelankan agar lebih kalem & nyaman)
+                    subVol = 0.16f;
+                    jetVol = 0.045f; // Desis jet thruster halus dan pelan saat WASD
+                    swarmPadVol = Mathf.Lerp(0.05f, 0.085f, swarmSizeFactor);
+                    subFreq = Mathf.Lerp(56.0f, 74.0f, Mathf.Clamp(speedRatio, 0.0f, 1.0f));
                 }
                 else if (speed > 16.0f)
                 {
                     float glideT = Mathf.Clamp(speedRatio, 0.0f, 1.0f);
-                    subVol = Mathf.Lerp(0.10f, 0.22f, glideT);
-                    jetVol = Mathf.Lerp(0.02f, 0.06f, glideT);
-                    swarmPadVol = Mathf.Lerp(0.06f, 0.12f, glideT) * (0.65f + 0.35f * swarmSizeFactor);
-                    subFreq = Mathf.Lerp(52.0f, 66.0f, glideT);
+                    subVol = Mathf.Lerp(0.04f, 0.09f, glideT);
+                    jetVol = Mathf.Lerp(0.008f, 0.024f, glideT);
+                    swarmPadVol = Mathf.Lerp(0.025f, 0.055f, glideT) * (0.65f + 0.35f * swarmSizeFactor);
+                    subFreq = Mathf.Lerp(50.0f, 64.0f, glideT);
                 }
             }
             _targetSubVol = subVol;

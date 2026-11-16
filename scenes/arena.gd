@@ -5,12 +5,11 @@ const GridPhysicsClass = preload("res://core/physics/grid_physics.gd")
 const GridRendererClass = preload("res://visual/grid_renderer.gd")
 const GigaDrillVFXClass = preload("res://visual/giga_drill_vfx.gd")
 
-## Arena Controller (Dioptimalkan untuk 60+ FPS Stabil)
-## - Grid belakang menggunakan palet Soft Luminous Neon yang di-snap ke koordinat dunia.
-## - Di belakang grid terdapat 3 lapis partikel bintang parallax yang ikut terdistorsi gravitasi
-##   secara Optik (Einstein Starlight Deflection) dan secara Fisik (Spacetime Infall).
-## - Menghubungkan sumur gravitasi Bintang Mini & Aether Seed (Spacetime Infall) secara fisik
-##   ke GridPhysics sehingga jaring ruang-waktu menekuk, memilin, dan melengkung tajam ke pusat massa.
+## Arena Controller (Dioptimalkan untuk 60+ FPS Stabil & Grid Instan)
+## - Jendela grid mengikuti pusat layar kamera secara langsung (get_screen_center_position)
+##   sehingga grid tidak pernah telat dirender saat bermanuver cepat.
+## - Hanya menerapkan distorsi gravitasi pada grid untuk objek yang benar-benar berada di layar
+##   dan memilih 1 sumber gravitasi terdekat agar kotak dirty-region tidak pernah membengkak seukuran layar.
 
 @onready var grid_renderer: GridRendererClass = $GridRenderer
 @onready var world_env: WorldEnvironment = $WorldEnvironment
@@ -62,7 +61,7 @@ var giga_vfx: GigaDrillVFXClass = null
 var screen_shake_intensity: float = 0.0
 
 var grid_physics: GridPhysicsClass = null
-var half_grid_size: Vector2 = Vector2(2100.0, 1300.0)
+var half_grid_size: Vector2 = Vector2(1600.0, 1040.0)
 var hud_update_timer: float = 0.0
 
 @export var player_wake_radius: float = 64.0
@@ -127,11 +126,9 @@ func _on_giga_drill_detonated(tip_pos: Vector2, base_pos: Vector2, count: int) -
 		giga_vfx.trigger_detonation(tip_pos, base_pos, count)
 	if grid_physics:
 		if count < 0:
-			# Ledakan kecil akhir saat driller habis menggerus batu asteroid
 			grid_physics.apply_radial_impulse(tip_pos, 950.0, 155.0)
 			trigger_shake(8.0)
 		elif count > 0:
-			# Ledakan Spektakuler Supernova saat menghantam Core!
 			grid_physics.apply_supernova_core_detonation(tip_pos, base_pos, count)
 			trigger_shake(22.0)
 		else:
@@ -141,34 +138,41 @@ func _on_giga_drill_nose_breached(breach_pos: Vector2, aim_dir: Vector2, count: 
 	if giga_vfx:
 		giga_vfx.trigger_nose_breach(breach_pos, aim_dir, count)
 	if grid_physics:
-		grid_physics.apply_radial_impulse(breach_pos, 2100.0, 280.0)
+		grid_physics.apply_radial_impulse(breach_pos, 2100.0, 260.0)
 	trigger_shake(11.0)
 
 func _on_boost_dart_sacrificed(nozzle_pos: Vector2, aim_dir: Vector2, power_ratio: float) -> void:
 	if grid_physics:
-		grid_physics.apply_radial_impulse(nozzle_pos, 920.0 + 780.0 * power_ratio, 215.0)
-		grid_physics.apply_radial_impulse(nozzle_pos - aim_dir * 75.0, 680.0 * power_ratio, 170.0)
+		grid_physics.apply_radial_impulse(nozzle_pos, 880.0 + 720.0 * power_ratio, 195.0)
+		grid_physics.apply_radial_impulse(nozzle_pos - aim_dir * 70.0, 620.0 * power_ratio, 155.0)
 	trigger_shake(2.2 + 3.2 * power_ratio)
 
 func _on_swarm_clash_impulse(pos: Vector2, power: float, radius: float) -> void:
+	var cam_pos: Vector2 = player_core.global_position if player_core else Vector2.ZERO
+	var dist_to_cam: float = pos.distance_to(cam_pos)
+	if dist_to_cam > 1500.0:
+		return
 	if grid_physics:
-		grid_physics.apply_radial_impulse(pos, power, minf(radius, 450.0))
-	if absf(power) >= 2500.0:
-		var cam_pos: Vector2 = player_core.global_position if player_core else Vector2.ZERO
-		var dist_to_cam: float = pos.distance_to(cam_pos)
-		if dist_to_cam < 2200.0:
-			var atten: float = clampf(1.0 - (dist_to_cam - 300.0) / 1900.0, 0.0, 1.0)
-			trigger_shake(clampf(absf(power) * 0.0032 * atten, 0.5, 15.0))
+		grid_physics.apply_radial_impulse(pos, power, minf(radius, 340.0))
+	if absf(power) >= 2500.0 and dist_to_cam < 2000.0:
+		var atten: float = clampf(1.0 - (dist_to_cam - 300.0) / 1700.0, 0.0, 1.0)
+		trigger_shake(clampf(absf(power) * 0.0032 * atten, 0.5, 15.0))
 
 func _on_cosmic_rift_infall(rift_pos: Vector2, power: float, radius: float) -> void:
+	var cam_pos: Vector2 = player_core.global_position if player_core else Vector2.ZERO
+	if rift_pos.distance_to(cam_pos) > 1500.0:
+		return
 	if grid_physics:
-		grid_physics.apply_radial_impulse(rift_pos, -power, radius)
+		grid_physics.apply_radial_impulse(rift_pos, -power, minf(radius, 320.0))
 	var shake_val: float = clampf(power * 0.0035, 1.2, 11.0)
 	trigger_shake(shake_val)
 
 func _on_cosmic_rift_erupted(rift_pos: Vector2, power: float, radius: float) -> void:
+	var cam_pos: Vector2 = player_core.global_position if player_core else Vector2.ZERO
+	if rift_pos.distance_to(cam_pos) > 1500.0:
+		return
 	if grid_physics:
-		grid_physics.apply_radial_impulse(rift_pos, power, radius)
+		grid_physics.apply_radial_impulse(rift_pos, power, minf(radius, 360.0))
 	trigger_shake(12.0)
 
 func _process(delta: float) -> void:
@@ -177,58 +181,54 @@ func _process(delta: float) -> void:
 	position = Vector2.ZERO
 
 	var grid_dirty: bool = false
+	var view_center: Vector2 = player_camera.get_screen_center_position() if player_camera else (player_core.global_position if player_core else Vector2.ZERO)
 
-	# 0. Sinkronisasi jendela grid & posisi kamera untuk parallax bintang
-	if player_core:
-		if grid_physics.sync_window_to_center(player_core.global_position, half_grid_size):
-			grid_dirty = true
-		if grid_renderer.update_view(player_core.global_position, delta):
-			grid_dirty = true
+	# 0. Sinkronisasi jendela grid langsung ke pusat layar kamera (tidak pernah telat render!)
+	if grid_physics.sync_window_to_center(view_center, half_grid_size):
+		grid_dirty = true
+	if grid_renderer.update_view(view_center, delta):
+		grid_dirty = true
 
-	# 0.5. Sinkronisasi Sumur Gravitasi Bintang Mini & Aether Seed (Spacetime Infall) ke Grid & Parallax Starfield
+	# 0.5. Hanya tarik grid untuk SATU sumber gravitasi terdekat yang benar-benar ada di layar (<= 950 px)
+	#      Ini mencegah dua sumber gravitasi berjauhan membuat bounding box membengkak seukuran seluruh grid!
 	if asteroid_field:
 		var g_pos_raw = asteroid_field.get("GravityWellPositions")
 		var g_rad_raw = asteroid_field.get("GravityWellRadii")
-		var g_str_raw = asteroid_field.get("GravityWellStrengths")
-		var g_inf_raw = asteroid_field.get("GravityWellInfallRatios")
 		var g_pull_raw = asteroid_field.get("GravityWellPullAccels")
 		var g_swirl_raw = asteroid_field.get("GravityWellSwirlAccels")
 		var g_heat_raw = asteroid_field.get("GravityWellHeatRates")
 		
-		if g_pos_raw != null and g_rad_raw != null and g_str_raw != null and g_inf_raw != null:
+		if g_pos_raw != null and g_rad_raw != null and g_pull_raw != null and g_swirl_raw != null and g_heat_raw != null:
 			var g_positions: PackedVector2Array = g_pos_raw
 			var g_radii: PackedFloat32Array = g_rad_raw
-			var g_strengths: PackedFloat32Array = g_str_raw
-			var g_infalls: PackedFloat32Array = g_inf_raw
+			var g_pulls: PackedFloat32Array = g_pull_raw
+			var g_swirls: PackedFloat32Array = g_swirl_raw
+			var g_heats: PackedFloat32Array = g_heat_raw
+			var count: int = mini(g_positions.size(), mini(g_radii.size(), g_pulls.size()))
 			
-			if grid_renderer.update_gravity_sources(g_positions, g_radii, g_strengths, g_infalls):
-				grid_dirty = true
-				
-			if g_pull_raw != null and g_swirl_raw != null and g_heat_raw != null:
-				var g_pulls: PackedFloat32Array = g_pull_raw
-				var g_swirls: PackedFloat32Array = g_swirl_raw
-				var g_heats: PackedFloat32Array = g_heat_raw
-				var count: int = mini(g_positions.size(), mini(g_radii.size(), g_pulls.size()))
-				var cam_center: Vector2 = player_core.global_position if player_core else Vector2.ZERO
-				var max_active_dist_sq: float = 2800.0 * 2800.0
-				
-				for i in range(count):
-					var well_pos: Vector2 = g_positions[i]
-					if well_pos.distance_squared_to(cam_center) <= max_active_dist_sq:
-						grid_physics.apply_gravity_well_pull(
-							well_pos,
-							g_pulls[i],
-							minf(g_radii[i] * 0.88, 380.0),
-							g_swirls[i],
-							g_heats[i],
-							delta
-						)
+			var best_idx: int = -1
+			var best_dist_sq: float = 950.0 * 950.0
+			for i in range(count):
+				var d_sq: float = g_positions[i].distance_squared_to(view_center)
+				if d_sq < best_dist_sq:
+					best_dist_sq = d_sq
+					best_idx = i
+					
+			if best_idx >= 0:
+				grid_physics.apply_gravity_well_pull(
+					g_positions[best_idx],
+					g_pulls[best_idx],
+					minf(g_radii[best_idx] * 0.65, 220.0),
+					g_swirls[best_idx],
+					g_heats[best_idx],
+					delta
+				)
 
 	# 1. Gerakan Kapal Induk: Grid belakang bergetar tipis tepat di bawah Core
 	if player_core and "velocity" in player_core:
 		var p_vel: Vector2 = player_core.velocity
-		if p_vel.length_squared() > 9000.0:
-			grid_physics.apply_wake_impulse(player_core.global_position, p_vel * 0.12, player_wake_radius)
+		if p_vel.length_squared() > 14000.0:
+			grid_physics.apply_wake_impulse(player_core.global_position, p_vel * 0.10, player_wake_radius)
 			
 	# 2. Efek Riak Plasma Boost [SPACE] & Super Giga Drill [RMB]
 	if swarm_sim and swarm_sim.get("PlayerHealth") != null:
@@ -264,7 +264,7 @@ func _process(delta: float) -> void:
 				delta
 			)
 			
-	# 3. Step fisika hanya jika ada titik aktif, dan queue_redraw jika ada perubahan grid atau parallax bintang
+	# 3. Step fisika hanya jika ada titik aktif, dan queue_redraw jika ada perubahan grid atau bintang
 	if grid_physics.step(delta) or grid_dirty:
 		grid_renderer.queue_redraw()
 	
@@ -423,7 +423,7 @@ func _update_hud() -> void:
 	if is_infinite_res:
 		if fe_label: fe_label.text = "◆ Fe: ∞"
 		if qz_label: qz_label.text = "◆ Qz: ∞"
-		if cb_label: cb_label.text = "◆ Cb: ∞"
+		if cb_label: fe_label.text = "◆ Fe: ∞"; cb_label.text = "◆ Cb: ∞"
 		if vx_label: vx_label.text = "◆ Vx: ∞"
 		if ae_label: ae_label.text = "⚡ Ae: ∞"
 	else:
@@ -512,7 +512,7 @@ func _toggle_pause() -> void:
 	var is_open: bool = !pause_overlay.visible
 	pause_overlay.visible = is_open
 	if is_open:
-		Engine.time_scale = 0.10 # Slow-motion bullet time (10% speed)
+		Engine.time_scale = 0.10
 	else:
 		Engine.time_scale = 1.0
 
@@ -534,8 +534,8 @@ func _exit_tree() -> void:
 
 func _update_grid_size() -> void:
 	var grid_size: Vector2 = half_grid_size * 2.0
-	var p_pos: Vector2 = player_core.global_position if player_core else Vector2.ZERO
-	grid_physics.setup_grid(grid_size, 68.0, 68.0)
+	var p_pos: Vector2 = player_camera.get_screen_center_position() if player_camera else (player_core.global_position if player_core else Vector2.ZERO)
+	grid_physics.setup_grid(grid_size, 80.0, 80.0)
 	grid_physics.sync_window_to_center(p_pos, half_grid_size)
 	grid_renderer.queue_redraw()
 

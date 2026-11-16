@@ -1450,12 +1450,15 @@ public partial class Asteroid : RigidBody2D
             if (_externalTidalTimer > 0.0f)
             {
                 _externalTidalTimer -= dt;
-                needsRedraw = true;
             }
             else if (_externalTidalStrength > 0.001f)
             {
+                float prevTidal = _externalTidalStrength;
                 _externalTidalStrength = Mathf.MoveToward(_externalTidalStrength, 0.0f, dt * 0.75f);
-                needsRedraw = true;
+                if (MathF.Abs(_externalTidalStrength - prevTidal) > 0.012f || _externalTidalStrength <= 0.001f)
+                {
+                    needsRedraw = true;
+                }
             }
 
             if (_asteroidCollisionFxCooldown > 0.0f)
@@ -1645,8 +1648,16 @@ public partial class Asteroid : RigidBody2D
                     _energyStarMaterial.SetShaderParameter("hit_angle", _energyLaserHitAngle);
                     _energyStarMaterial.SetShaderParameter("hit_cavitation", _energyLaserCavitation);
 
-                    // MEDAN GRAVITASI MAUT SUPER-KUAT (Player Pull + Asteroid Spaghettification & Consumption)
-                    ExecuteAetherStarGravitationalField(dt, currentInstability, 1.0f);
+                    Vector2 pPosForStar = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
+                    float distSqToPlayer = GlobalPosition.DistanceSquaredTo(pPosForStar);
+                    bool nearPlayerScreen = distSqToPlayer <= (1850.0f * 1850.0f);
+
+                    // MEDAN GRAVITASI MAUT SUPER-KUAT:
+                    // Erosi voxel akresi hanya dijalankan jika Bintang Aether dekat layar pemain agar tidak memicu lag rebuild geometri di luar layar!
+                    if ( distSqToPlayer <= (2400.0f * 2400.0f) )
+                    {
+                        ExecuteAetherStarGravitationalField(dt, currentInstability, 1.0f, allowVoxelErosion: nearPlayerScreen);
+                    }
                 }
 
                 if (_crystalSpires.Length > 0)
@@ -1662,7 +1673,7 @@ public partial class Asteroid : RigidBody2D
 
                 Vector2 playerPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
                 float distSq = GlobalPosition.DistanceSquaredTo(playerPos);
-                float cullDist = OuterBoundRadius + 2200.0f;
+                float cullDist = OuterBoundRadius + 1650.0f;
 
                 if (distSq <= cullDist * cullDist)
                 {
@@ -4154,11 +4165,22 @@ public partial class Asteroid : RigidBody2D
     public void ApplyExternalTidalDistortion(Vector2 singularityWorldPos, float tidalStrength, float dt)
     {
         if (_isDestroyed || IsInSeedCycle) return;
+        Vector2 pPos = PlayerCore.Instance?.GlobalPosition ?? Vector2.Zero;
+        if (CachedPosition.DistanceSquaredTo(pPos) > (OuterBoundRadius + 1650.0f) * (OuterBoundRadius + 1650.0f))
+            return;
+
+        float prevStrength = _externalTidalStrength;
+        Vector2 prevTarget = _externalTidalTargetWorldPos;
         _externalTidalTargetWorldPos = singularityWorldPos;
-        _externalTidalTimer = 0.14f;
+        _externalTidalTimer = 0.18f;
         float clampedTarget = Mathf.Clamp(tidalStrength, 0.0f, 0.42f);
         _externalTidalStrength = MathF.Max(_externalTidalStrength, Mathf.MoveToward(_externalTidalStrength, clampedTarget, dt * 3.8f));
-        QueueRedraw();
+
+        // Hanya panggil QueueRedraw jika perubahan kekuatan pasang-surut signifikan (mencegah rebuild CanvasItem 60x/detik!)
+        if (MathF.Abs(_externalTidalStrength - prevStrength) > 0.015f || prevTarget.DistanceSquaredTo(singularityWorldPos) > 64.0f)
+        {
+            QueueRedraw();
+        }
     }
 
     /// <summary>

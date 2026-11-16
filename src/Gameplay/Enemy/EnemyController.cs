@@ -11,7 +11,8 @@ public enum EnemyState
     TravelingToStandoff,
     MiningResource,
     CollectingResources,
-    FleeingPod
+    FleeingPod,
+    Wandering
 }
 
 /// <summary>
@@ -97,10 +98,20 @@ public partial class EnemyController : Node
     private float _factoryTimer = 0.0f;
     private const float FactoryInterval = 1.0f;
 
+    // Mode Gerak Random / Wandering Target (Bukan Mining & Tidak Terlalu Jauh)
+    public bool IsWanderingMode { get; set; } = true;
+    public bool IsStationaryMode { get; set; } = true;
+    private Vector2 _wanderAnchorPos = Vector2.Zero;
+    private Vector2 _currentWanderTarget = Vector2.Zero;
+    private float _wanderTimer = 0.0f;
+    private const float WanderRadius = 320.0f;
+
     public void Initialize(SwarmSimulation simulation, EnemyCore core)
     {
         Simulation = simulation;
         Core = core;
+        _wanderAnchorPos = core.GlobalPosition;
+        _currentWanderTarget = core.GlobalPosition;
     }
 
     public void AddResource(int resourceIndex, int amount)
@@ -151,10 +162,26 @@ public partial class EnemyController : Node
             return;
         }
 
+        // Mode Uji Coba Diam (Stationary Mode): Musuh tetap diam di tempat tanpa bergerak/menambang
+        if (IsStationaryMode)
+        {
+            State = EnemyState.SearchingAsteroid;
+            Core.Velocity = Vector2.Zero;
+            DeactivateMiningLaser(dt);
+            return;
+        }
+
         _factoryTimer += dt;
         if (_postDestructionHarvestTimer > 0.0f)
         {
             _postDestructionHarvestTimer -= dt;
+        }
+
+        // Jika dalam mode Wandering, jalankan manuver gerak acak dan lewati penambangan / pabrik
+        if (IsWanderingMode)
+        {
+            UpdateBehavior(dt);
+            return;
         }
 
         // Siklus Perilaku Penambangan Terowongan & Pemungutan Resource
@@ -171,6 +198,43 @@ public partial class EnemyController : Node
     private void UpdateBehavior(float dt)
     {
         Vector2 corePos = Core.GlobalPosition;
+
+        // Mode Wandering: Lawan bergerak random (bukan mining) di area terbatas dekat titik spawn
+        if (IsWanderingMode)
+        {
+            State = EnemyState.Wandering;
+            DeactivateMiningLaser(dt);
+
+            // Geser jangkar secara halus jika pemain bergerak sangat jauh agar tetap dalam jangkauan uji coba
+            if (PlayerCore.Instance != null && IsInstanceValid(PlayerCore.Instance))
+            {
+                float distToPlayer = corePos.DistanceTo(PlayerCore.Instance.GlobalPosition);
+                if (distToPlayer > 850.0f)
+                {
+                    _wanderAnchorPos = _wanderAnchorPos.Lerp(PlayerCore.Instance.GlobalPosition, dt * 0.45f);
+                }
+            }
+
+            _wanderTimer -= dt;
+            if (_wanderTimer <= 0.0f || corePos.DistanceTo(_currentWanderTarget) < 45.0f)
+            {
+                _wanderTimer = (float)GD.RandRange(2.0f, 3.8f);
+                float ang = (float)GD.RandRange(0.0f, Mathf.Tau);
+                float dist = (float)GD.RandRange(60.0f, WanderRadius);
+                _currentWanderTarget = _wanderAnchorPos + new Vector2(MathF.Cos(ang), MathF.Sin(ang)) * dist;
+            }
+
+            // Kemudikan musuh secara mulus menuju target wander acak dengan penghindaran rintangan
+            SteerShipSmoothlyToward(_currentWanderTarget, dt, maxApproachSpeed: 210.0f, arrivalRadius: 40.0f);
+
+            // Rotasikan badan Core mengikuti arah gerak
+            if (Core.Velocity.LengthSquared() > 40.0f)
+            {
+                float targetRot = Core.Velocity.Angle();
+                Core.Rotation = Mathf.LerpAngle(Core.Rotation, targetRot, MathF.Min(1.0f, 5.0f * dt));
+            }
+            return;
+        }
 
         // Manuver Unstuck Aktif (Simulasi WASD mundur dan tembak laser perata titik jepit)
         if (_unstuckActiveTimer > 0.0f)

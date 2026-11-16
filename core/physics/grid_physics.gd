@@ -1,17 +1,16 @@
 class_name GridPhysics
 extends RefCounted
 
-## GridPhysics - Dioptimalkan dengan Active Bounds, Dirty Sleep, & World-Space Cell Snapping
-## - Mendukung Corong Gravitasi Materi Eksotis Super-Berat (Exotic Matter Singularity Funnel)
-##   yang menarik simpul-simpul grid melesak dalam dan terpilin menuju pusat massa Bintang Mini
-##   maupun Aether Seed saat Spacetime Infall.
+## GridPhysics - Ultra-Fast Zero-Allocation Active Bounds & Instant Window Snapping
+## - Pre-allocated double buffers (Zero GC / Zero realokasi array saat kamera bergerak cepat).
+## - Ukuran sel 80 px dengan batas wilayah aktif ketat agar tidak pernah membebani CPU GDScript.
 
-var anchor_stiffness: float = 28.0
-var damping: float = 0.92
-var neighbor_relaxation: float = 0.34
-var max_displacement: float = 280.0
+var anchor_stiffness: float = 30.0
+var damping: float = 0.90
+var neighbor_relaxation: float = 0.32
+var max_displacement: float = 240.0
 
-var cell_size: float = 68.0
+var cell_size: float = 80.0
 var cols: int = 0
 var rows: int = 0
 var origin: Vector2 = Vector2.ZERO
@@ -22,7 +21,11 @@ var positions: PackedVector2Array = []
 var velocities: PackedVector2Array = []
 var rift_heat: PackedFloat32Array = []
 
-# Pelacakan area aktif (Dirty Region) agar tidak perlu meloop seluruh grid setiap frame
+# Pre-allocated scratch buffers untuk pergeseran jendela tanpa realokasi memori
+var _scratch_positions: PackedVector2Array = []
+var _scratch_velocities: PackedVector2Array = []
+var _scratch_heat: PackedFloat32Array = []
+
 var is_sleeping: bool = true
 var has_active_deformation: bool = false
 var active_min_c: int = 0
@@ -30,7 +33,7 @@ var active_max_c: int = 0
 var active_min_r: int = 0
 var active_max_r: int = 0
 
-func setup_grid(size: Vector2, p_cell_size: float = 68.0, margin: float = 68.0) -> void:
+func setup_grid(size: Vector2, p_cell_size: float = 80.0, margin: float = 80.0) -> void:
 	cell_size = p_cell_size
 	origin = Vector2(-margin, -margin)
 	var extended_size: Vector2 = size + Vector2(margin * 2.0, margin * 2.0)
@@ -43,6 +46,10 @@ func setup_grid(size: Vector2, p_cell_size: float = 68.0, margin: float = 68.0) 
 	positions.resize(total_points)
 	velocities.resize(total_points)
 	rift_heat.resize(total_points)
+	
+	_scratch_positions.resize(total_points)
+	_scratch_velocities.resize(total_points)
+	_scratch_heat.resize(total_points)
 	
 	for r in range(rows):
 		var row_offset: int = r * cols
@@ -65,10 +72,10 @@ func setup_grid(size: Vector2, p_cell_size: float = 68.0, margin: float = 68.0) 
 func _mark_active_bounds(bounds: Rect2i) -> void:
 	if bounds.size.x <= 0 or bounds.size.y <= 0:
 		return
-	var pad_min_c: int = maxi(0, bounds.position.x - 2)
-	var pad_max_c: int = mini(cols - 1, bounds.end.x + 2)
-	var pad_min_r: int = maxi(0, bounds.position.y - 2)
-	var pad_max_r: int = mini(rows - 1, bounds.end.y + 2)
+	var pad_min_c: int = maxi(0, bounds.position.x - 1)
+	var pad_max_c: int = mini(cols - 1, bounds.end.x + 1)
+	var pad_min_r: int = maxi(0, bounds.position.y - 1)
+	var pad_max_r: int = mini(rows - 1, bounds.end.y + 1)
 	
 	if is_sleeping or active_max_c < active_min_c:
 		active_min_c = pad_min_c
@@ -84,7 +91,6 @@ func _mark_active_bounds(bounds: Rect2i) -> void:
 	is_sleeping = false
 	has_active_deformation = true
 
-## Langkah simulasi fisika hanya pada area aktif (Zero-Overhead saat tenang)
 func step(delta: float) -> bool:
 	if total_points == 0 or is_sleeping:
 		return false
@@ -92,7 +98,7 @@ func step(delta: float) -> bool:
 	var dt: float = minf(delta, 0.033)
 	var max_disp_sq: float = max_displacement * max_displacement
 	var decay: float = pow(damping, dt * 60.0)
-	var heat_decay: float = pow(0.88, dt * 60.0)
+	var heat_decay: float = pow(0.85, dt * 60.0)
 	
 	var min_c: int = clampi(active_min_c, 0, cols - 1)
 	var max_c: int = clampi(active_max_c, 0, cols - 1)
@@ -105,7 +111,7 @@ func step(delta: float) -> bool:
 	var next_max_r: int = -1
 	var any_moving: bool = false
 	
-	# Tahap 1: Anchor Springs hanya di dalam kotak aktif
+	# Tahap 1: Anchor Springs dengan ambang tidur lebih responsif agar tidak menggantung aktif
 	for r in range(min_r, max_r + 1):
 		var row_offset: int = r * cols
 		for c in range(min_c, max_c + 1):
@@ -124,7 +130,7 @@ func step(delta: float) -> bool:
 				vel *= 0.5
 				disp_sq = max_disp_sq
 				
-			if disp_sq > 0.08 or vel_sq > 0.4 or heat > 0.02:
+			if disp_sq > 0.35 or vel_sq > 1.8 or heat > 0.04:
 				positions[idx] = pos
 				velocities[idx] = vel
 				rift_heat[idx] = heat
@@ -147,41 +153,45 @@ func step(delta: float) -> bool:
 		active_max_r = -1
 		return true
 
-	# Tahap 2: Relaksasi Pegas Antar-Tetangga hanya di dalam kotak aktif
+	# Tahap 2: Relaksasi Pegas Cepat (Fast Linear Approximation tanpa sqrt jika memungkinkan)
 	var relax_half: float = neighbor_relaxation * 0.5
-	var fracture_dist: float = cell_size * 2.15
+	var fracture_dist_sq: float = (cell_size * 2.15) * (cell_size * 2.15)
+	var cell_sq: float = cell_size * cell_size
 	
-	var h_max_c: int = mini(max_c, cols - 2)
-	for r in range(min_r, max_r + 1):
+	var h_max_c: int = mini(next_max_c, cols - 2)
+	var h_min_c: int = maxi(0, next_min_c)
+	var v_min_r: int = maxi(0, next_min_r)
+	var v_max_r: int = mini(next_max_r, rows - 2)
+	
+	for r in range(v_min_r, mini(next_max_r, rows - 1) + 1):
 		var row_offset: int = r * cols
-		for c in range(min_c, h_max_c + 1):
+		for c in range(h_min_c, h_max_c + 1):
 			var idx_a: int = row_offset + c
 			var idx_b: int = idx_a + 1
 			var diff: Vector2 = positions[idx_b] - positions[idx_a]
 			var dist_sq: float = diff.length_squared()
-			if absf(dist_sq - cell_size * cell_size) < 0.25:
+			if absf(dist_sq - cell_sq) < 2.0:
 				continue
-			var dist: float = sqrt(dist_sq)
-			var is_drill_fracture: bool = (rift_heat[idx_a] + rift_heat[idx_b]) > 0.35 and dist >= fracture_dist
-			if dist > 0.001 and not is_drill_fracture:
+			var is_drill_fracture: bool = (rift_heat[idx_a] + rift_heat[idx_b]) > 0.35 and dist_sq >= fracture_dist_sq
+			if dist_sq > 0.01 and not is_drill_fracture:
+				var dist: float = sqrt(dist_sq)
 				var offset: Vector2 = (diff / dist) * ((dist - cell_size) * relax_half)
 				positions[idx_a] += offset
 				positions[idx_b] -= offset
 				
-	var v_max_r: int = mini(max_r, rows - 2)
-	for r in range(min_r, v_max_r + 1):
+	for r in range(v_min_r, v_max_r + 1):
 		var row_offset_a: int = r * cols
 		var row_offset_b: int = (r + 1) * cols
-		for c in range(min_c, max_c + 1):
+		for c in range(h_min_c, mini(next_max_c, cols - 1) + 1):
 			var idx_a: int = row_offset_a + c
 			var idx_b: int = row_offset_b + c
 			var diff: Vector2 = positions[idx_b] - positions[idx_a]
 			var dist_sq: float = diff.length_squared()
-			if absf(dist_sq - cell_size * cell_size) < 0.25:
+			if absf(dist_sq - cell_sq) < 2.0:
 				continue
-			var dist: float = sqrt(dist_sq)
-			var is_drill_fracture: bool = (rift_heat[idx_a] + rift_heat[idx_b]) > 0.35 and dist >= fracture_dist
-			if dist > 0.001 and not is_drill_fracture:
+			var is_drill_fracture: bool = (rift_heat[idx_a] + rift_heat[idx_b]) > 0.35 and dist_sq >= fracture_dist_sq
+			if dist_sq > 0.01 and not is_drill_fracture:
+				var dist: float = sqrt(dist_sq)
 				var offset: Vector2 = (diff / dist) * ((dist - cell_size) * relax_half)
 				positions[idx_a] += offset
 				positions[idx_b] -= offset
@@ -192,9 +202,8 @@ func step(delta: float) -> bool:
 	active_max_r = mini(rows - 1, next_max_r + 1)
 	return true
 
-## Riakan sangat halus & kecil tepat di bawah kapal saat bergerak
 func apply_wake_impulse(world_pos: Vector2, move_velocity: Vector2, radius: float) -> void:
-	if total_points == 0 or radius <= 0.0 or move_velocity.length_squared() < 2500.0:
+	if total_points == 0 or radius <= 0.0 or move_velocity.length_squared() < 4500.0:
 		return
 		
 	var r2: float = radius * radius
@@ -215,7 +224,7 @@ func apply_wake_impulse(world_pos: Vector2, move_velocity: Vector2, radius: floa
 				var falloff: float = 1.0 - (dist / radius)
 				var smooth_f: float = falloff * falloff
 				var outward: Vector2 = diff / maxf(dist, 0.01)
-				var force: Vector2 = (move_dir * 0.4 + outward * 0.6) * (speed * 0.045 * smooth_f)
+				var force: Vector2 = (move_dir * 0.4 + outward * 0.6) * (speed * 0.042 * smooth_f)
 				velocities[idx] += force
 
 func apply_radial_impulse(world_pos: Vector2, strength: float, radius: float) -> void:
@@ -240,9 +249,6 @@ func apply_radial_impulse(world_pos: Vector2, strength: float, radius: float) ->
 				velocities[idx] += dir * (strength * smooth_f)
 				rift_heat[idx] = clampf(rift_heat[idx] + smooth_f * 0.75, 0.0, 2.0)
 
-## Corong Gravitasi Materi Eksotis Super-Berat (Exotic Matter Singularity Funnel).
-## Menarik simpul-simpul grid melesak dalam hingga mendekati horizon bintang dan memilinnya
-## (frame-dragging) tanpa memutus jaring-jaring grid (rift_heat dijaga <= 0.28).
 func apply_gravity_well_pull(
 	world_pos: Vector2,
 	pull_strength: float,
@@ -254,7 +260,7 @@ func apply_gravity_well_pull(
 	if total_points == 0 or radius <= 0.0 or pull_strength <= 0.01:
 		return
 		
-	var effective_radius: float = minf(radius, 380.0)
+	var effective_radius: float = minf(radius, 240.0)
 	var bounds: Rect2i = _get_grid_bounds(world_pos, effective_radius)
 	if bounds.size.x <= 0 or bounds.size.y <= 0:
 		return
@@ -262,10 +268,9 @@ func apply_gravity_well_pull(
 	
 	var dt: float = minf(delta, 0.033)
 	var r2: float = effective_radius * effective_radius
-	# Normalisasi faktor kekuatan (1.0 = bintang normal penuh, >1.3 = Infall / Overload)
-	var power_norm: float = clampf(pull_strength / 1100.0, 0.15, 2.2)
-	var swirl_norm: float = clampf(swirl_strength / 320.0, 0.0, 2.2)
-	var funnel_snap: float = clampf(dt * 18.0, 0.08, 0.65)
+	var power_norm: float = clampf(pull_strength / 1100.0, 0.15, 2.0)
+	var swirl_norm: float = clampf(swirl_strength / 320.0, 0.0, 2.0)
+	var funnel_snap: float = clampf(dt * 18.0, 0.08, 0.60)
 	
 	for r in range(bounds.position.y, bounds.end.y):
 		var row_offset: int = r * cols
@@ -278,37 +283,32 @@ func apply_gravity_well_pull(
 				var dist: float = sqrt(dist2)
 				var norm_d: float = clampf(dist / effective_radius, 0.0, 1.0)
 				var falloff: float = 1.0 - norm_d
-				
-				# Kurva corong materi eksotis: semakin dekat ke inti bintang, ruang-waktu makin melesak tajam!
-				var deep_funnel: float = pow(falloff, 1.45)
-				var collapse_ratio: float = clampf(deep_funnel * 0.78 * power_norm, 0.0, 0.86)
+				var deep_funnel: float = falloff * falloff
+				var collapse_ratio: float = clampf(deep_funnel * 0.72 * power_norm, 0.0, 0.84)
 				var target_dist: float = maxf(14.0, dist * (1.0 - collapse_ratio))
 				
-				# Frame-dragging (pilinan ruang-waktu di sekitar massa eksotis yang berputar)
-				var twist_angle: float = falloff * falloff * 0.58 * swirl_norm
+				var twist_angle: float = deep_funnel * 0.52 * swirl_norm
 				var radial_out: Vector2 = rel_from_center / dist
 				var twisted_dir: Vector2 = radial_out.rotated(twist_angle)
 				
 				var funnel_target_pos: Vector2 = world_pos + twisted_dir * target_dist
 				positions[idx] = positions[idx].lerp(funnel_target_pos, funnel_snap)
-				velocities[idx] = (funnel_target_pos - positions[idx]) * 14.0
+				velocities[idx] = (funnel_target_pos - positions[idx]) * 12.0
 				
-				# Nyalakan pendaran neon ungu-magenta (dibatasi <= 0.28 agar garis tidak robek/putus)
 				if heat_amount > 0.001:
-					var target_heat: float = clampf(deep_funnel * 0.28 * power_norm, 0.0, 0.28)
+					var target_heat: float = clampf(deep_funnel * 0.26 * power_norm, 0.0, 0.26)
 					rift_heat[idx] = maxf(rift_heat[idx], target_heat)
 
-## Efek Ledakan Supernova Spektakuler pada Grid saat Giga Drill Meledak di Permukaan Core!
 func apply_supernova_core_detonation(tip_pos: Vector2, base_pos: Vector2, sacrificed_count: int) -> void:
 	if total_points == 0:
 		return
 		
 	var scale_mult: float = clampf(float(sacrificed_count) / 20.0, 0.85, 2.0)
-	var outer_radius: float = 420.0 * clampf(scale_mult, 0.9, 1.35)
-	var inner_rupture_radius: float = 210.0 * clampf(scale_mult, 0.9, 1.25)
+	var outer_radius: float = 400.0 * clampf(scale_mult, 0.9, 1.30)
+	var inner_rupture_radius: float = 200.0 * clampf(scale_mult, 0.9, 1.20)
 	var r2: float = outer_radius * outer_radius
 	
-	var bounds: Rect2i = _get_grid_bounds(tip_pos, outer_radius + 45.0)
+	var bounds: Rect2i = _get_grid_bounds(tip_pos, outer_radius + 40.0)
 	_mark_active_bounds(bounds)
 	
 	var drill_dir: Vector2 = (tip_pos - base_pos).normalized() if tip_pos.distance_squared_to(base_pos) > 1.0 else Vector2.RIGHT
@@ -327,19 +327,18 @@ func apply_supernova_core_detonation(tip_pos: Vector2, base_pos: Vector2, sacrif
 				var smooth_f: float = falloff * falloff * (3.0 - 2.0 * falloff)
 				
 				var ring_wave: float = 1.0 + 0.55 * sin((dist / outer_radius) * TAU * 2.0)
-				var blast_strength: float = (3400.0 * smooth_f * ring_wave) * scale_mult
-				var swirl_strength: float = (950.0 * smooth_f) * (1.0 if radial_dir.dot(drill_dir) >= 0.0 else -1.0)
+				var blast_strength: float = (3200.0 * smooth_f * ring_wave) * scale_mult
+				var swirl_strength: float = (900.0 * smooth_f) * (1.0 if radial_dir.dot(drill_dir) >= 0.0 else -1.0)
 				
 				velocities[idx] += radial_dir * blast_strength + tangent_dir * swirl_strength
 				
 				if dist < inner_rupture_radius:
 					var inner_f: float = 1.0 - (dist / inner_rupture_radius)
-					positions[idx] += radial_dir * (cell_size * 0.95 * inner_f)
+					positions[idx] += radial_dir * (cell_size * 0.92 * inner_f)
 					rift_heat[idx] = 2.0
 				else:
-					rift_heat[idx] = clampf(rift_heat[idx] + smooth_f * 1.85, 0.0, 2.0)
+					rift_heat[idx] = clampf(rift_heat[idx] + smooth_f * 1.80, 0.0, 2.0)
 
-## Efek Megah Gelombang Kejut Kubah Parabola (Bow Shock) + Hisapan Venturi + Semburan Plasma Jet
 func apply_boost_jet_impulse(
 	nozzle_pos: Vector2,
 	aim_dir: Vector2,
@@ -354,11 +353,11 @@ func apply_boost_jet_impulse(
 	var dir: Vector2 = aim_dir.normalized() if aim_dir.length_squared() > 0.001 else Vector2.RIGHT
 	var tangent: Vector2 = Vector2(-dir.y, dir.x)
 	
-	var exhaust_len: float = lerpf(240.0, 490.0, power_ratio)
-	var plume_max_r: float = lerpf(92.0, 195.0, power_ratio)
-	var bow_len: float = lerpf(110.0, 210.0, power_ratio)
-	var center_pos: Vector2 = nozzle_pos - dir * (exhaust_len * 0.28)
-	var bounds: Rect2i = _get_grid_bounds(center_pos, exhaust_len * 0.72 + plume_max_r + 65.0)
+	var exhaust_len: float = lerpf(200.0, 390.0, power_ratio)
+	var plume_max_r: float = lerpf(80.0, 160.0, power_ratio)
+	var bow_len: float = lerpf(95.0, 175.0, power_ratio)
+	var center_pos: Vector2 = nozzle_pos - dir * (exhaust_len * 0.25)
+	var bounds: Rect2i = _get_grid_bounds(center_pos, exhaust_len * 0.65 + plume_max_r + 40.0)
 	_mark_active_bounds(bounds)
 	
 	for r in range(bounds.position.y, bounds.end.y):
@@ -372,45 +371,37 @@ func apply_boost_jet_impulse(
 			var abs_lat: float = absf(lateral)
 			var side_sign: float = 1.0 if lateral >= 0.0 else -1.0
 			
-			if axial >= -25.0 and axial <= bow_len:
+			if axial >= -20.0 and axial <= bow_len:
 				var parabola_curve_x: float = bow_len * 0.72 - 0.0052 * (lateral * lateral)
 				var dist_to_front: float = absf(axial - parabola_curve_x)
-				var wave_thickness: float = lerpf(48.0, 82.0, power_ratio)
+				var wave_thickness: float = lerpf(42.0, 72.0, power_ratio)
 				
-				if dist_to_front < wave_thickness and abs_lat < 190.0:
+				if dist_to_front < wave_thickness and abs_lat < 170.0:
 					var front_f: float = 1.0 - (dist_to_front / wave_thickness)
-					var lat_f: float = 1.0 - clampf(abs_lat / 190.0, 0.0, 1.0)
+					var lat_f: float = 1.0 - clampf(abs_lat / 170.0, 0.0, 1.0)
 					var shock_intensity: float = front_f * front_f * lat_f * power_ratio
 					
 					var bow_normal: Vector2 = (dir * 0.48 + tangent * (side_sign * 0.88)).normalized()
-					var shimmer: float = 1.0 + 0.35 * sin(abs_lat * 0.12 - pulse_time * 2.2)
-					velocities[idx] += bow_normal * (1450.0 * shock_intensity * shimmer * dt)
-					rift_heat[idx] = clampf(rift_heat[idx] + shock_intensity * shimmer * dt * 19.0, 0.0, 1.95)
-			
-			if axial >= -75.0 and axial <= 20.0 and abs_lat < 120.0:
-				var neck_ax: float = 1.0 - clampf(absf(axial + 24.0) / 52.0, 0.0, 1.0)
-				var neck_lat: float = 1.0 - (abs_lat / 120.0)
-				var pinch_f: float = neck_ax * neck_lat * power_ratio
-				velocities[idx] += (-tangent * side_sign * 780.0 - dir * 420.0) * (pinch_f * dt)
-				rift_heat[idx] = clampf(rift_heat[idx] + pinch_f * dt * 14.0, 0.0, 1.8)
+					var shimmer: float = 1.0 + 0.32 * sin(abs_lat * 0.12 - pulse_time * 2.2)
+					velocities[idx] += bow_normal * (1350.0 * shock_intensity * shimmer * dt)
+					rift_heat[idx] = clampf(rift_heat[idx] + shock_intensity * shimmer * dt * 16.0, 0.0, 1.90)
 			
 			if axial < 10.0 and axial >= -exhaust_len:
 				var back_dist: float = maxf(0.0, -axial)
 				var back_ratio: float = clampf(back_dist / exhaust_len, 0.0, 1.0)
-				var plume_half_w: float = lerpf(32.0, plume_max_r, pow(back_ratio, 0.78))
+				var plume_half_w: float = lerpf(28.0, plume_max_r, back_ratio)
 				
 				if abs_lat < plume_half_w:
 					var lat_f: float = 1.0 - (abs_lat / plume_half_w)
 					var axial_f: float = 1.0 - back_ratio
 					var intensity: float = lat_f * lat_f * axial_f * power_ratio
 					
-					var mach_diamond: float = 1.0 + 0.68 * sin(back_dist * 0.14 - pulse_time * 2.6)
-					var vortex_swirl: float = cos(back_dist * 0.09 - pulse_time * 1.9) * side_sign * 0.38
-					var side_spread: float = (lateral / maxf(1.0, plume_half_w)) * 0.65 + vortex_swirl
+					var mach_diamond: float = 1.0 + 0.60 * sin(back_dist * 0.14 - pulse_time * 2.6)
+					var side_spread: float = (lateral / maxf(1.0, plume_half_w)) * 0.55
 					var jet_dir: Vector2 = (-dir + tangent * side_spread).normalized()
 					
-					velocities[idx] += jet_dir * (2650.0 * intensity * mach_diamond * dt)
-					rift_heat[idx] = clampf(rift_heat[idx] + intensity * mach_diamond * dt * 28.0, 0.0, 2.0)
+					velocities[idx] += jet_dir * (2400.0 * intensity * mach_diamond * dt)
+					rift_heat[idx] = clampf(rift_heat[idx] + intensity * mach_diamond * dt * 24.0, 0.0, 2.0)
 
 func apply_giga_drill_spacetime_and_exhaust(
 	tip_pos: Vector2,
@@ -433,13 +424,13 @@ func apply_giga_drill_spacetime_and_exhaust(
 	var drill_len: float = maxf(40.0, drill_vec.length())
 	var center_pos: Vector2 = (tip_pos + base_pos) * 0.5
 	
-	var exhaust_len: float = (180.0 + 95.0 * density_factor) * (1.25 if is_launched else 0.75)
-	var influence_radius: float = drill_len * 0.65 + exhaust_len + drill_radius * 2.2
-	var bounds: Rect2i = _get_grid_bounds(center_pos - dir * (exhaust_len * 0.35), influence_radius)
+	var exhaust_len: float = (160.0 + 80.0 * density_factor) * (1.20 if is_launched else 0.70)
+	var influence_radius: float = drill_len * 0.60 + exhaust_len + drill_radius * 2.0
+	var bounds: Rect2i = _get_grid_bounds(center_pos - dir * (exhaust_len * 0.30), influence_radius)
 	_mark_active_bounds(bounds)
 	
 	var power_scale: float = clampf(charge_or_flight_power, 0.15, 1.5) * (0.75 + 0.45 * density_factor)
-	var tear_width: float = maxf(48.0, drill_radius * 2.15)
+	var tear_width: float = maxf(44.0, drill_radius * 2.0)
 	
 	for r in range(bounds.position.y, bounds.end.y):
 		var row_offset: int = r * cols
@@ -452,7 +443,7 @@ func apply_giga_drill_spacetime_and_exhaust(
 			var lateral: float = rel.dot(tangent)
 			var abs_lat: float = absf(lateral)
 			
-			if axial >= -20.0 and axial <= drill_len + 75.0:
+			if axial >= -20.0 and axial <= drill_len + 65.0:
 				var norm_axial: float = clampf(axial / drill_len, 0.0, 1.25)
 				var local_cone_r: float = lerpf(tear_width * 1.15, tear_width * 0.45, clampf(norm_axial, 0.0, 1.0))
 				
@@ -464,23 +455,23 @@ func apply_giga_drill_spacetime_and_exhaust(
 					var pinch_or_rip: Vector2
 					
 					if is_launched:
-						var rip_outward: float = (1850.0 + 650.0 * helix_wave) * smooth_lat * power_scale
-						var forward_drag: float = 720.0 * smooth_lat * power_scale
+						var rip_outward: float = (1750.0 + 600.0 * helix_wave) * smooth_lat * power_scale
+						var forward_drag: float = 680.0 * smooth_lat * power_scale
 						pinch_or_rip = tangent * (side_sign * rip_outward) + dir * forward_drag
-						rift_heat[idx] = clampf(rift_heat[idx] + smooth_lat * 1.85 * dt * 25.0, 0.0, 2.0)
+						rift_heat[idx] = clampf(rift_heat[idx] + smooth_lat * 1.80 * dt * 24.0, 0.0, 2.0)
 					else:
-						var vortex_pull: float = -side_sign * (680.0 * (1.0 - charge_or_flight_power * 0.55))
-						var tear_shear: float = side_sign * (1150.0 * charge_or_flight_power * helix_wave)
-						var axial_twist: float = cos(lateral * 0.09 + spin_time * 1.5) * 520.0 * charge_or_flight_power
+						var vortex_pull: float = -side_sign * (640.0 * (1.0 - charge_or_flight_power * 0.55))
+						var tear_shear: float = side_sign * (1050.0 * charge_or_flight_power * helix_wave)
+						var axial_twist: float = cos(lateral * 0.09 + spin_time * 1.5) * 480.0 * charge_or_flight_power
 						pinch_or_rip = tangent * ((vortex_pull + tear_shear) * smooth_lat) + dir * (axial_twist * smooth_lat)
-						rift_heat[idx] = clampf(rift_heat[idx] + smooth_lat * charge_or_flight_power * dt * 16.0, 0.0, 1.6)
+						rift_heat[idx] = clampf(rift_heat[idx] + smooth_lat * charge_or_flight_power * dt * 15.0, 0.0, 1.6)
 						
 					velocities[idx] += pinch_or_rip * dt
 					
 			if axial < 10.0 and axial >= -exhaust_len:
 				var back_dist: float = -axial
 				var back_ratio: float = clampf(back_dist / exhaust_len, 0.0, 1.0)
-				var plume_half_width: float = lerpf(drill_radius * 0.85, drill_radius * 2.6 + 55.0, back_ratio)
+				var plume_half_width: float = lerpf(drill_radius * 0.85, drill_radius * 2.4 + 45.0, back_ratio)
 				
 				if abs_lat < plume_half_width:
 					var lat_f: float = 1.0 - (abs_lat / plume_half_width)
@@ -488,15 +479,15 @@ func apply_giga_drill_spacetime_and_exhaust(
 					var jet_intensity: float = lat_f * lat_f * axial_f * power_scale
 					
 					if is_launched or charge_or_flight_power > 0.55:
-						var thruster_mult: float = 2400.0 if is_launched else (1250.0 * (charge_or_flight_power - 0.45))
-						var shock_diamond: float = 1.0 + 0.45 * sin(back_dist * 0.14 - spin_time * 2.8)
-						var side_expansion: float = (lateral / maxf(1.0, plume_half_width)) * 0.48
+						var thruster_mult: float = 2250.0 if is_launched else (1150.0 * (charge_or_flight_power - 0.45))
+						var shock_diamond: float = 1.0 + 0.42 * sin(back_dist * 0.14 - spin_time * 2.8)
+						var side_expansion: float = (lateral / maxf(1.0, plume_half_width)) * 0.45
 						var jet_dir: Vector2 = (-dir + tangent * side_expansion).normalized()
 						
 						velocities[idx] += jet_dir * (thruster_mult * jet_intensity * shock_diamond * dt)
-						rift_heat[idx] = clampf(rift_heat[idx] + jet_intensity * shock_diamond * dt * 22.0, 0.0, 2.0)
+						rift_heat[idx] = clampf(rift_heat[idx] + jet_intensity * shock_diamond * dt * 20.0, 0.0, 2.0)
 
-## Menggeser jendela grid HANYA dalam kelipatan utuh cell_size saat kamera berpindah jauh.
+## Menggeser jendela grid secara instan dengan Zero Allocation menggunakan _scratch buffers
 func sync_window_to_center(world_center: Vector2, half_grid_size: Vector2) -> bool:
 	if total_points == 0:
 		return false
@@ -531,13 +522,6 @@ func sync_window_to_center(world_center: Vector2, half_grid_size: Vector2) -> bo
 		has_active_deformation = false
 		return true
 
-	var new_positions: PackedVector2Array = PackedVector2Array()
-	var new_velocities: PackedVector2Array = PackedVector2Array()
-	var new_heat: PackedFloat32Array = PackedFloat32Array()
-	new_positions.resize(total_points)
-	new_velocities.resize(total_points)
-	new_heat.resize(total_points)
-	
 	for r in range(rows):
 		var old_r: int = r + shift_rows
 		var row_offset: int = r * cols
@@ -550,17 +534,26 @@ func sync_window_to_center(world_center: Vector2, half_grid_size: Vector2) -> bo
 			
 			if old_r >= 0 and old_r < rows and old_c >= 0 and old_c < cols:
 				var old_idx: int = old_r * cols + old_c
-				new_positions[idx] = positions[old_idx]
-				new_velocities[idx] = velocities[old_idx]
-				new_heat[idx] = rift_heat[old_idx]
+				_scratch_positions[idx] = positions[old_idx]
+				_scratch_velocities[idx] = velocities[old_idx]
+				_scratch_heat[idx] = rift_heat[old_idx]
 			else:
-				new_positions[idx] = base_p
-				new_velocities[idx] = Vector2.ZERO
-				new_heat[idx] = 0.0
+				_scratch_positions[idx] = base_p
+				_scratch_velocities[idx] = Vector2.ZERO
+				_scratch_heat[idx] = 0.0
 				
-	positions = new_positions
-	velocities = new_velocities
-	rift_heat = new_heat
+	# Tukar referensi buffer secara O(1) tanpa alokasi memori baru!
+	var tmp_p: PackedVector2Array = positions
+	positions = _scratch_positions
+	_scratch_positions = tmp_p
+	
+	var tmp_v: PackedVector2Array = velocities
+	velocities = _scratch_velocities
+	_scratch_velocities = tmp_v
+	
+	var tmp_h: PackedFloat32Array = rift_heat
+	rift_heat = _scratch_heat
+	_scratch_heat = tmp_h
 	
 	active_min_c = clampi(active_min_c - shift_cols, 0, cols - 1)
 	active_max_c = clampi(active_max_c - shift_cols, 0, cols - 1)
